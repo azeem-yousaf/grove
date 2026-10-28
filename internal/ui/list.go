@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
-	"github.com/azeem/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/charmbracelet/x/ansi"
 )
 

@@ -10,8 +10,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/azeem/grove/internal/config"
-	"github.com/azeem/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/config"
+	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/charmbracelet/x/ansi"
 )
 

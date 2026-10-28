@@ -58,10 +58,18 @@ from.
 Requires git and [Go](https://go.dev/dl/). grove builds with Go 1.26; any Go
 from 1.21 on downloads that toolchain automatically.
 
-From this folder:
+```powershell
+go install github.com/azeem-yousaf/grove@latest
+```
+
+That puts `grove` in Go's bin folder (`%USERPROFILE%\go\bin` on Windows,
+`~/go/bin` elsewhere), which the Go installer adds to your PATH. Run the same
+command again to update.
+
+From a clone:
 
 ```powershell
-go install .              # puts grove.exe in %USERPROFILE%\go\bin
+go install .              # install your local build
 # or
 go build -o grove.exe .
 ```

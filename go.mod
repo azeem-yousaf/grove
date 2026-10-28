@@ -1,4 +1,4 @@
-module github.com/azeem/grove
+module github.com/azeem-yousaf/grove
 
 go 1.26.0
 

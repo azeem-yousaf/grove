@@ -11,9 +11,9 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"github.com/azeem/grove/internal/config"
-	"github.com/azeem/grove/internal/git"
-	"github.com/azeem/grove/internal/open"
+	"github.com/azeem-yousaf/grove/internal/config"
+	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/open"
 )
 
 type focusArea uint8

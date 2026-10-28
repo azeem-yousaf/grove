@@ -14,9 +14,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/azeem/grove/internal/config"
-	"github.com/azeem/grove/internal/git"
-	"github.com/azeem/grove/internal/ui"
+	"github.com/azeem-yousaf/grove/internal/config"
+	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/ui"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".

@@ -10,7 +10,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/azeem/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/charmbracelet/x/ansi"
 )
 
