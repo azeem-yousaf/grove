@@ -135,3 +135,39 @@ func TestMergeStopsOnConflict(t *testing.T) {
 		t.Error("merging a missing branch should fail")
 	}
 }
+
+func TestKeepCheckpoint(t *testing.T) {
+	main := mergeRepo(t)
+	ctx := context.Background()
+	tree, err := Checkpoint(ctx, main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := KeepCheckpoint(ctx, main, main, tree); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := exec.Command("git", "-C", main, "for-each-ref", "--format=%(objectname)", "refs/grove/checkpoints/"+PathKey(main)).Output()
+	if strings.TrimSpace(string(out)) != tree {
+		t.Errorf("ref points at %q, want %s", out, tree)
+	}
+	// gc keeps a referenced tree.
+	if out, err := exec.Command("git", "-C", main, "gc", "-q", "--prune=now").CombinedOutput(); err != nil {
+		t.Fatalf("gc: %v\n%s", err, out)
+	}
+	if !HasObject(ctx, main, tree) {
+		t.Error("gc deleted the kept checkpoint")
+	}
+	// Dropping works from the common dir too, as after a worktree is gone.
+	if err := DropCheckpoint(ctx, filepath.Join(main, ".git"), main); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := exec.Command("git", "-C", main, "for-each-ref", "refs/grove").Output(); len(out) != 0 {
+		t.Errorf("refs left: %s", out)
+	}
+	if HasObject(ctx, main, strings.Repeat("0", 40)) {
+		t.Error("HasObject found a missing object")
+	}
+	if PathKey(main) != PathKey(main+string(filepath.Separator)) || len(PathKey(main)) != 16 {
+		t.Errorf("PathKey isn't stable: %s", PathKey(main))
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/open"
+	"github.com/azeem-yousaf/grove/internal/store"
 )
 
 type focusArea uint8
@@ -104,6 +105,9 @@ type Model struct {
 	selectPath string    // worktree to select once the next scan shows it
 
 	sessions   map[string]*session // worktree agents by folder
+	store      *store.Store        // saved sessions and plans; nil without a git dir
+	savedJSON  map[string][]byte   // each session as last written, by folder
+	persistErr string              // the last save error shown
 	chatPath   string              // worktree whose agent the chat pane shows
 	chatInput  textarea.Model
 	chatView   viewport.Model
@@ -196,6 +200,7 @@ func New(ctx context.Context, o Options) *Model {
 		lastClickRow: -1,
 		gitCmd:       newGitPrompt(),
 		sessions:     map[string]*session{},
+		savedJSON:    map[string][]byte{},
 		chatInput:    newChatInput(),
 		chatView:     newChatView(),
 		installed:    agent.Installed,
@@ -204,6 +209,9 @@ func New(ctx context.Context, o Options) *Model {
 		stopAgent:    agents.Stop,
 		saveAgent:    defaultSaveAgent,
 		saveModel:    config.SaveModel,
+	}
+	if o.Repo.CommonDir != "" {
+		m.store = store.Open(o.Repo.CommonDir)
 	}
 	switch o.Config.Theme {
 	case "light":
@@ -225,7 +233,7 @@ func (m *Model) applyTheme() {
 
 // Init starts base detection, the clock and background colour detection.
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.detectBase(), clockTick(), m.startAnimating()}
+	cmds := []tea.Cmd{m.detectBase(), clockTick(), m.startAnimating(), m.loadSessions()}
 	if !m.themeForced {
 		cmds = append(cmds, tea.RequestBackgroundColor)
 	}
@@ -353,7 +361,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case clockMsg:
 		m.now = time.Time(msg)
-		cmds := []tea.Cmd{clockTick()}
+		cmds := []tea.Cmd{clockTick(), m.persistSessions()}
 		if m.baseReady && !m.scanning && m.now.Sub(m.lastScan) >= m.refreshInterval() {
 			cmds = append(cmds, m.startScan())
 		}
@@ -403,6 +411,12 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case agentMsg:
 		return m.onAgent(msg)
+
+	case sessionsLoadedMsg:
+		return m.onSessionsLoaded(msg)
+
+	case persistMsg:
+		return m.onPersisted(msg)
 
 	case agentSavedMsg:
 		if msg.err != nil {

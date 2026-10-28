@@ -171,6 +171,11 @@ config).
   starts a new line. `ctrl+y` copies the agent's last reply as it wrote it,
   and dragging over the conversation copies those lines as plain text.
 - `ctrl+x` stops a working agent. Quitting while agents work asks first.
+- **Conversations are kept.** Each agent's conversation, the commands you
+  allowed and its undo checkpoint are saved in the repository's `.git/grove`
+  folder (never committed) and come back when you reopen grove; Claude
+  resumes the same session. A turn cut short by closing grove is marked as
+  such. Removing a worktree deletes its saved conversation.
 - Creating a worktree with `n` has a **Task** field: fill it in and the new
   worktree starts with its agent already at work (after the setup command,
   if there is one).

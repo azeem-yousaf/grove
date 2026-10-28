@@ -129,6 +129,7 @@ func (m *Model) onRemoved(msg removeMsg) tea.Cmd {
 		m.hereIdx = -1
 	}
 	delete(m.collapsed, msg.r.st.Path)
+	forget := m.forgetSession(msg.r.st.Path)
 
 	var note toast
 	switch {
@@ -143,7 +144,7 @@ func (m *Model) onRemoved(msg removeMsg) tea.Cmd {
 	default:
 		note = toast{"Removed " + name, toastOK, 0}
 	}
-	return tea.Batch(m.notify(note.text, note.kind), m.startScan())
+	return tea.Batch(m.notify(note.text, note.kind), m.startScan(), forget)
 }
 
 // removeModal is the confirmation dialog.

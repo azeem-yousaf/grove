@@ -548,6 +548,11 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 		defer close(ch)
 		if needCheckpoint {
 			tree, err := git.Checkpoint(ctx, path)
+			if err == nil {
+				// Pinned so gc keeps it for undo after grove restarts. Undo
+				// still works this session if pinning fails.
+				_ = git.KeepCheckpoint(ctx, path, path, tree)
+			}
 			ch <- agentMsg{path: path, checkpoint: tree, err: err}
 		}
 		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, ev: ev} })
@@ -845,12 +850,14 @@ func (m *Model) quit() tea.Cmd {
 		m.quitAsk = true
 		return nil
 	}
+	m.persistNow()
 	return tea.Quit
 }
 
 // quitNow stops every agent and quits, giving the agent processes a moment
 // to be killed before grove exits.
 func (m *Model) quitNow() tea.Cmd {
+	m.persistNow() // a working agent is saved as interrupted
 	running := false
 	for _, s := range m.sessions {
 		if s.running && s.cancel != nil {

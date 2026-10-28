@@ -56,6 +56,13 @@ Opt-in tests, skipped unless their environment variable is set:
 - `git.Checkpoint` writes the worktree into a tree object through a temporary `GIT_INDEX_FILE`, with `--attr-source=<empty tree>` and `core.autocrlf=false` so blobs are exact bytes. `RestoreCheckpoint` writes blobs back with `cat-file`, not `git restore`, which would re-apply CRLF conversion.
 - Tests replace `m.installed`, `m.runAgent`, `m.warmAgent`, `m.stopAgent` and `m.saveAgent` (see `noAgents` and `fakeAgent`). In `internal/agent`, the test binary doubles as a fake Claude that speaks the stream-json protocol (`fakeClaude`); a fake that reads stdin to EOF before answering hangs, because the kept process's stdin stays open. `noAgents` also clears `m.opener.Editor`; otherwise tests that run the create flow launch VS Code for real. `pump` in `agent_test.go` runs commands concurrently and feeds agent and undo messages back into the model.
 
+### internal/store and internal/plan
+
+- `store.Store` keeps grove's own state as JSON under `<CommonDir>/grove` (shared by every worktree, never committed). `Save`/`Write` replace files atomically (temp file + rename). `Model.store` is nil when the repo has no common dir, which is the case in `fakeModel` tests, so those never touch disk.
+- Agent sessions are saved per worktree as `sessions/<git.PathKey(path)>.json` (`persist.go`). The clock calls `persistSessions` every second, which writes only sessions whose JSON changed since `savedJSON`; `quit`/`quitNow` call `persistNow`. `loadSessions` runs from `Init`, drops sessions whose folder is gone, and clears checkpoints git no longer has. A session saved while running is restored with a "cut short" note. Removing a worktree calls `forgetSession`.
+- Checkpoints are pinned with `refs/grove/checkpoints/<PathKey>` (`git.KeepCheckpoint`) so `git gc` can't delete them before undo; `DropCheckpoint` removes the ref.
+- `plan.Plan` is the planner's output: tasks (branch, brief, optional group) and groups. The planner writes a ```` ```grove-plan ```` JSON block that `plan.FromReply` turns into a draft; `Tidy` ungroups groups of one; `Validate` lists problems to fix before starting. Plans are saved as `plans/<id>.json`.
+
 ### internal/open and internal/config
 
 - `open` picks per-OS implementations through `open_windows.go` / `open_darwin.go` / `open_other.go`: `ShellExecute` on Windows (falling back to the "Open with" dialog when no program is associated), `open` on macOS, `xdg-open` elsewhere. On Windows, `.ts`/`.mts`/`.cts` go to the editor instead of the system default, because Windows often maps `.ts` to video.
