@@ -91,6 +91,8 @@ func (m *Model) render() string {
 		return m.overlay(screen, m.pickerModal())
 	case m.undo != nil:
 		return m.overlay(screen, m.undoModal())
+	case m.conflicts != nil:
+		return m.overlay(screen, m.conflictModal())
 	case m.showHelp:
 		return m.overlay(screen, m.helpModal())
 	}
@@ -185,6 +187,8 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"enter", "create"}, {"tab", "next field"}, {"esc", "cancel"}}
 	case m.picker != nil, m.undo != nil, m.quitAsk:
 		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
+	case m.conflicts != nil:
+		pairs = [][2]string{{"m", "apply merges"}, {"esc", "cancel"}}
 	case m.focus == focusChat:
 		pairs = [][2]string{{"enter", "send"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
 	case m.showHelp:
@@ -192,9 +196,9 @@ func (m *Model) footer() string {
 	case m.focus == focusDiff:
 		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", "hunk"}, {"[ ]", "file"}, {"enter", "open"}, {"tab", "list"}, {"?", "help"}}
 	case ok && r.kind == rowFile:
-		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "open"}, {"c", "review merges"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	default:
-		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {":", "git"}, {"n", "new"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {"c", "review merges"}, {":", "git"}, {"n", "new"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	}
 
 	right := ""
