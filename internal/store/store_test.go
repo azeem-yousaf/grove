@@ -50,7 +50,7 @@ func TestStore(t *testing.T) {
 		t.Errorf("removing twice: %v", err)
 	}
 
-	for _, bad := range []string{"", "../x.json", "/etc/x.json", "sessions/../../x.json"} {
+	for _, bad := range []string{"", "../x.json", "/etc/x.json", `\\etc\\x.json`, "C:/x.json", "sessions/../../x.json"} {
 		if err := s.Save(bad, thing{}); err == nil {
 			t.Errorf("Save(%q) should be refused", bad)
 		}

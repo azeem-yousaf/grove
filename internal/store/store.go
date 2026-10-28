@@ -30,7 +30,10 @@ func (s *Store) Dir() string { return s.dir }
 // path, refusing names that would leave the store.
 func (s *Store) path(name string) (string, error) {
 	clean := filepath.Clean(filepath.FromSlash(name))
-	if name == "" || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	// Rooted names count as absolute everywhere: on Windows /x has no drive
+	// but would still leave the store, and C:x is relative to C:'s folder.
+	rooted := strings.HasPrefix(name, "/") || strings.HasPrefix(name, `\`) || strings.Contains(name, ":")
+	if name == "" || rooted || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", errors.New("store: bad name " + name)
 	}
 	return filepath.Join(s.dir, clean), nil

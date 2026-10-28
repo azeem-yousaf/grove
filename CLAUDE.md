@@ -72,6 +72,8 @@ Opt-in tests, skipped unless their environment variable is set:
 
 ## Tests
 
+- CI (`.github/workflows/ci.yml`) runs build, vet and `go test ./... -count=1` on Windows, Linux and macOS for every push to master and every pull request into it, plus a gofmt check on Linux. Keep tests passing on Windows: paths, line endings and what counts as an absolute path differ there.
+
 - UI tests drive the model directly with no terminal: `fakeModel` builds a hand-made `Snapshot`, `press()` sends keys, and `plain()` renders with ANSI stripped. `TestRenderFitsScreen` checks every screen at several sizes; add new overlays or screens to it.
 - Git tests build real temporary repositories (`testRepo`: main plus `feature/a` and `feature/b` worktrees that both touch `shared.txt`) and skip if git is missing.
 
