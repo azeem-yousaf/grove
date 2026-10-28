@@ -61,6 +61,11 @@ go install .              # install your local build
 go build -o grove.exe .
 ```
 
+The version you are running is shown next to the logo in grove's header,
+and by `grove --version`: a release number for a tagged install, or
+`dev-<commit>` for a build from a clone (`-dirty` when it had uncommitted
+changes).
+
 ## Use
 
 Run it anywhere inside a repository:

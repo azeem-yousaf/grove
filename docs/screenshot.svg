@@ -7,10 +7,11 @@
 <rect x="26.4" y="52.0" width="59.1" height="18.3" fill="#5EEAD4"/>
 <rect x="589.2" y="52.0" width="109.5" height="18.3" fill="#FBBF24"/>
 <text x="34.8 43.2 51.6 60.0 68.4" y="65.1" fill="#141821" font-weight="700">grove</text>
-<text x="93.6 102.0 110.4 118.8" y="65.1" fill="#E6E9EF" font-weight="700">shop</text>
-<text x="144.0" y="65.1" fill="#4B5263">·</text>
-<text x="169.2 177.6 186.0 194.4 202.8 211.2 219.6 236.4 244.8 253.2 261.6 270.0" y="65.1" fill="#8B93A7">changessince</text>
-<text x="286.8 295.2 303.6 312.0" y="65.1" fill="#E6E9EF">main</text>
+<text x="93.6 102.0 110.4 118.8 127.2" y="65.1" fill="#4B5263">0.1.0</text>
+<text x="152.4 160.8 169.2 177.6" y="65.1" fill="#E6E9EF" font-weight="700">shop</text>
+<text x="202.8" y="65.1" fill="#4B5263">·</text>
+<text x="228.0 236.4 244.8 253.2 261.6 270.0 278.4 295.2 303.6 312.0 320.4 328.8" y="65.1" fill="#8B93A7">changessince</text>
+<text x="345.6 354.0 362.4 370.8" y="65.1" fill="#E6E9EF">main</text>
 <text x="597.6 597.6 614.4 631.2 639.6 648.0 656.4 664.8 673.2 681.6" y="65.1" fill="#141821" font-weight="700">⚠︎1overlap</text>
 <text x="715.2" y="65.1" fill="#4B5263">·</text>
 <text x="740.4 757.2 765.6 774.0 782.4 790.8 799.2 807.6 816.0 824.4" y="65.1" fill="#8B93A7">3worktrees</text>

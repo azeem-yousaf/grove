@@ -131,7 +131,7 @@ func (m *Model) overlay(screen, box string) string {
 func (m *Model) header() string {
 	st := m.st
 	logo := st.pillAccent.Render("grove")
-	left := " " + logo + " " + st.bold.Render(m.repo.Name)
+	left := " " + logo + " " + st.faint.Render(m.version) + "  " + st.bold.Render(m.repo.Name)
 
 	mode := st.muted.Render("changes since ") + st.text.Render(m.baseLabel())
 	if m.mode == git.ModeUncommitted {

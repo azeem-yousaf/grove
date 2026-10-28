@@ -10,6 +10,8 @@ import (
 	"io/fs"
 	"os"
 	"os/signal"
+	"regexp"
+	"runtime/debug"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -21,7 +23,53 @@ import (
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
+// Without it, buildVersion works one out from what Go recorded.
 var version = "dev"
+
+// pseudo matches a Go pseudo-version's commit and any +dirty.
+var pseudo = regexp.MustCompile(`-\d{14}-([0-9a-f]{12})(\+dirty)?$`)
+
+// buildVersion is the version to show: the -ldflags one, else the module
+// version `go install ...@v1.2.3` records, else "dev-" and the commit the
+// binary was built from, with "-dirty" for uncommitted changes.
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		info = nil
+	}
+	return versionFrom(version, info)
+}
+
+func versionFrom(version string, info *debug.BuildInfo) string {
+	if version != "dev" || info == nil {
+		return version
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		// Go stamps untagged builds with a pseudo-version such as
+		// v0.0.0-20261028215517-88b5d3f669ab+dirty; show its commit.
+		if p := pseudo.FindStringSubmatch(v); p != nil {
+			return "dev-" + p[1][:7] + strings.ReplaceAll(p[2], "+", "-")
+		}
+		return strings.TrimPrefix(v, "v")
+	}
+	rev, dirty := "", false
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return version
+	}
+	v := "dev-" + rev[:min(7, len(rev))]
+	if dirty {
+		v += "-dirty"
+	}
+	return v
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -31,6 +79,7 @@ func main() {
 }
 
 func run() error {
+	version = buildVersion()
 	if len(os.Args) > 1 && os.Args[1] == "mcp-group" {
 		return mcpGroup(os.Args[2:])
 	}

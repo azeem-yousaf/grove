@@ -16,7 +16,7 @@ go test ./internal/ui -run TestRemoveDialog -count=1    # single test
 grove <repo> --plain                         # text summary; quickest end-to-end check of the git layer
 ```
 
-go.mod requires Go 1.26; an older installed Go downloads that toolchain automatically. `main.version` is only set through `-ldflags`, so a plain `go install` reports `dev`.
+go.mod requires Go 1.26; an older installed Go downloads that toolchain automatically. The version shows in the header and `grove --version`. `-ldflags "-X main.version=…"` sets it; otherwise `buildVersion` uses Go's build info: the module version for `go install …@vX.Y.Z`, or `dev-<commit>` (with `-dirty` for uncommitted changes) for local builds.
 
 Opt-in tests, skipped unless their environment variable is set:
 - `GROVE_DEMO=<repo> GROVE_DUMP=<dir> go test ./internal/ui -run Dump` renders a real repository to `.txt`/`.ans` screen dumps for visual checks.

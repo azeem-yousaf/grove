@@ -235,7 +235,7 @@ func TestStartsOnCurrentWorktreeAndShowsOverlap(t *testing.T) {
 		t.Fatalf("selection should start on the worktree grove runs in, got %+v", r)
 	}
 	out := plain(m)
-	for _, want := range []string{"feature/auth", "feature/cart", "◆ here", "⚠ 1 overlap", "↑4", "↓1", "src/api/client.ts"} {
+	for _, want := range []string{"feature/auth", "feature/cart", "◆ here", "⚠ 1 overlap", "↑4", "↓1", "src/api/client.ts", "grove  test  shop"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("screen is missing %q", want)
 		}
