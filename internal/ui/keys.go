@@ -73,6 +73,7 @@ var helpSections = []helpSection{
 	{"View", [][2]string{
 		{"m", "branch / uncommitted"},
 		{"o", "overlaps only"},
+		{"c", "review worktree merges"},
 		{"/", "filter files"},
 		{"r", "refresh now"},
 		{"q", "quit"},

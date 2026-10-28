@@ -110,6 +110,7 @@ type Model struct {
 	picker     *picker
 	undo       *undoAsk
 	quitAsk    bool
+	conflicts  *conflictReview
 
 	// Hooks for the agent, replaced in tests.
 	installed func() []agent.Kind
@@ -153,6 +154,10 @@ type (
 	clockMsg        time.Time
 	frameMsg        struct{}
 	actionMsg       struct {
+		text string
+		err  error
+	}
+	mergeDoneMsg struct {
 		text string
 		err  error
 	}
@@ -336,6 +341,13 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case scanMsg:
 		return m.onScan(msg)
 
+	case conflictCheckMsg:
+		if m.conflicts != nil && m.conflicts.target == msg.target {
+			m.conflicts.checks = msg.checks
+			m.conflicts.busy = false
+		}
+		return nil
+
 	case clockMsg:
 		m.now = time.Time(msg)
 		cmds := []tea.Cmd{clockTick()}
@@ -408,6 +420,29 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 			return m.notify(msg.err.Error(), toastErr)
 		}
 		return m.notify(msg.text, toastOK)
+
+	case mergeDoneMsg:
+		if m.conflicts == nil || !m.conflicts.busy {
+			return nil
+		}
+		targetPath := m.snap.States[m.conflicts.target].Path
+		m.conflicts.busy = false
+		if msg.err == nil {
+			m.conflicts = nil
+			return tea.Batch(m.notify(msg.text, toastOK), m.startScan())
+		}
+		if strings.Contains(msg.text, "Merge stopped at") {
+			m.conflicts = nil
+			m.lastSel = targetPath
+			m.rebuildRows()
+			i := m.snap.IndexOf(targetPath)
+			if i < 0 {
+				return m.notify(msg.text+": "+msg.err.Error(), toastErr)
+			}
+			st := m.snap.States[i]
+			return tea.Batch(m.notify("Merge conflict in "+st.Name()+"; asking its agent to resolve it", toastInfo), m.openConflictAgent(st))
+		}
+		return tea.Batch(m.notify(msg.text+": "+msg.err.Error(), toastErr), m.startScan())
 
 	case toastClearMsg:
 		if msg.id == m.toast.id {
@@ -598,6 +633,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch {
 	case m.quitAsk:
 		return m.onQuitKey(msg)
+	case m.conflicts != nil:
+		return m.conflictKey(msg)
 	case m.confirm != nil:
 		return m.onConfirmKey(msg)
 	case m.creating != nil:
@@ -652,6 +689,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch {
 	case msg.String() == "ctrl+c":
 		return m.quitNow()
+	case msg.String() == "c":
+		return m.openConflictReview()
 	case key.Matches(msg, k.Quit):
 		return m.quit()
 	case key.Matches(msg, k.Help):
