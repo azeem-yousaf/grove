@@ -76,6 +76,7 @@ const (
 type pendingAction struct {
 	kind pendingKind
 	text string
+	tool string // the shell tool an approval is for: "Bash" or "PowerShell"
 }
 
 type (
@@ -429,7 +430,7 @@ func (m *Model) onPendingKey(s *session, key string) tea.Cmd {
 		return next()
 	case "enter", "y":
 		if a.kind == pendingApproval {
-			s.allow = append(s.allow, agent.ClaudeRule(a.text))
+			s.allow = append(s.allow, agent.ClaudeRule(a.tool, a.text))
 			s.approved = append(s.approved, a.text)
 			s.entries = append(s.entries, chatEntry{roleNote, "Allowed: " + a.text})
 			return next()
@@ -618,7 +619,7 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	for _, d := range ev.Denied {
 		if d.Tool == "Bash" || d.Tool == "PowerShell" {
 			if d.Detail != "" {
-				s.pending = append(s.pending, pendingAction{pendingApproval, d.Detail})
+				s.pending = append(s.pending, pendingAction{kind: pendingApproval, text: d.Detail, tool: d.Tool})
 			}
 			continue
 		}
@@ -631,7 +632,7 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 		s.entries = append(s.entries, chatEntry{roleNote, fmt.Sprintf("Blocked %s %s: outside this worktree", d.Tool, what)})
 	}
 	for _, c := range suggestedCommands(reply) {
-		s.pending = append(s.pending, pendingAction{pendingCommand, c})
+		s.pending = append(s.pending, pendingAction{kind: pendingCommand, text: c})
 	}
 
 	viewing := m.focus == focusChat && m.chatSession() == s

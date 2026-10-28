@@ -132,7 +132,7 @@ func TestRenderFitsScreen(t *testing.T) {
 					{roleAgent, "Done.\n\n```grove-run\ngit commit -m \"" + strings.Repeat("long message ", 12) + "\"\n```"},
 					{roleTool, "Edit " + strings.Repeat("deep/", 30) + "file.ts"},
 				}
-				s.pending = []pendingAction{{pendingApproval, strings.Repeat("npm run test -- --long-flag ", 6)}}
+				s.pending = []pendingAction{{kind: pendingApproval, text: strings.Repeat("npm run test -- --long-flag ", 6), tool: "Bash"}}
 			case "model":
 				s := m.chatSession()
 				s.pending = nil

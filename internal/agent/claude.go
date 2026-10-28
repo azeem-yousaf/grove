@@ -19,6 +19,9 @@ import (
 // change the repository.
 var readOnlyGit = []string{"status", "diff", "log", "show", "blame"}
 
+// shells are Claude Code's command tools; on Windows it uses PowerShell.
+var shells = []string{"Bash", "PowerShell"}
+
 // claudeArgs starts `claude -p` taking one JSON message per turn on stdin.
 // File edits inside the working folder are accepted automatically
 // (acceptEdits); anything else that needs permission, such as a shell
@@ -41,8 +44,10 @@ func claudeArgs(req Request) []string {
 	}
 	// --allowedTools takes several values, so it goes last.
 	args = append(args, "--allowedTools")
-	for _, c := range readOnlyGit {
-		args = append(args, "Bash(git "+c+")", "Bash(git "+c+" *)")
+	for _, shell := range shells {
+		for _, c := range readOnlyGit {
+			args = append(args, ClaudeRule(shell, "git "+c), ClaudeRule(shell, "git "+c+" *"))
+		}
 	}
 	return append(args, req.Allow...)
 }
@@ -234,8 +239,9 @@ func (p *claudeProc) turn(ctx context.Context, req Request, emit func(Event)) Ev
 	}
 }
 
-// ClaudeRule is the permission rule that lets Claude run exactly command.
-func ClaudeRule(command string) string { return "Bash(" + command + ")" }
+// ClaudeRule is the permission rule that lets Claude run exactly command
+// with shell, the tool it asked for: "Bash", or "PowerShell" on Windows.
+func ClaudeRule(shell, command string) string { return shell + "(" + command + ")" }
 
 type claudeParser struct {
 	session string

@@ -176,10 +176,10 @@ func TestCodexParser(t *testing.T) {
 }
 
 func TestArgs(t *testing.T) {
-	req := Request{Message: "fix it", Context: "CTX", Session: "s1", Allow: []string{ClaudeRule("npm test")}, Model: "sonnet"}
+	req := Request{Message: "fix it", Context: "CTX", Session: "s1", Allow: []string{ClaudeRule("Bash", "npm test")}, Model: "sonnet"}
 	args := claudeArgs(req)
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"--input-format stream-json", "--output-format stream-json", "--verbose", "--permission-mode acceptEdits", "--resume s1", "--model sonnet", "Bash(git diff *)", "Bash(npm test)"} {
+	for _, want := range []string{"--input-format stream-json", "--output-format stream-json", "--verbose", "--permission-mode acceptEdits", "--resume s1", "--model sonnet", "Bash(git diff *)", "PowerShell(git status)", "PowerShell(git log *)", "Bash(npm test)"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("claude args missing %q: %s", want, joined)
 		}
@@ -268,7 +268,7 @@ func TestClaudeKeepsItsProcess(t *testing.T) {
 
 	// A newly approved command needs a process that allows it; it picks up
 	// the conversation.
-	req.Message, req.Allow = "go on", []string{ClaudeRule("npm test")}
+	req.Message, req.Allow = "go on", []string{ClaudeRule("Bash", "npm test")}
 	turn(t, r, ctx, req)
 	rec = record(t)
 	last := rec[strings.LastIndex(rec, "start "):]

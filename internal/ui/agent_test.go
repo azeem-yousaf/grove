@@ -208,7 +208,7 @@ func TestAgentConversation(t *testing.T) {
 	}
 	found := false
 	for _, r := range req.Allow {
-		found = found || r == agent.ClaudeRule("npm test")
+		found = found || r == agent.ClaudeRule("Bash", "npm test")
 	}
 	if !found {
 		t.Errorf("follow-up should allow npm test: %v", req.Allow)
@@ -227,6 +227,31 @@ func TestAgentConversation(t *testing.T) {
 	}
 	if !strings.Contains(plain(m), "Tests pass.") {
 		t.Error("second reply missing")
+	}
+}
+
+// On Windows Claude runs commands with its PowerShell tool, so approving
+// one must allow it for PowerShell, not Bash.
+func TestAgentApprovesPowerShell(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude} }
+	fa := &fakeAgent{turns: [][]agent.Event{
+		{{Kind: agent.EvDone, Session: "s1", Denied: []agent.Denial{{Tool: "PowerShell", Detail: "go env GOVERSION"}}}},
+		{{Kind: agent.EvText, Text: "go1.26.0"}},
+	}}
+	m.runAgent = fa.run
+	press(m, "a")
+	m.chatSession().checkpoint = "tree"
+	typeText(m, "which go?")
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	pump(t, m, cmd)
+	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}) // allow
+	pump(t, m, cmd)
+	if len(fa.reqs) != 2 {
+		t.Fatalf("allowing should continue the agent; requests = %d", len(fa.reqs))
+	}
+	if allow := fa.reqs[1].Allow; len(allow) != 1 || allow[0] != "PowerShell(go env GOVERSION)" {
+		t.Errorf("allow = %v, want the PowerShell rule", allow)
 	}
 }
 
