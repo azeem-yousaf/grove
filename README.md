@@ -19,6 +19,10 @@ from.
 - **Overlap warnings**: files changed in more than one worktree are flagged
   with `⚠`, counted in the header, and listed in each worktree's summary.
   Press `o` to show only those files.
+- **Review merges**: press `c` on a worktree to preview merging the other
+  active branches into it. The preview leaves files untouched; `m` applies the
+  merges in order. The target and source worktrees must have no uncommitted
+  changes.
 - **Two modes** (toggle with `m`):
   - *branch*: everything a worktree changed since it left the base branch,
     committed or not. A worktree with five commits never looks "clean".
@@ -192,6 +196,7 @@ worktrees work the same way. The main worktree can't be removed.
 | `n` | create a worktree (in the list) |
 | `a` | open the worktree's AI agent |
 | `u` | undo everything the worktree's agent changed |
+| `c` | preview merging other worktree branches into the selected worktree |
 | `d` | remove the worktree (asks first) |
 | `:` | run a git command in the selected worktree |
 | `m` | toggle branch / uncommitted mode |
