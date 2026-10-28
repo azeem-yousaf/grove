@@ -111,7 +111,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "overview-conflicts", "diff-conflicts"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -208,6 +208,29 @@ func TestRenderFitsScreen(t *testing.T) {
 				m.pollingGroups = false
 				m.Update(m.pollGroups()())
 				m.groups[log.Dir].paused = true
+			case "overview-conflicts":
+				m = fakeModel(t, size[0], size[1])
+				// Many pairs, so the Conflicts section has to stop early.
+				snap := *m.snap
+				for i := range 8 {
+					snap.States = append(snap.States, git.State{
+						Worktree: git.Worktree{Path: filepath.FromSlash(fmt.Sprintf("/src/shop-%d", i)), Branch: fmt.Sprintf("feature/a-rather-long-branch-name-%d", i)},
+						Files:    []git.FileChange{{Path: "src/api/client.ts", Status: git.Modified}},
+					})
+				}
+				snap.Overlaps = map[string][]int{"src/api/client.ts": {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}}
+				m.Update(scanMsg{seq: m.scanSeq, snap: &snap})
+				var preds []git.Prediction
+				for a := 1; a <= 10; a++ {
+					for b := a + 1; b <= 10; b++ {
+						preds = append(preds, git.Prediction{A: a, B: b, Files: []git.FileConflict{{Path: "src/api/client.ts"}, {Path: strings.Repeat("deep/", 20) + "x.ts"}}})
+					}
+				}
+				predicted(m, preds)
+				press(m, "w")
+			case "diff-conflicts":
+				press(m, "w", "down", "tab")
+				m.Update(diffMsg{key: m.diffWanted, raw: conflictDiff})
 			case "review-problems":
 				press(m, "esc")
 				for i := range 12 {
@@ -646,7 +669,7 @@ func TestDiffRendering(t *testing.T) {
 	if del.hiEnd == 0 || add.text[add.hiStart:add.hiEnd] != "10000" {
 		t.Errorf("word highlight = %q", add.text[add.hiStart:add.hiEnd])
 	}
-	content, gutter := renderDiff(pd, "x.go", 80, newStyles(true))
+	content, gutter := renderDiff(pd, "x.go", 80, newStyles(true), nil)
 	if len(content) != len(gutter) {
 		t.Fatal("gutter and content out of step")
 	}

@@ -35,7 +35,19 @@ type Config struct {
 	AI AI `toml:"ai"`
 	// Planner configures plans: requirements split into tasks (key P).
 	Planner Planner `toml:"planner"`
+	// Conflicts configures predicting merge conflicts between worktrees.
+	Conflicts Conflicts `toml:"conflicts"`
 }
+
+// Conflicts configures conflict prediction: test-merging worktrees that
+// change the same files to see whether they would really conflict.
+type Conflicts struct {
+	// Predict turns prediction on or off. Unset means on.
+	Predict *bool `toml:"predict"`
+}
+
+// Enabled is Predict with the default applied.
+func (c Conflicts) Enabled() bool { return c.Predict == nil || *c.Predict }
 
 // Planner configures the planner and the agents it starts.
 type Planner struct {

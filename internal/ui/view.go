@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -143,8 +144,12 @@ func (m *Model) header() string {
 
 	var right []string
 	if m.snap != nil {
-		if n := m.snap.OverlapCount(); n > 0 {
+		// Overlaps predicted to conflict count as conflicts, not overlaps.
+		if n := m.cleanOverlapCount(); n > 0 {
 			right = append(right, st.pillWarn.Render(fmt.Sprintf("⚠ %s", plural(n, "overlap"))))
+		}
+		if n := m.conflictCount(); n > 0 {
+			right = append(right, st.pillConflict.Render(fmt.Sprintf("✗ %s", plural(n, "conflict"))))
 		}
 		right = append(right, st.muted.Render(plural(len(m.snap.States), "worktree")))
 	}
@@ -228,8 +233,11 @@ func (m *Model) footer() string {
 		if m.filterQuery != "" {
 			parts = append(parts, st.accent.Render("/"+m.filterQuery))
 		}
-		if m.overlapsOnly {
+		switch m.overlapView {
+		case overlapsShown:
 			parts = append(parts, st.warn.Render("overlaps only"))
+		case conflictsShown:
+			parts = append(parts, st.conflict.Render("conflicts only"))
 		}
 		right = strings.Join(parts, " ") + st.faint.Render("  esc clears") + " "
 	}
@@ -402,20 +410,42 @@ func (m *Model) diffHeader(width int) []string {
 	lines := []string{spread(" "+strings.Join(parts, st.faint.Render(" · ")), right+" ", width)}
 
 	if others := m.snap.Overlaps[f.Path]; len(others) > 1 {
-		var names []string
+		r, _ := m.selected()
+		conflicts := m.conflictsFor(r.wt, f.Path)
+		var clash, also []string
 		for _, i := range others {
 			o := m.snap.States[i]
 			if o.Path == s.Path {
 				continue
 			}
 			for _, of := range o.Files {
-				if of.Path == f.Path {
-					names = append(names, st.bold.Foreground(st.p.warn).Render(o.Name())+st.faint.Render(fmt.Sprintf(" +%d −%d", of.Added, of.Deleted)))
+				if of.Path != f.Path {
+					continue
+				}
+				if slices.Contains(conflicts, i) {
+					clash = append(clash, st.conflict.Render(o.Name()))
+				} else {
+					also = append(also, st.bold.Foreground(st.p.warn).Render(o.Name())+st.faint.Render(fmt.Sprintf(" +%d −%d", of.Added, of.Deleted)))
 				}
 			}
 		}
-		banner := " " + st.warn.Bold(true).Render("⚠ Also changed in ") + strings.Join(names, st.faint.Render(", "))
-		lines = append(lines, fill(ansi.Truncate(banner, width, "…"), width, st.p.selBgDim))
+		var parts []string
+		if len(clash) > 0 {
+			parts = append(parts, st.conflict.Render("✗ Conflicts with ")+strings.Join(clash, st.faint.Render(", ")))
+		}
+		if len(also) > 0 {
+			label := "⚠ Also changed in "
+			if len(clash) > 0 {
+				label = "⚠ also in "
+			}
+			parts = append(parts, st.warn.Bold(true).Render(label)+strings.Join(also, st.faint.Render(", ")))
+		}
+		bg := st.p.selBgDim
+		if len(clash) > 0 {
+			bg = st.p.conflictBg
+		}
+		banner := " " + strings.Join(parts, st.faint.Render("  ·  "))
+		lines = append(lines, fill(ansi.Truncate(banner, width, "…"), width, bg))
 	}
 	return append(lines, st.faint.Render(strings.Repeat("─", width)))
 }
@@ -480,7 +510,7 @@ func (m *Model) refreshDiffView() {
 
 	if r.kind == rowTree {
 		s := m.snap.States[r.wt]
-		want := fmt.Sprintf("tree|%s|%d|%t|%p|%d", s.Path, inner, m.dark, m.snap, m.now.Unix()/30)
+		want := fmt.Sprintf("tree|%s|%d|%t|%p|%p|%d", s.Path, inner, m.dark, m.snap, m.predictions, m.now.Unix()/30)
 		if want == m.renderedFor {
 			return
 		}
@@ -508,14 +538,17 @@ func (m *Model) refreshDiffView() {
 		}
 		return
 	}
-	want := fmt.Sprintf("diff|%s|%d|%t|%d", k, inner, m.dark, len(raw))
+	_, f, _ := m.selectedFile()
+	// Predictions arriving change the highlighted hunks, so they are part of
+	// the key.
+	clash := m.conflictLines(r.wt, f.Path)
+	want := fmt.Sprintf("diff|%s|%d|%t|%d|%v", k, inner, m.dark, len(raw), clash)
 	if want == m.renderedFor && raw == m.shownRaw {
 		return
 	}
 	sameFile := k == m.shownKey
 	m.renderedFor = want
 	m.shownKey, m.shownRaw = k, raw
-	_, f, _ := m.selectedFile()
 
 	switch pd := parseDiff(raw); {
 	case failed:
@@ -536,7 +569,7 @@ func (m *Model) refreshDiffView() {
 		m.diff.SetContentLines(m.placeholder("○", msg, inner))
 	default:
 		m.parsed = pd
-		content, gutter := renderDiff(pd, f.Path, inner, m.st)
+		content, gutter := renderDiff(pd, f.Path, inner, m.st, clash)
 		blank := strings.Repeat(" ", ansi.StringWidth(gutter[0]))
 		m.diff.LeftGutterFunc = func(c viewport.GutterContext) string {
 			if c.Index < len(gutter) && !c.Soft {
@@ -640,6 +673,7 @@ func (m *Model) summaryLines(wt, width int) []string {
 
 	// Files this worktree shares with others: the likely merge conflicts.
 	var shared []string
+	clashes := 0
 	for _, f := range s.Files {
 		idx := m.snap.Overlaps[f.Path]
 		if len(idx) < 2 {
@@ -651,11 +685,24 @@ func (m *Model) summaryLines(wt, width int) []string {
 				names = append(names, m.snap.States[i].Name())
 			}
 		}
-		shared = append(shared, "    "+st.text.Render(ansi.Truncate(f.Path, width/2, "…"))+st.faint.Render("  also in ")+st.warn.Render(strings.Join(names, ", ")))
+		line := "    " + st.text.Render(ansi.Truncate(f.Path, width/2, "…")) + st.faint.Render("  also in ") + st.warn.Render(strings.Join(names, ", "))
+		if c := m.conflictsFor(wt, f.Path); len(c) > 0 {
+			clashes++
+			var with []string
+			for _, i := range c {
+				with = append(with, m.snap.States[i].Name())
+			}
+			line = "  " + st.conflict.Render("✗ ") + st.text.Render(ansi.Truncate(f.Path, width/2, "…")) + st.faint.Render("  conflicts with ") + st.conflict.Render(strings.Join(with, ", "))
+		}
+		shared = append(shared, line)
 	}
 	if len(shared) > 0 {
 		out = append(out, "", "  "+st.warn.Bold(true).Render(fmt.Sprintf("⚠ %s also changed in other worktrees", plural(len(shared), "file"))))
-		out = append(out, "  "+st.faint.Render("These are where merge conflicts will come from."))
+		if clashes > 0 {
+			out = append(out, "  "+st.conflict.Render(fmt.Sprintf("✗ %s will conflict when merged", plural(clashes, "file"))))
+		} else {
+			out = append(out, "  "+st.faint.Render("These are where merge conflicts will come from."))
+		}
 		out = append(out, shared...)
 	}
 
@@ -717,6 +764,7 @@ func (m *Model) helpModal() string {
 	legend := strings.Join([]string{
 		st.warn.Render("●") + st.muted.Render(" uncommitted edits   ") +
 			st.warn.Bold(true).Render("⚠") + st.muted.Render(" also changed in another worktree"),
+		st.conflict.Render("✗") + st.muted.Render(" will conflict when merged with another worktree"),
 		st.accent.Render("↑") + st.muted.Render(" ahead of base       ") +
 			st.warn.Render("↓") + st.muted.Render(" behind base   ") +
 			st.add.Render("■■") + st.del.Render("■") + st.faint.Render("··") + st.muted.Render(" size of change"),
