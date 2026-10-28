@@ -1,0 +1,316 @@
+package ui
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/azeem/grove/internal/config"
+	"github.com/azeem/grove/internal/git"
+	"github.com/charmbracelet/x/ansi"
+)
+
+// fakeModel builds a model around a hand-made snapshot so the UI can be
+// exercised without git.
+func fakeModel(t *testing.T, w, h int) *Model {
+	t.Helper()
+	repo := &git.Repo{Here: filepath.FromSlash("/src/shop-auth"), Name: "shop"}
+	m := New(context.Background(), Options{Repo: repo, Config: config.Default(), Version: "test"})
+	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	m.Update(baseMsg{base: "main"})
+	now := time.Now()
+	snap := &git.Snapshot{
+		Base: "main",
+		States: []git.State{
+			{Worktree: git.Worktree{Path: filepath.FromSlash("/src/shop"), Branch: "main", Main: true}, Base: "main", Rev: "HEAD"},
+			{
+				Worktree: git.Worktree{Path: filepath.FromSlash("/src/shop-auth"), Branch: "feature/auth"},
+				Base:     "main", Rev: "abc1234", Ahead: 4, Behind: 1,
+				Last: &git.Commit{Hash: "abc1234", Subject: "Retry API calls", Author: "Dev", When: now.Add(-2 * time.Hour)},
+				Files: []git.FileChange{
+					{Path: "src/api/client.ts", Status: git.Modified, Added: 20, Deleted: 4},
+					{Path: "src/auth/login.ts", Status: git.Modified, Added: 88, Deleted: 12, Uncommitted: true},
+					{Path: "src/auth/oauth.ts", Status: git.Untracked, Added: 14, Uncommitted: true},
+					{Path: "assets/logo.png", Status: git.Added, Binary: true},
+				},
+				Added: 122, Deleted: 16,
+			},
+			{
+				Worktree: git.Worktree{Path: filepath.FromSlash("/src/shop-cart"), Branch: "feature/cart"},
+				Base:     "main", Rev: "def5678", Ahead: 2,
+				Files: []git.FileChange{
+					{Path: "src/api/client.ts", Status: git.Modified, Added: 8, Deleted: 2},
+					{Path: "src/cart/old.ts", OldPath: "src/cart/cart.ts", Status: git.Renamed, Added: 1, Deleted: 1},
+				},
+				Added: 9, Deleted: 3,
+			},
+		},
+		Overlaps: map[string][]int{"src/api/client.ts": {1, 2}},
+		Taken:    now,
+	}
+	m.Update(scanMsg{seq: m.scanSeq, snap: snap})
+	return m
+}
+
+func plain(m *Model) string { return ansi.Strip(m.render()) }
+
+func press(m *Model, keys ...string) {
+	for _, k := range keys {
+		var msg tea.KeyPressMsg
+		switch k {
+		case "enter":
+			msg = tea.KeyPressMsg{Code: tea.KeyEnter}
+		case "esc":
+			msg = tea.KeyPressMsg{Code: tea.KeyEscape}
+		case "tab":
+			msg = tea.KeyPressMsg{Code: tea.KeyTab}
+		case "down":
+			msg = tea.KeyPressMsg{Code: tea.KeyDown}
+		case "up":
+			msg = tea.KeyPressMsg{Code: tea.KeyUp}
+		case "left":
+			msg = tea.KeyPressMsg{Code: tea.KeyLeft}
+		default:
+			r := []rune(k)[0]
+			msg = tea.KeyPressMsg{Code: r, Text: k}
+		}
+		m.Update(msg)
+	}
+}
+
+func TestRenderFitsScreen(t *testing.T) {
+	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
+		m := fakeModel(t, size[0], size[1])
+		for _, screen := range []string{"list", "diff", "help", "remove"} {
+			switch screen {
+			case "diff":
+				press(m, "down", "tab")
+			case "help":
+				press(m, "?")
+			case "remove":
+				m = fakeModel(t, size[0], size[1])
+				press(m, "d", "enter", "b")
+			}
+			out := m.render()
+			lines := strings.Split(out, "\n")
+			if len(lines) != size[1] && size[0] >= minWidth && size[1] >= minHeight {
+				t.Errorf("%dx%d %s: %d lines, want %d", size[0], size[1], screen, len(lines), size[1])
+			}
+			for i, l := range lines {
+				if w := ansi.StringWidth(l); w > size[0] {
+					t.Errorf("%dx%d %s: line %d is %d wide, want <= %d:\n%s", size[0], size[1], screen, i, w, size[0], ansi.Strip(l))
+				}
+			}
+		}
+	}
+}
+
+func TestStartsOnCurrentWorktreeAndShowsOverlap(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	r, ok := m.selected()
+	if !ok || r.kind != rowTree || m.snap.States[r.wt].Branch != "feature/auth" {
+		t.Fatalf("selection should start on the worktree grove runs in, got %+v", r)
+	}
+	out := plain(m)
+	for _, want := range []string{"feature/auth", "feature/cart", "◆ here", "⚠ 1 overlap", "↑4", "↓1", "src/api/client.ts"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("screen is missing %q", want)
+		}
+	}
+	press(m, "down") // src/api/client.ts in feature/auth
+	if out := plain(m); !strings.Contains(out, "Also changed in feature/cart") {
+		t.Errorf("overlap banner missing:\n%s", out)
+	}
+}
+
+func TestFilterAndOverlapsOnly(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	press(m, "/", "o", "a", "u", "t", "h")
+	if m.filterQuery != "oauth" {
+		t.Fatalf("filter = %q", m.filterQuery)
+	}
+	if n := m.fileRowCount(); n != 1 {
+		t.Errorf("filter matched %d files, want 1", n)
+	}
+	press(m, "esc")
+	if m.filterQuery != "" || m.fileRowCount() != 6 {
+		t.Errorf("esc should clear the filter, have %q and %d files", m.filterQuery, m.fileRowCount())
+	}
+	press(m, "o")
+	if n := m.fileRowCount(); n != 2 {
+		t.Errorf("overlaps only shows %d files, want 2", n)
+	}
+}
+
+func TestCollapseKeepsSelection(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	press(m, "down", "down", "left") // into login.ts, then back to the header
+	r, _ := m.selected()
+	if r.kind != rowTree {
+		t.Fatalf("left on a file should select its worktree, got %+v", r)
+	}
+	press(m, "left")
+	if !m.collapsed[m.snap.States[r.wt].Path] {
+		t.Fatal("left on a header should collapse it")
+	}
+	if r2, _ := m.selected(); r2.kind != rowTree || r2.wt != r.wt {
+		t.Errorf("selection moved after collapsing: %+v", r2)
+	}
+	if strings.Contains(plain(m), "src/auth/login.ts") {
+		t.Error("collapsed worktree still lists files")
+	}
+}
+
+func TestRefreshKeepsSelectedFile(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	press(m, "down", "down")
+	_, before, _ := m.selectedFile()
+	snap := *m.snap
+	snap.States = append([]git.State(nil), snap.States...)
+	// A new file appears above the selection.
+	st := snap.States[1]
+	st.Files = append([]git.FileChange{{Path: "a-first.go", Status: git.Untracked, Added: 1}}, st.Files...)
+	snap.States[1] = st
+	m.Update(scanMsg{seq: m.scanSeq, snap: &snap})
+	_, after, _ := m.selectedFile()
+	if after.Path != before.Path {
+		t.Errorf("selection jumped from %s to %s", before.Path, after.Path)
+	}
+}
+
+func TestRemoveDialog(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+
+	press(m, "g", "d") // main
+	if m.confirm != nil {
+		t.Fatal("the main worktree must not be offered for removal")
+	}
+
+	// feature/auth has uncommitted files: enter alone must not remove it.
+	press(m, "]", "d")
+	if m.confirm == nil || m.confirm.st.Branch != "feature/auth" {
+		t.Fatalf("dialog = %+v", m.confirm)
+	}
+	out := plain(m)
+	for _, want := range []string{"Remove worktree", "2 files with uncommitted changes", "Discard uncommitted changes", "4 commits not in main"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dialog is missing %q:\n%s", want, out)
+		}
+	}
+	press(m, "enter")
+	if m.removing != nil || !m.confirm.nudged {
+		t.Fatal("enter without discarding should only nudge")
+	}
+	press(m, "f", "b", "enter")
+	if m.confirm != nil || m.removing == nil || !m.removing.force || !m.removing.deleteBranch {
+		t.Fatalf("confirm didn't start the removal: confirm=%+v removing=%+v", m.confirm, m.removing)
+	}
+	if m.startScan() != nil {
+		t.Error("scans should pause while a worktree is being removed")
+	}
+	if !strings.Contains(plain(m), "removing feature/auth") {
+		t.Error("header should show the removal in progress")
+	}
+
+	m.Update(removeMsg{r: m.removing})
+	if m.removing != nil || m.repo.Here != "" || !strings.Contains(m.toast.text, "deleted its branch") {
+		t.Errorf("after removal: removing=%v here=%q toast=%q", m.removing, m.repo.Here, m.toast.text)
+	}
+
+	// A clean worktree needs no extra box, and esc backs out.
+	press(m, "G", "d")
+	if m.confirm == nil || m.confirm.needsForce() {
+		t.Fatalf("clean worktree dialog = %+v", m.confirm)
+	}
+	press(m, "esc")
+	if m.confirm != nil {
+		t.Error("esc should close the dialog")
+	}
+}
+
+func TestDiffRendering(t *testing.T) {
+	raw := "diff --git a/x.go b/x.go\nindex 1..2 100644\n--- a/x.go\n+++ b/x.go\n" +
+		"@@ -1,4 +1,4 @@ func main()\n package main\n-const timeout = 5000\n+const timeout = 10000\n \tfmt.Println()\n\\ No newline at end of file\n"
+	pd := parseDiff(raw)
+	if len(pd.lines) != 6 {
+		t.Fatalf("got %d lines, want 6: %+v", len(pd.lines), pd.lines)
+	}
+	del, add := pd.lines[2], pd.lines[3]
+	if del.old != 2 || add.new != 2 {
+		t.Errorf("line numbers wrong: del %d add %d", del.old, add.new)
+	}
+	if del.hiEnd == 0 || add.text[add.hiStart:add.hiEnd] != "10000" {
+		t.Errorf("word highlight = %q", add.text[add.hiStart:add.hiEnd])
+	}
+	content, gutter := renderDiff(pd, "x.go", 80, newStyles(true))
+	if len(content) != len(gutter) {
+		t.Fatal("gutter and content out of step")
+	}
+	w := ansi.StringWidth(gutter[0])
+	for i, g := range gutter {
+		if ansi.StringWidth(g) != w {
+			t.Errorf("gutter line %d is %d wide, want %d", i, ansi.StringWidth(g), w)
+		}
+		if got := ansi.StringWidth(content[i]); got != 80-w {
+			t.Errorf("content line %d is %d wide, want %d", i, got, 80-w)
+		}
+	}
+	if !strings.Contains(ansi.Strip(content[3]), "+ const timeout = 10000") {
+		t.Errorf("added line rendered as %q", ansi.Strip(content[3]))
+	}
+}
+
+func TestBinaryDiff(t *testing.T) {
+	if pd := parseDiff("diff --git a/a.png b/a.png\nBinary files /dev/null and b/a.png differ\n"); !pd.binary {
+		t.Error("binary diff not detected")
+	}
+}
+
+// TestDump renders a real repository to text files for eyeballing. Run with
+// GROVE_DEMO=<repo path> go test ./internal/ui -run Dump.
+func TestDump(t *testing.T) {
+	dir := os.Getenv("GROVE_DEMO")
+	if dir == "" {
+		t.Skip("set GROVE_DEMO to a repository path")
+	}
+	ctx := context.Background()
+	repo, err := git.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := os.Getenv("GROVE_DUMP")
+	for _, size := range [][2]int{{150, 34}, {90, 28}} {
+		m := New(ctx, Options{Repo: repo, Config: config.Default(), Version: "dev"})
+		m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		base, _ := git.DetectBase(ctx, repo, "")
+		m.Update(baseMsg{base: base})
+		snap, err := git.Scan(ctx, repo, base, git.ModeBranch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Update(scanMsg{seq: m.scanSeq, snap: snap})
+		shots := map[string]func(){
+			"1-tree":  func() {},
+			"2-file":  func() { press(m, "down") },
+			"3-diff":  func() { press(m, "tab") },
+			"4-help":  func() { press(m, "tab", "?") },
+			"5-other": func() { press(m, "esc", "]", "down") },
+		}
+		for _, name := range []string{"1-tree", "2-file", "3-diff", "4-help", "5-other"} {
+			shots[name]()
+			// Let the diff load synchronously.
+			if st, f, ok := m.selectedFile(); ok {
+				raw, err := git.Diff(ctx, st, f)
+				m.Update(diffMsg{key: diffKey(st, f), raw: raw, err: err})
+			}
+			p := filepath.Join(out, fmt.Sprintf("%s-%dx%d", name, size[0], size[1]))
+			os.WriteFile(p+".txt", []byte(ansi.Strip(m.render())), 0o644)
+			os.WriteFile(p+".ans", []byte(m.render()), 0o644)
+		}
+	}
+}
