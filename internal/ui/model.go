@@ -686,6 +686,12 @@ func (m *Model) onDiffKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.move(1)
 	case "[":
 		return m.move(-1)
+	case "left", "h":
+		// Already at the left edge: carry on into the file list.
+		if m.diff.XOffset() == 0 {
+			m.focus = focusList
+			return nil
+		}
 	}
 	var cmd tea.Cmd
 	m.diff, cmd = m.diff.Update(msg)

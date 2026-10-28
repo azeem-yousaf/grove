@@ -105,6 +105,7 @@ worktrees work the same way. The main worktree can't be removed.
 | `←` `→` / `h` `l` | fold / unfold a worktree |
 | `[` `]` | previous / next worktree |
 | `tab` | switch between the list and the diff |
+| `→` / `←` | into the diff from a file; back to the list from the diff's left edge |
 | `enter` | open the file (or fold a worktree) |
 | `f` | show in Explorer / Finder |
 | `e` | open the worktree in your editor |

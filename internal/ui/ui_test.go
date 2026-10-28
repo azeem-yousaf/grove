@@ -76,6 +76,8 @@ func press(m *Model, keys ...string) {
 			msg = tea.KeyPressMsg{Code: tea.KeyUp}
 		case "left":
 			msg = tea.KeyPressMsg{Code: tea.KeyLeft}
+		case "right":
+			msg = tea.KeyPressMsg{Code: tea.KeyRight}
 		default:
 			r := []rune(k)[0]
 			msg = tea.KeyPressMsg{Code: r, Text: k}
@@ -260,6 +262,33 @@ func TestGitPrompt(t *testing.T) {
 	press(m, "q")
 	if m.gitCmd.active {
 		t.Error("q after closing the prompt should not reopen it")
+	}
+}
+
+func TestLeftAtDiffEdgeReturnsToList(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	press(m, "down")
+	st, f, _ := m.selectedFile()
+	long := strings.Repeat("x", 300)
+	m.Update(diffMsg{key: diffKey(st, f), raw: "@@ -1,1 +1,1 @@ x\n-" + long + "\n+" + long + "y\n"})
+
+	press(m, "right") // a file row: into the diff
+	if m.focus != focusDiff {
+		t.Fatal("right on a file should focus the diff")
+	}
+	press(m, "right", "right", "left")
+	if m.focus != focusDiff || m.diff.XOffset() == 0 {
+		t.Fatalf("left while scrolled should scroll, not leave: focus=%v x=%d", m.focus, m.diff.XOffset())
+	}
+	for i := 0; i < 10 && m.diff.XOffset() > 0; i++ {
+		press(m, "left")
+	}
+	if m.focus != focusDiff {
+		t.Fatal("reaching the left edge should not leave the diff by itself")
+	}
+	press(m, "left")
+	if m.focus != focusList {
+		t.Error("left at the left edge should move to the file list")
 	}
 }
 

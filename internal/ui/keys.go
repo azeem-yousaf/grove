@@ -75,6 +75,7 @@ var helpSections = []helpSection{
 	}},
 	{"Diff pane", [][2]string{
 		{"↑↓ ←→", "scroll"},
+		{"←", "back to list at edge"},
 		{"n N", "next / prev hunk"},
 		{"[ ]", "prev / next file"},
 		{"g G", "top / bottom"},
