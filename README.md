@@ -206,8 +206,24 @@ is created until you start it:
   Once every task has finished, the planner says so; review the worktrees
   and merge them with `c`.
 
-Plans and the planner's conversation are saved with the agents' and
-survive restarts.
+**Groups.** Agents of tasks in the same group share a group chat; agents of
+isolated tasks don't get it at all. grove gives each grouped agent three
+tools, through a small MCP server built into grove itself (`grove
+mcp-group`, started by Claude Code or Codex): `members` (who is in the
+group, their task and worktree), `post` (to everyone, or one member) and
+`read` (new messages, optionally waiting for an answer). Agents are told to
+read their messages when they start and before they finish, and to post
+whatever their groupmates depend on.
+
+Press `t` on a grouped task's worktree (or `ctrl+g` in its agent chat) to
+open the group chat. You see every message and can post too; start with
+`@branch` to address one agent. When a message arrives for an agent that
+isn't working, grove starts a turn so it can answer. To keep agents from
+waking each other forever, grove stops after `[planner] max_wakeups`
+(default 6) wake-ups in a row in a group and waits for you to post.
+
+Plans, the planner's conversation and group chats are saved with the
+agents' conversations and survive restarts.
 
 ### Overview of every worktree
 
@@ -261,6 +277,7 @@ worktrees work the same way. The main worktree can't be removed.
 | `n` | create a worktree (in the list) |
 | `a` | open the worktree's AI agent |
 | `P` | the planner: turn requirements into tasks and worktrees |
+| `t` | the group chat of a grouped task's worktree |
 | `w` | overview of every worktree |
 | `c` | merge other worktrees' branches into this one |
 | `u` | undo everything the worktree's agent changed |

@@ -226,6 +226,20 @@ func TestReadOnlyArgs(t *testing.T) {
 	if args, _ := codexArgs(req); strings.Join(args, " ") != "exec --json --sandbox read-only -" {
 		t.Errorf("read-only codex args = %q", args)
 	}
+	tools := []ToolServer{{Name: "grove", Command: `C:\bin\grove.exe`, Args: []string{"mcp-group", "--as", "feature/x"}, Allow: []string{"post", "read"}}}
+	args = claudeArgs(Request{Tools: tools, Allow: []string{"Bash(ls)"}})
+	joined = strings.Join(args, " ")
+	if !strings.Contains(joined, `--mcp-config {"mcpServers":{"grove":{"args":["mcp-group","--as","feature/x"],"command":"C:\\bin\\grove.exe","type":"stdio"}}}`) ||
+		!strings.Contains(joined, "mcp__grove__post mcp__grove__read") || args[len(args)-1] != "Bash(ls)" {
+		t.Errorf("claude args with tools: %s", joined)
+	}
+	if strings.Contains(strings.Join(claudeArgs(Request{}), " "), "--mcp-config") {
+		t.Error("no tools should mean no --mcp-config")
+	}
+	cargs, _ := codexArgs(Request{Tools: tools})
+	if j := strings.Join(cargs, " "); !strings.Contains(j, `-c mcp_servers.grove.command="C:\\bin\\grove.exe" -c mcp_servers.grove.args=["mcp-group","--as","feature/x"]`) {
+		t.Errorf("codex args with tools: %s", j)
+	}
 	// The planner and the worktree's own agent never share a process.
 	if procKey(req) == procKey(Request{Dir: "/src/app"}) {
 		t.Error("read-only and normal agents in one folder share a process key")

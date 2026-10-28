@@ -68,6 +68,9 @@ func (m *Model) render() string {
 		if m.focus == focusChat && m.chatSession() != nil {
 			return m.chatPane(diffW, paneH)
 		}
+		if m.focus == focusGroup && m.groupChat != nil {
+			return m.groupPane(diffW, paneH)
+		}
 		return m.diffPane(diffW, paneH)
 	}
 	var body string
@@ -200,6 +203,8 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"w", "close"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
 	case m.focus == focusChat:
 		pairs = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"tab", "list"}, {"ctrl+y", "copy reply"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
+	case m.focus == focusGroup:
+		pairs = [][2]string{{"enter", "post"}, {"@branch", "to one agent"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}}
 	case m.focus == focusDiff:
 		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", "hunk"}, {"[ ]", "file"}, {"enter", "open"}, {"tab", "list"}, {"?", "help"}}
 	case ok && r.kind == rowFile:

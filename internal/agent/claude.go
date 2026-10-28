@@ -50,6 +50,9 @@ func claudeArgs(req Request) []string {
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
+	if cfg := mcpConfig(req.Tools); cfg != "" {
+		args = append(args, "--mcp-config", cfg)
+	}
 	if req.ReadOnly {
 		args = append(args, "--disallowedTools")
 		args = append(args, editTools...)
@@ -66,7 +69,26 @@ func claudeArgs(req Request) []string {
 			args = append(args, atlassianTools+t)
 		}
 	}
+	for _, s := range req.Tools {
+		for _, t := range s.Allow {
+			args = append(args, "mcp__"+s.Name+"__"+t)
+		}
+	}
 	return append(args, req.Allow...)
+}
+
+// mcpConfig is the --mcp-config JSON for tool servers, or "" for none. It
+// adds to the user's own MCP servers rather than replacing them.
+func mcpConfig(tools []ToolServer) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	servers := map[string]any{}
+	for _, s := range tools {
+		servers[s.Name] = map[string]any{"type": "stdio", "command": s.Command, "args": s.Args}
+	}
+	b, _ := json.Marshal(map[string]any{"mcpServers": servers})
+	return string(b)
 }
 
 // editTools change files; a read-only agent doesn't get them.
@@ -120,6 +142,7 @@ type claudeProc struct {
 	// process.
 	bin, model string
 	allow      []string
+	tools      string // mcpConfig it was started with
 
 	curMu sync.Mutex
 	cur   *claudeTurn // the turn in progress, if any
@@ -143,6 +166,7 @@ func startClaude(bin string, req Request) (*claudeProc, error) {
 		bin:     bin,
 		model:   req.Model,
 		allow:   slices.Clone(req.Allow),
+		tools:   mcpConfig(req.Tools),
 		session: req.Session,
 	}
 	p.cmd = exec.Command(bin, claudeArgs(req)...)
@@ -189,7 +213,7 @@ func (p *claudeProc) read(out io.Reader) {
 }
 
 func (p *claudeProc) fits(bin string, req Request) bool {
-	return !p.ended() && p.bin == bin && p.model == req.Model && p.session == req.Session && slices.Equal(p.allow, req.Allow)
+	return !p.ended() && p.bin == bin && p.model == req.Model && p.session == req.Session && slices.Equal(p.allow, req.Allow) && p.tools == mcpConfig(req.Tools)
 }
 
 func (p *claudeProc) ended() bool {

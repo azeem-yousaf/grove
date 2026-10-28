@@ -16,6 +16,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/ui"
 )
 
@@ -30,6 +31,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "mcp-group" {
+		return mcpGroup(os.Args[2:])
+	}
 	var (
 		base       = flag.String("base", "", "branch to compare worktrees against (default: auto-detect)")
 		mode       = flag.String("mode", "", `"branch" (everything since the base) or "uncommitted"`)
@@ -190,4 +194,20 @@ Flags:
 	flag.PrintDefaults()
 	path, _ := config.Path()
 	fmt.Fprintf(os.Stderr, "\nConfig file: %s  (create one with --init-config)\n", path)
+}
+
+// mcpGroup is the tool server grove gives a grouped agent: `grove
+// mcp-group --dir <group folder> --as <member>`, speaking MCP on stdin and
+// stdout. The agent's CLI starts it; people never run it.
+func mcpGroup(args []string) error {
+	fs := flag.NewFlagSet("mcp-group", flag.ContinueOnError)
+	dir := fs.String("dir", "", "the group's folder")
+	as := fs.String("as", "", "the member this agent is")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dir == "" || *as == "" {
+		return errors.New("mcp-group needs --dir and --as")
+	}
+	return group.Serve(os.Stdin, os.Stdout, group.Log{Dir: *dir}, *as, version)
 }

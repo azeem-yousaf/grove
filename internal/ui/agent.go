@@ -322,6 +322,10 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 		if s.planner {
 			return m.openReview()
 		}
+	case "ctrl+g":
+		if !s.planner {
+			return m.openGroupChat(s.path)
+		}
 	case "ctrl+a":
 		if s.running {
 			return m.notify("Stop the agent first (ctrl+x)", toastInfo)
@@ -604,6 +608,7 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Model:    s.model,
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,
+		Tools:    m.groupTools(s),
 	}
 }
 

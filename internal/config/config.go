@@ -42,6 +42,18 @@ type Planner struct {
 	// MaxAgents is how many task agents may work at once; more tasks wait
 	// for a free slot. 0 or less means the default, 3.
 	MaxAgents int `toml:"max_agents"`
+	// MaxWakeups is how many times in a row grove wakes idle agents of one
+	// group to answer group messages before it waits for the user to post.
+	// 0 or less means the default, 6.
+	MaxWakeups int `toml:"max_wakeups"`
+}
+
+// Wakeups is MaxWakeups with the default applied.
+func (p Planner) Wakeups() int {
+	if p.MaxWakeups <= 0 {
+		return 6
+	}
+	return p.MaxWakeups
 }
 
 // Slots is MaxAgents with the default applied.
@@ -279,6 +291,9 @@ codex_model = ""
 [planner]
 # How many task agents may work at the same time; the rest wait.
 max_agents = 3
+# How many times in a row grove wakes idle agents of a group to answer each
+# other before it waits for you to post in the group chat.
+max_wakeups = 6
 
 # Files open with their system default program (key: enter).
 # Override that per extension here. "default" means the system default.

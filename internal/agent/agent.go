@@ -99,6 +99,17 @@ type Request struct {
 	// its read-only sandbox. It gets its own process even in a folder that
 	// also has a worktree agent.
 	ReadOnly bool
+	// Tools are MCP servers the agent's CLI starts for it, such as a
+	// grouped task's group chat.
+	Tools []ToolServer
+}
+
+// ToolServer is an MCP server run over stdio by the agent's CLI.
+type ToolServer struct {
+	Name    string
+	Command string
+	Args    []string
+	Allow   []string // its tools the agent may call without asking
 }
 
 // procKey is the kept Claude process for req: one per folder, plus one for

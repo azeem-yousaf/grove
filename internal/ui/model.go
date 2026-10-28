@@ -25,7 +25,8 @@ type focusArea uint8
 const (
 	focusList focusArea = iota
 	focusDiff
-	focusChat // the worktree agent, shown in place of the diff
+	focusChat  // the worktree agent, shown in place of the diff
+	focusGroup // a plan group's chat, shown in place of the diff
 )
 
 // Options configure a new Model.
@@ -105,32 +106,37 @@ type Model struct {
 	creating   *creation // the new-worktree dialog, while open
 	selectPath string    // worktree to select once the next scan shows it
 
-	sessions     map[string]*session // worktree agents by folder
-	store        *store.Store        // saved sessions and plans; nil without a git dir
-	savedJSON    map[string][]byte   // each session as last written, by folder
-	persistErr   string              // the last save error shown
-	chatPath     string              // worktree whose agent the chat pane shows
-	chatPlanner  bool                // the chat pane shows the planner instead
-	planner      *session            // the planner's conversation, once started
-	plans        []*plan.Plan        // saved plans, newest first
-	review       *planReview         // the plan being reviewed, while open
-	creatingTask map[string]bool     // plan tasks whose worktree is being made, by plan+task ID
-	branchNames  []string            // existing branches, for the planner's briefing
-	planBranches git.Branches        // branches when the last plan started, for creating its worktrees
-	chatInput    textarea.Model
-	chatView     viewport.Model
-	chatFollow   bool // keep the chat scrolled to the newest line
-	chatSel      chatSelection
-	picker       *picker
-	undo         *undoAsk
-	quitAsk      bool
-	conflicts    *conflictReview // the merge review, while open
-	overview     bool            // the overview of every worktree, in place of both panes
-	ovPath       string          // worktree under the overview's cursor
-	ovStart      int             // first and past-last rows of the overview table on screen
-	ovEnd        int
-	ovRowsY      int // screen row of the first table row
-	mergeSeq     int
+	sessions      map[string]*session    // worktree agents by folder
+	store         *store.Store           // saved sessions and plans; nil without a git dir
+	savedJSON     map[string][]byte      // each session as last written, by folder
+	persistErr    string                 // the last save error shown
+	chatPath      string                 // worktree whose agent the chat pane shows
+	chatPlanner   bool                   // the chat pane shows the planner instead
+	planner       *session               // the planner's conversation, once started
+	plans         []*plan.Plan           // saved plans, newest first
+	review        *planReview            // the plan being reviewed, while open
+	creatingTask  map[string]bool        // plan tasks whose worktree is being made, by plan+task ID
+	branchNames   []string               // existing branches, for the planner's briefing
+	planBranches  git.Branches           // branches when the last plan started, for creating its worktrees
+	groveBin      string                 // this program, which agents start for group tools
+	groups        map[string]*groupState // group chats by folder
+	groupChat     *groupChat             // the group chat pane
+	pollingGroups bool
+	lastGroupPoll time.Time
+	chatInput     textarea.Model
+	chatView      viewport.Model
+	chatFollow    bool // keep the chat scrolled to the newest line
+	chatSel       chatSelection
+	picker        *picker
+	undo          *undoAsk
+	quitAsk       bool
+	conflicts     *conflictReview // the merge review, while open
+	overview      bool            // the overview of every worktree, in place of both panes
+	ovPath        string          // worktree under the overview's cursor
+	ovStart       int             // first and past-last rows of the overview table on screen
+	ovEnd         int
+	ovRowsY       int // screen row of the first table row
+	mergeSeq      int
 
 	// Hooks for the agent, replaced in tests.
 	installed func() []agent.Kind
@@ -210,6 +216,8 @@ func New(ctx context.Context, o Options) *Model {
 		sessions:     map[string]*session{},
 		savedJSON:    map[string][]byte{},
 		creatingTask: map[string]bool{},
+		groups:       map[string]*groupState{},
+		groveBin:     groveExecutable(),
 		chatInput:    newChatInput(),
 		chatView:     newChatView(),
 		installed:    agent.Installed,
@@ -370,7 +378,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case clockMsg:
 		m.now = time.Time(msg)
-		cmds := []tea.Cmd{clockTick(), m.persistSessions()}
+		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now)}
 		if m.baseReady && !m.scanning && m.now.Sub(m.lastScan) >= m.refreshInterval() {
 			cmds = append(cmds, m.startScan())
 		}
@@ -437,6 +445,12 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case taskCreatedMsg:
 		return m.onTaskCreated(msg)
+
+	case groupsReadMsg:
+		return m.onGroupsRead(msg)
+
+	case groupPostedMsg:
+		return m.pollGroups()
 
 	case persistMsg:
 		return m.onPersisted(msg)
@@ -548,6 +562,11 @@ func (m *Model) onPaste(msg tea.PasteMsg) tea.Cmd {
 		return cmd
 	case m.gitCmd.active:
 		m.gitCmd.input, cmd = m.gitCmd.input.Update(msg)
+		return cmd
+	case m.focus == focusGroup:
+		if m.groupChat != nil {
+			m.groupChat.input, cmd = m.groupChat.input.Update(msg)
+		}
 		return cmd
 	case m.focus == focusChat:
 		if s := m.chatSession(); s != nil && s.menu == nil && len(s.pending) == 0 {
@@ -732,6 +751,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.onGitPromptKey(msg)
 	case m.focus == focusChat:
 		return m.onChatKey(msg)
+	case m.focus == focusGroup:
+		return m.onGroupKey(msg)
 	}
 	if m.showHelp {
 		if key.Matches(msg, k.Help, k.Back, k.Quit) || msg.String() == "enter" {
@@ -839,6 +860,11 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.openOverview()
 	case key.Matches(msg, k.Planner):
 		return m.openPlanner()
+	case key.Matches(msg, k.Group):
+		if r, ok := m.selected(); ok {
+			return m.openGroupChat(m.snap.States[r.wt].Path)
+		}
+		return nil
 	}
 
 	if m.focus == focusDiff {
@@ -1107,7 +1133,7 @@ func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
 		return nil
 	}
 	if m.narrow() && m.focus != focusList || !m.narrow() && msg.X >= listW {
-		if m.focus != focusChat {
+		if m.focus != focusChat && m.focus != focusGroup {
 			m.focus = focusDiff
 		}
 		return nil
@@ -1150,7 +1176,18 @@ func (m *Model) onWheel(msg tea.MouseWheelMsg) tea.Cmd {
 		return nil
 	}
 	listW, _, _ := m.layout()
-	overDiff := m.narrow() && m.focus == focusDiff || !m.narrow() && msg.X >= listW
+	overDiff := m.narrow() && m.focus != focusList || !m.narrow() && msg.X >= listW
+	if overDiff && m.focus == focusGroup && m.groupChat != nil {
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			m.groupChat.view.ScrollUp(3)
+			m.groupChat.follow = false
+		case tea.MouseWheelDown:
+			m.groupChat.view.ScrollDown(3)
+			m.groupChat.follow = m.groupChat.view.AtBottom()
+		}
+		return nil
+	}
 	if overDiff && m.focus == focusChat {
 		switch msg.Button {
 		case tea.MouseWheelUp:

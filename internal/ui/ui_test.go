@@ -14,6 +14,9 @@ import (
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/group"
+	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/store"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -108,7 +111,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -187,6 +190,24 @@ func TestRenderFitsScreen(t *testing.T) {
 				m.review = newReview(m.draft())
 			case "review-edit":
 				press(m, "down", "enter")
+			case "group":
+				m = fakeModel(t, size[0], size[1])
+				m.store = store.Open(t.TempDir())
+				p := &plan.Plan{ID: "p", Title: strings.Repeat("Long plan title ", 8), Status: plan.Running,
+					Groups: []plan.Group{{ID: "g", Name: strings.Repeat("Long group ", 6)}},
+					Tasks: []plan.Task{
+						{ID: "a", Branch: "feature/auth", Path: filepath.FromSlash("/src/shop-auth"), Group: "g", Status: plan.Working},
+						{ID: "c", Branch: "feature/cart", Path: filepath.FromSlash("/src/shop-cart"), Group: "g", Status: plan.Finished},
+					}}
+				m.plans = []*plan.Plan{p}
+				log, _ := m.groupLog(p, "g")
+				for i := range 30 {
+					log.Post(group.Message{From: "feature/auth", To: "feature/cart", Text: fmt.Sprintf("%d %s", i, strings.Repeat("a long message ", 20))})
+				}
+				m.openGroupChat(filepath.FromSlash("/src/shop-auth"))
+				m.pollingGroups = false
+				m.Update(m.pollGroups()())
+				m.groups[log.Dir].paused = true
 			case "review-problems":
 				press(m, "esc")
 				for i := range 12 {

@@ -241,7 +241,7 @@ func planFile(id string) string { return "plans/" + id + ".json" }
 // again on quit if the background write hadn't happened yet.
 func (m *Model) savePlan(p *plan.Plan) tea.Cmd {
 	p.Updated = time.Now()
-	return m.persistSessions()
+	return tea.Batch(m.persistSessions(), m.writeGroupInfo(p))
 }
 
 func (m *Model) deletePlan(id string) tea.Cmd {
@@ -538,6 +538,7 @@ func (m *Model) taskContext(s *session) string {
 	if len(others) > 0 {
 		b.WriteString("\nThe plan's other tasks, for context:\n" + strings.Join(others, "\n") + "\n")
 	}
+	b.WriteString(m.groupContext(p, t))
 	b.WriteString("\nWhen the task is done, say so plainly and list what you changed. If you need a decision from the user, end your reply with the question.\n")
 	return b.String()
 }

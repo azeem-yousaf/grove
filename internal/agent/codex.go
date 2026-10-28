@@ -18,6 +18,13 @@ func codexArgs(req Request) (args []string, input string) {
 		sandbox = "read-only"
 	}
 	args = []string{"exec", "--json", "--sandbox", sandbox}
+	// Tool servers go in as config overrides; values are TOML, and JSON
+	// strings and arrays of strings are valid TOML.
+	for _, s := range req.Tools {
+		cmd, _ := json.Marshal(s.Command)
+		list, _ := json.Marshal(s.Args)
+		args = append(args, "-c", "mcp_servers."+s.Name+".command="+string(cmd), "-c", "mcp_servers."+s.Name+".args="+string(list))
+	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
