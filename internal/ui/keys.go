@@ -8,6 +8,7 @@ type keyMap struct {
 	SwitchPane, Open, Reveal, Editor, Copy  key.Binding
 	Remove, Git, New, Agent, Undo           key.Binding
 	Mode, Overlaps, Filter, Refresh         key.Binding
+	Overview, Merge                         key.Binding
 	Help, Quit, Back                        key.Binding
 }
 
@@ -38,6 +39,8 @@ func defaultKeys() keyMap {
 		Undo:       b("u", "undo agent changes", "u"),
 		Mode:       b("m", "branch / uncommitted", "m"),
 		Overlaps:   b("o", "overlaps only", "o"),
+		Overview:   b("w", "overview of every worktree", "w"),
+		Merge:      b("c", "merge branches into this worktree", "c"),
 		Filter:     b("/", "filter", "/"),
 		Refresh:    b("r", "refresh", "r"),
 		Help:       b("?", "help", "?"),
@@ -73,7 +76,8 @@ var helpSections = []helpSection{
 	{"View", [][2]string{
 		{"m", "branch / uncommitted"},
 		{"o", "overlaps only"},
-		{"c", "review worktree merges"},
+		{"w", "overview of worktrees"},
+		{"c", "merge branches here"},
 		{"/", "filter files"},
 		{"r", "refresh now"},
 		{"q", "quit"},

@@ -36,9 +36,10 @@ func (m *Model) layout() (listW, diffW, paneH int) {
 	return listW, m.width - listW, paneH
 }
 
+// listHeight is the number of list lines on screen.
 func (m *Model) listHeight() int {
 	_, _, paneH := m.layout()
-	return max(paneH-2, 1)
+	return max(paneH-m.dashHeight()-2, 1)
 }
 
 // View draws the whole screen.
@@ -71,6 +72,8 @@ func (m *Model) render() string {
 	}
 	var body string
 	switch {
+	case m.overview && m.snap != nil:
+		body = m.overviewPane(m.width, paneH)
 	case m.narrow() && m.focus != focusList:
 		body = right()
 	case m.narrow():
@@ -188,17 +191,19 @@ func (m *Model) footer() string {
 	case m.picker != nil, m.undo != nil, m.quitAsk:
 		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
 	case m.conflicts != nil:
-		pairs = [][2]string{{"m", "apply merges"}, {"esc", "cancel"}}
-	case m.focus == focusChat:
-		pairs = [][2]string{{"enter", "send"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
+		pairs = [][2]string{{"esc", "close"}}
 	case m.showHelp:
 		pairs = [][2]string{{"esc", "close"}}
+	case m.overview:
+		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"w", "close"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
+	case m.focus == focusChat:
+		pairs = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"tab", "list"}, {"ctrl+y", "copy reply"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
 	case m.focus == focusDiff:
 		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", "hunk"}, {"[ ]", "file"}, {"enter", "open"}, {"tab", "list"}, {"?", "help"}}
 	case ok && r.kind == rowFile:
-		pairs = [][2]string{{"enter", "open"}, {"c", "review merges"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	default:
-		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {"c", "review merges"}, {":", "git"}, {"n", "new"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {"w", "overview"}, {":", "git"}, {"n", "new"}, {"c", "merge"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	}
 
 	right := ""
@@ -296,87 +301,11 @@ func (m *Model) panel(title, info, foot string, body []string, w, h int, focused
 }
 
 func (m *Model) listPane(w, h int) string {
-	// Keep the overview anchored at the top of the left column. Its fixed
-	// height leaves the worktree list enough room to scroll independently.
-	if m.snap != nil && h >= 14 {
-		dashH := 6
-		listH := h - dashH
-		return lipgloss.JoinVertical(lipgloss.Left, m.dashboardPane(w, dashH), m.worktreesPane(w, listH))
+	// The summary sits above the list; listHeight and onClick allow for it.
+	if dh := m.dashHeight(); dh > 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, m.dashboardPane(w, dh), m.worktreesPane(w, h-dh))
 	}
 	return m.worktreesPane(w, h)
-}
-
-func (m *Model) dashboardPane(w, h int) string {
-	st := m.st
-	inner := w - 2
-	var attention, progress []string
-	clean, active, failed, pending, ahead, behind := 0, 0, 0, 0, 0, 0
-	changedFiles := 0
-	for _, s := range m.snap.States {
-		if s.Err != nil {
-			failed++
-		} else if len(s.Files) == 0 {
-			clean++
-		} else {
-			active++
-		}
-		changedFiles += len(s.Files)
-		ahead += s.Ahead
-		behind += s.Behind
-		if ses := m.sessionFor(s.Path); ses != nil {
-			if len(ses.pending) > 0 {
-				pending++
-			}
-			if ses.failed && s.Err == nil {
-				failed++
-			}
-		}
-	}
-	if n := m.snap.OverlapCount(); n > 0 {
-		attention = append(attention, st.warn.Bold(true).Render(fmt.Sprintf("⚠ %s with overlaps", plural(n, "file"))))
-	}
-	if pending > 0 {
-		attention = append(attention, st.warn.Render(fmt.Sprintf("✦ %s awaiting approval", plural(pending, "agent"))))
-	}
-	if failed > 0 {
-		attention = append(attention, st.del.Render(fmt.Sprintf("✕ %s", plural(failed, "error"))))
-	}
-	if len(attention) == 0 {
-		attention = append(attention, st.add.Render("✓ Nothing needs attention"))
-	}
-	progress = append(progress,
-		st.text.Render(plural(len(m.snap.States), "worktree")),
-		st.faint.Render("·"),
-		st.accent.Render(fmt.Sprintf("● %d active", active)),
-		st.faint.Render("·"),
-		st.add.Render(fmt.Sprintf("○ %d clean", clean)),
-	)
-	changeProgress := []string{st.muted.Render(plural(changedFiles, "changed file"))}
-	if ahead > 0 {
-		changeProgress = append(changeProgress, st.accent.Render(fmt.Sprintf("↑%d commits", ahead)))
-	}
-	if behind > 0 {
-		changeProgress = append(changeProgress, st.warn.Render(fmt.Sprintf("↓%d commits", behind)))
-	}
-	if running := m.runningAgentCount(); running > 0 {
-		changeProgress = append(changeProgress, st.accent.Render(fmt.Sprintf("✦ %d agents working", running)))
-	}
-	body := []string{
-		fill(" "+strings.Join(progress, " "), inner, nil),
-		fill(" "+strings.Join(changeProgress, st.faint.Render("  ·  ")), inner, nil),
-		fill(" "+strings.Join(attention, st.faint.Render("  ·  ")), inner, nil),
-	}
-	return m.panel("Overview", st.faint.Render("live"), "", body, w, h, false)
-}
-
-func (m *Model) runningAgentCount() int {
-	n := 0
-	for _, s := range m.sessions {
-		if s.running {
-			n++
-		}
-	}
-	return n
 }
 
 func (m *Model) worktreesPane(w, h int) string {

@@ -19,10 +19,11 @@ from.
 - **Overlap warnings**: files changed in more than one worktree are flagged
   with `⚠`, counted in the header, and listed in each worktree's summary.
   Press `o` to show only those files.
-- **Review merges**: press `c` on a worktree to preview merging the other
-  active branches into it. The preview leaves files untouched; `m` applies the
-  merges in order. The target and source worktrees must have no uncommitted
-  changes.
+- **Merge worktrees**: press `c` on a worktree to preview merging other
+  worktrees' branches into it, choose which, and merge them in order. A
+  conflict can be handed to the worktree's agent. See *Merging worktrees*.
+- **Overview**: a summary above the list, and `w` for a table of every
+  worktree, its agent and what needs your attention.
 - **Two modes** (toggle with `m`):
   - *branch*: everything a worktree changed since it left the base branch,
     committed or not. A worktree with five commits never looks "clean".
@@ -165,6 +166,10 @@ config).
   Code uses whatever `/model` is set to in Claude Code itself. Your choice
   applies from the next message and is remembered for new chats
   (`[ai] claude_model` / `codex_model` in the config).
+- **Typing and copying.** The message box grows as you type or paste and
+  keeps pasted line breaks; `enter` sends, `shift+enter` (or `ctrl+j`)
+  starts a new line. `ctrl+y` copies the agent's last reply as it wrote it,
+  and dragging over the conversation copies those lines as plain text.
 - `ctrl+x` stops a working agent. Quitting while agents work asks first.
 - Creating a worktree with `n` has a **Task** field: fill it in and the new
   worktree starts with its agent already at work (after the setup command,
@@ -172,6 +177,35 @@ config).
 
 The agent reads your project's `CLAUDE.md` / `AGENTS.md` as usual. It
 sends your code to Anthropic or OpenAI just as the tool would on its own.
+
+### Overview of every worktree
+
+A summary above the list counts active and clean worktrees, commits ahead
+of and behind the base, working agents, and anything that needs you:
+agents waiting for approval or failed, unresolved merge conflicts,
+unreadable worktrees and overlapping files. Press `w` (or click the summary)
+for the full overview: a table of every worktree with its files, `+`/`−`
+lines, agent status and task, commits ahead and behind, uncommitted edits,
+overlaps and last commit, and a list of what needs attention. `enter`
+jumps to the worktree in the list, `a` opens its agent and `c` merges into
+it.
+
+### Merging worktrees
+
+Select the worktree to merge into and press `c`. grove checks every other
+worktree's branch against it with `git merge-tree`, which changes nothing,
+and shows how many commits each would bring and which files would
+conflict. Choose branches with `space` (`a` for all) and press `enter` to
+preview them in merge order: two branches that each merge cleanly can
+still conflict with each other, and the preview shows where the run would
+stop. `enter` again merges them one after another. The target must have no
+uncommitted changes to tracked files.
+
+If a merge stops on conflicts, grove shows the conflicted files and lets
+you ask the worktree's agent to resolve them (`a`; it is told not to commit
+or finish the merge, so you review first), open the worktree in your editor
+(`e`), abort the merge (`x`), or leave it for later. Pressing `c` on a
+worktree in the middle of a merge returns to this screen.
 
 When a feature is done, select its worktree and press `d`. grove deletes the
 folder and keeps the branch unless you tick *Also delete branch*, which also
@@ -195,8 +229,9 @@ worktrees work the same way. The main worktree can't be removed.
 | `y` | copy the path |
 | `n` | create a worktree (in the list) |
 | `a` | open the worktree's AI agent |
+| `w` | overview of every worktree |
+| `c` | merge other worktrees' branches into this one |
 | `u` | undo everything the worktree's agent changed |
-| `c` | preview merging other worktree branches into the selected worktree |
 | `d` | remove the worktree (asks first) |
 | `:` | run a git command in the selected worktree |
 | `m` | toggle branch / uncommitted mode |

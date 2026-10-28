@@ -108,7 +108,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -142,6 +142,33 @@ func TestRenderFitsScreen(t *testing.T) {
 				m = fakeModel(t, size[0], size[1])
 				m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude, agent.Codex} }
 				press(m, "a")
+			case "overview":
+				m = fakeModel(t, size[0], size[1])
+				press(m, "w")
+			case "merge":
+				m = fakeModel(t, size[0], size[1])
+				press(m, "c")
+				long := strings.Repeat("deep/", 20) + "file.ts"
+				var checks []mergeCheck
+				for i := range 30 {
+					checks = append(checks, mergeCheck{name: fmt.Sprintf("feature/branch-with-a-long-name-%d", i), branch: "b", commits: 3, paths: []string{long, long}, dirty: true})
+				}
+				m.Update(conflictCheckMsg{seq: m.conflicts.seq, checks: checks})
+			case "merge-plan":
+				c := m.conflicts
+				for i := range c.checks {
+					c.checks[i].selected = true
+				}
+				c.stage = stageConfirm
+				c.plan = []git.MergeStep{{Source: "b"}, {Source: "b", Conflicts: c.checks[0].paths}}
+			case "merge-conflict":
+				c := m.conflicts
+				c.stage, c.stopped, c.conflicted = stageConflict, c.checks[1].name, nil
+				for i := range 40 {
+					c.conflicted = append(c.conflicted, fmt.Sprintf("%s-%d", c.checks[0].paths[0], i))
+				}
+				c.merged = []string{c.checks[0].name}
+				c.remaining = []string{c.checks[2].name, c.checks[3].name}
 			}
 			out := m.render()
 			lines := strings.Split(out, "\n")

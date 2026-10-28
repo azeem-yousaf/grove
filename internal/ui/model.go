@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -104,13 +105,20 @@ type Model struct {
 
 	sessions   map[string]*session // worktree agents by folder
 	chatPath   string              // worktree whose agent the chat pane shows
-	chatInput  textinput.Model
+	chatInput  textarea.Model
 	chatView   viewport.Model
 	chatFollow bool // keep the chat scrolled to the newest line
+	chatSel    chatSelection
 	picker     *picker
 	undo       *undoAsk
 	quitAsk    bool
-	conflicts  *conflictReview
+	conflicts  *conflictReview // the merge review, while open
+	overview   bool            // the overview of every worktree, in place of both panes
+	ovPath     string          // worktree under the overview's cursor
+	ovStart    int             // first and past-last rows of the overview table on screen
+	ovEnd      int
+	ovRowsY    int // screen row of the first table row
+	mergeSeq   int
 
 	// Hooks for the agent, replaced in tests.
 	installed func() []agent.Kind
@@ -154,10 +162,6 @@ type (
 	clockMsg        time.Time
 	frameMsg        struct{}
 	actionMsg       struct {
-		text string
-		err  error
-	}
-	mergeDoneMsg struct {
 		text string
 		err  error
 	}
@@ -215,7 +219,7 @@ func (m *Model) applyTheme() {
 	m.st = newStyles(m.dark)
 	m.filter.SetStyles(textinput.DefaultStyles(m.dark))
 	m.gitCmd.input.SetStyles(textinput.DefaultStyles(m.dark))
-	m.chatInput.SetStyles(textinput.DefaultStyles(m.dark))
+	m.chatInput.SetStyles(chatInputStyles(m.dark))
 	m.renderedFor = ""
 }
 
@@ -342,11 +346,10 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		return m.onScan(msg)
 
 	case conflictCheckMsg:
-		if m.conflicts != nil && m.conflicts.target == msg.target {
-			m.conflicts.checks = msg.checks
-			m.conflicts.busy = false
-		}
-		return nil
+		return m.onConflictCheck(msg)
+
+	case mergePlanMsg:
+		return m.onMergePlan(msg)
 
 	case clockMsg:
 		m.now = time.Time(msg)
@@ -359,7 +362,8 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case frameMsg:
 		m.frame++
 		busy := m.scanning || m.diffPending() || m.removing != nil || m.anyAgentRunning() ||
-			m.creating != nil && m.creating.running || m.undo != nil && m.undo.running
+			m.creating != nil && m.creating.running || m.undo != nil && m.undo.running ||
+			m.conflicts != nil && m.conflicts.busy()
 		if !busy {
 			m.animating = false
 			return nil
@@ -422,27 +426,10 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		return m.notify(msg.text, toastOK)
 
 	case mergeDoneMsg:
-		if m.conflicts == nil || !m.conflicts.busy {
-			return nil
-		}
-		targetPath := m.snap.States[m.conflicts.target].Path
-		m.conflicts.busy = false
-		if msg.err == nil {
-			m.conflicts = nil
-			return tea.Batch(m.notify(msg.text, toastOK), m.startScan())
-		}
-		if strings.Contains(msg.text, "Merge stopped at") {
-			m.conflicts = nil
-			m.lastSel = targetPath
-			m.rebuildRows()
-			i := m.snap.IndexOf(targetPath)
-			if i < 0 {
-				return m.notify(msg.text+": "+msg.err.Error(), toastErr)
-			}
-			st := m.snap.States[i]
-			return tea.Batch(m.notify("Merge conflict in "+st.Name()+"; asking its agent to resolve it", toastInfo), m.openConflictAgent(st))
-		}
-		return tea.Batch(m.notify(msg.text+": "+msg.err.Error(), toastErr), m.startScan())
+		return m.onMergeDone(msg)
+
+	case mergeAbortMsg:
+		return m.onMergeAbort(msg)
 
 	case toastClearMsg:
 		if msg.id == m.toast.id {
@@ -454,17 +441,16 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		return m.onKey(msg)
 
 	case tea.PasteMsg:
-		// Bubble Tea delivers bracketed terminal pastes as a separate message,
-		// rather than as key input. Forward it to the focused chat input so
-		// pasted text is inserted instead of being ignored.
-		if m.focus == focusChat && m.chatSession() != nil {
-			var cmd tea.Cmd
-			m.chatInput, cmd = m.chatInput.Update(msg)
-			return cmd
-		}
+		return m.onPaste(msg)
 
 	case tea.MouseClickMsg:
 		return m.onClick(msg)
+
+	case tea.MouseMotionMsg:
+		return m.onMouseMotion(msg)
+
+	case tea.MouseReleaseMsg:
+		return m.onMouseRelease(msg)
 
 	case tea.MouseWheelMsg:
 		return m.onWheel(msg)
@@ -488,6 +474,48 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	if m.filterActive {
 		var cmd tea.Cmd
 		m.filter, cmd = m.filter.Update(msg)
+		return cmd
+	}
+	return nil
+}
+
+// onPaste puts a bracketed paste into whichever text field has the
+// keyboard, following the same order as onKey. Dialogs without a text field
+// ignore it, so pasted text can never act as key presses.
+func (m *Model) onPaste(msg tea.PasteMsg) tea.Cmd {
+	var cmd tea.Cmd
+	switch {
+	case m.quitAsk, m.conflicts != nil, m.confirm != nil, m.picker != nil, m.undo != nil:
+		return nil
+	case m.creating != nil:
+		c := m.creating
+		if c.running || c.focus > fieldTask {
+			return nil
+		}
+		c.inputs[c.focus], cmd = c.inputs[c.focus].Update(msg)
+		c.err = ""
+		switch c.focus {
+		case fieldBranch:
+			m.syncFolder()
+		case fieldFolder:
+			c.folderEdited = c.inputs[fieldFolder].Value() != c.autoFolder
+		}
+		return cmd
+	case m.gitCmd.active:
+		m.gitCmd.input, cmd = m.gitCmd.input.Update(msg)
+		return cmd
+	case m.focus == focusChat:
+		if s := m.chatSession(); s != nil && s.menu == nil && len(s.pending) == 0 {
+			m.chatInput, cmd = m.chatInput.Update(msg)
+			m.chatFollow = true
+		}
+		return cmd
+	case m.filterActive:
+		m.filter, cmd = m.filter.Update(msg)
+		if m.filter.Value() != m.filterQuery {
+			m.setFilter(m.filter.Value())
+			return tea.Batch(cmd, m.selectionChanged(false))
+		}
 		return cmd
 	}
 	return nil
@@ -668,6 +696,10 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	}
 
+	if m.overview {
+		return m.onOverviewKey(msg)
+	}
+
 	if m.filterActive {
 		switch msg.String() {
 		case "esc":
@@ -699,7 +731,7 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch {
 	case msg.String() == "ctrl+c":
 		return m.quitNow()
-	case msg.String() == "c":
+	case key.Matches(msg, k.Merge):
 		return m.openConflictReview()
 	case key.Matches(msg, k.Quit):
 		return m.quit()
@@ -756,6 +788,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.openGitPrompt()
 	case key.Matches(msg, k.Agent):
 		return m.openChat()
+	case key.Matches(msg, k.Overview):
+		return m.openOverview()
 	}
 
 	if m.focus == focusDiff {
@@ -1003,16 +1037,24 @@ func (m *Model) copyPath() tea.Cmd {
 }
 
 func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
-	if m.confirm != nil || m.creating != nil || m.picker != nil || m.undo != nil || m.quitAsk {
+	if m.confirm != nil || m.creating != nil || m.picker != nil || m.undo != nil || m.quitAsk || m.conflicts != nil {
 		return nil
 	}
 	if m.showHelp {
 		m.showHelp = false
 		return nil
 	}
+	if m.overview {
+		return m.onOverviewClick(msg)
+	}
+	m.chatSel = chatSelection{}
 	listW, _, paneH := m.layout()
 	top := 1 // header line
 	if msg.Y < top || msg.Y >= top+paneH {
+		return nil
+	}
+	if msg.Button == tea.MouseLeft && m.inChat(msg.X, msg.Y) {
+		m.startChatSelection(msg.Y)
 		return nil
 	}
 	if m.narrow() && m.focus != focusList || !m.narrow() && msg.X >= listW {
@@ -1025,7 +1067,11 @@ func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
 	if msg.Button != tea.MouseLeft || m.snap == nil {
 		return nil
 	}
-	line := msg.Y - top - 1 + m.listOffset
+	dh := m.dashHeight()
+	if msg.Y < top+dh {
+		return m.openOverview()
+	}
+	line := msg.Y - top - dh - 1 + m.listOffset
 	lines := m.listLines(listW - 2)
 	if line < 0 || line >= len(lines) || lines[line].row < 0 {
 		return nil
@@ -1045,6 +1091,15 @@ func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
 }
 
 func (m *Model) onWheel(msg tea.MouseWheelMsg) tea.Cmd {
+	if m.overview {
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			m.ovMove(-1)
+		case tea.MouseWheelDown:
+			m.ovMove(1)
+		}
+		return nil
+	}
 	listW, _, _ := m.layout()
 	overDiff := m.narrow() && m.focus == focusDiff || !m.narrow() && msg.X >= listW
 	if overDiff && m.focus == focusChat {

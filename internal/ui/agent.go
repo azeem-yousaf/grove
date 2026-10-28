@@ -9,13 +9,15 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/open"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -249,6 +251,7 @@ func (m *Model) showChat(s *session) tea.Cmd {
 	m.focus = focusChat
 	s.seen = true
 	m.chatFollow = true
+	m.chatSel = chatSelection{}
 	m.chatInput.SetValue("")
 	return tea.Batch(m.chatInput.Focus(), m.warm(s))
 }
@@ -268,6 +271,9 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	}
 	key := msg.String()
+	if !m.chatSel.dragging {
+		m.chatSel = chatSelection{}
+	}
 	switch key {
 	case "ctrl+c":
 		return m.quitNow()
@@ -289,6 +295,8 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "ctrl+z":
 		return m.askUndo(s)
+	case "ctrl+y":
+		return m.copyLastReply(s)
 	case "ctrl+a":
 		if s.running {
 			return m.notify("Stop the agent first (ctrl+x)", toastInfo)
@@ -331,6 +339,29 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 	var cmd tea.Cmd
 	m.chatInput, cmd = m.chatInput.Update(msg)
 	return cmd
+}
+
+// copyLastReply puts the agent's latest reply on the clipboard as it wrote
+// it, Markdown and all.
+func (m *Model) copyLastReply(s *session) tea.Cmd {
+	for i := len(s.entries) - 1; i >= 0; i-- {
+		if s.entries[i].role == roleAgent {
+			return m.copyText(s.entries[i].text, "Copied the agent's reply")
+		}
+	}
+	return m.notify("The agent hasn't replied yet", toastInfo)
+}
+
+// copyText puts text on the clipboard, through the terminal (OSC 52) and
+// the system clipboard both, since either can be unavailable.
+func (m *Model) copyText(text, done string) tea.Cmd {
+	return tea.Batch(
+		tea.SetClipboard(text),
+		action(func() (string, error) {
+			_ = open.Copy(text)
+			return done, nil
+		}),
+	)
 }
 
 // modelMenu offers models for a session's agent (/model).
@@ -911,7 +942,7 @@ func (m *Model) chatPane(w, h int) string {
 	bottom := m.chatBottom(s, inner)
 	m.chatView.SetWidth(inner)
 	m.chatView.SetHeight(max(h-2-len(bottom), 1))
-	m.chatView.SetContentLines(m.chatLines(s, inner))
+	m.chatView.SetContentLines(m.highlightChat(m.chatLines(s, inner), inner))
 	if m.chatFollow {
 		m.chatView.GotoBottom()
 	}
@@ -962,11 +993,19 @@ func (m *Model) chatBottom(s *session, width int) []string {
 		}
 	}
 	m.chatInput.SetWidth(max(width-4, 10))
-	hint := [][2]string{{"enter", "send"}, {"tab", "list"}, {"ctrl+z", "undo all"}, {"/model", "model"}}
+	hint := [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"ctrl+z", "undo all"}, {"/model", "model"}}
 	if s.running {
-		hint = [][2]string{{"ctrl+x", "stop"}, {"tab", "list"}, {"/model", "model"}}
+		hint = [][2]string{{"ctrl+x", "stop"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"/model", "model"}}
 	}
-	return []string{rule, " " + st.accent.Render("▸ ") + m.chatInput.View(), " " + m.hints(hint)}
+	out := []string{rule}
+	for i, l := range strings.Split(m.chatInput.View(), "\n") {
+		mark := "  "
+		if i == 0 {
+			mark = st.accent.Render("▸ ")
+		}
+		out = append(out, " "+mark+l)
+	}
+	return append(out, " "+ansi.Truncate(m.hints(hint), width-1, ""))
 }
 
 // chatLines renders the conversation for the viewport.
@@ -1153,11 +1192,34 @@ func (m *Model) quitModal() string {
 	}, "\n"))
 }
 
-func newChatInput() textinput.Model {
-	ti := textinput.New()
-	ti.Prompt = ""
-	ti.Placeholder = "ask the agent to do something in this worktree…"
-	return ti
+// newChatInput is the message box. It grows with what is typed or pasted,
+// up to chatInputMax lines, and keeps pasted line breaks. Enter sends, so
+// a new line is shift+enter, or ctrl+j where the terminal can't tell
+// shift+enter apart.
+func newChatInput() textarea.Model {
+	ta := textarea.New()
+	ta.Prompt = ""
+	ta.Placeholder = "ask the agent to do something in this worktree…"
+	ta.ShowLineNumbers = false
+	ta.DynamicHeight = true
+	ta.MinHeight = 1
+	ta.MaxHeight = chatInputMax
+	ta.MaxContentHeight = 5000 // visual rows; without it MaxHeight caps the lines
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "ctrl+j", "alt+enter"))
+	return ta
+}
+
+const chatInputMax = 6
+
+// chatInputStyles drops the textarea's cursor-line highlight, which looks
+// like a selection in a one-line box.
+func chatInputStyles(dark bool) textarea.Styles {
+	s := textarea.DefaultStyles(dark)
+	s.Focused.CursorLine = lipgloss.NewStyle()
+	s.Blurred.CursorLine = lipgloss.NewStyle()
+	s.Focused.EndOfBuffer = lipgloss.NewStyle()
+	s.Blurred.EndOfBuffer = lipgloss.NewStyle()
+	return s
 }
 
 func newChatView() viewport.Model { return viewport.New() }
