@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -24,10 +25,12 @@ type gitPrompt struct {
 	draft   string
 }
 
+// gitDoneMsg reports a command that ran with the terminal handed over.
 type gitDoneMsg struct {
-	name, line string
-	code       int
-	err        error
+	name    string // worktree it ran in
+	display string // the command as shown, e.g. "git status"
+	code    int
+	err     error
 }
 
 func newGitPrompt() gitPrompt {
@@ -105,20 +108,24 @@ func (m *Model) onGitPromptKey(msg tea.KeyPressMsg) tea.Cmd {
 // runGit hands the terminal to git so pagers, editors and prompts work,
 // then waits for enter so the output can be read before grove redraws.
 func (m *Model) runGit(st git.State, line string) tea.Cmd {
-	args := splitCommand(line)
+	return m.runInTerminal(st.Name(), st.Path, "git", splitCommand(line), "git "+line)
+}
+
+// runInTerminal runs prog in dir with the terminal handed over.
+func (m *Model) runInTerminal(name, dir, prog string, args []string, display string) tea.Cmd {
 	run := &gitRun{
-		dir:   st.Path,
+		dir:   dir,
+		prog:  prog,
 		args:  args,
-		title: m.st.pillAccent.Render("grove") + " " + m.st.bold.Render(st.Name()) + m.st.faint.Render("  "+st.Path),
-		cmd:   m.st.accent.Render("$ git ") + m.st.text.Render(line),
+		title: m.st.pillAccent.Render("grove") + " " + m.st.bold.Render(name) + m.st.faint.Render("  "+dir),
+		cmd:   m.st.accent.Render("$ ") + m.st.text.Render(display),
 		st:    m.st,
 	}
-	name := st.Name()
 	return tea.Exec(run, func(err error) tea.Msg {
 		if err == nil {
 			err = run.err
 		}
-		return gitDoneMsg{name: name, line: line, code: run.code, err: err}
+		return gitDoneMsg{name: name, display: display, code: run.code, err: err}
 	})
 }
 
@@ -126,21 +133,33 @@ func (m *Model) onGitDone(msg gitDoneMsg) tea.Cmd {
 	var note tea.Cmd
 	switch {
 	case msg.err != nil:
-		note = m.notify(fmt.Sprintf("git %s: %v", msg.line, msg.err), toastErr)
+		note = m.notify(fmt.Sprintf("%s: %v", msg.display, msg.err), toastErr)
 	case msg.code != 0:
-		note = m.notify(fmt.Sprintf("git %s exited with %d in %s", msg.line, msg.code, msg.name), toastErr)
+		note = m.notify(fmt.Sprintf("%s exited with %d in %s", msg.display, msg.code, msg.name), toastErr)
 	default:
-		note = m.notify(fmt.Sprintf("git %s · done in %s", msg.line, msg.name), toastOK)
+		note = m.notify(fmt.Sprintf("%s · done in %s", msg.display, msg.name), toastOK)
 	}
-	// Whatever git did, the worktrees may have changed.
+	// Whatever ran, the worktrees may have changed.
 	return tea.Batch(note, m.startScan())
 }
 
-// gitRun is a tea.ExecCommand: it frames git's output and pauses at the end.
+// shellCommand runs a configured command line through the platform shell.
+func shellCommand(line string) (prog string, args []string) {
+	if runtime.GOOS == "windows" {
+		if _, err := exec.LookPath("pwsh"); err == nil {
+			return "pwsh", []string{"-NoProfile", "-Command", line}
+		}
+		return "powershell", []string{"-NoProfile", "-Command", line}
+	}
+	return "sh", []string{"-c", line}
+}
+
+// gitRun is a tea.ExecCommand: it frames a command's output and pauses at
+// the end. prog defaults to git.
 type gitRun struct {
-	dir, title, cmd string
-	args            []string
-	st              styles
+	dir, prog, title, cmd string
+	args                  []string
+	st                    styles
 
 	stdin          io.Reader
 	stdout, stderr io.Writer
@@ -160,7 +179,11 @@ func (g *gitRun) Run() error {
 	lipgloss.Fprintln(out, "\n"+g.title)
 	lipgloss.Fprintln(out, g.cmd+"\n")
 
-	c := exec.Command("git", g.args...)
+	prog := g.prog
+	if prog == "" {
+		prog = "git"
+	}
+	c := exec.Command(prog, g.args...)
 	c.Dir = g.dir
 	c.Stdin, c.Stdout, c.Stderr = g.stdin, out, g.stderr
 	err := c.Run()

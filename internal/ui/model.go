@@ -96,6 +96,9 @@ type Model struct {
 	removing *removal // a removal git is working on
 
 	gitCmd gitPrompt
+
+	creating   *creation // the new-worktree dialog, while open
+	selectPath string    // worktree to select once the next scan shows it
 }
 
 type toastKind uint8
@@ -309,7 +312,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case frameMsg:
 		m.frame++
-		if !m.scanning && !m.diffPending() && m.removing == nil {
+		if !m.scanning && !m.diffPending() && m.removing == nil && (m.creating == nil || !m.creating.running) {
 			m.animating = false
 			return nil
 		}
@@ -336,6 +339,16 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case gitDoneMsg:
 		return m.onGitDone(msg)
 
+	case branchesMsg:
+		if c := m.creating; c != nil {
+			c.branches, c.loadErr = &msg.b, msg.err
+			m.syncFolder()
+		}
+		return nil
+
+	case createdMsg:
+		return m.onCreated(msg)
+
 	case actionMsg:
 		if msg.err != nil {
 			return m.notify(msg.err.Error(), toastErr)
@@ -361,6 +374,11 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	if m.gitCmd.active {
 		var cmd tea.Cmd
 		m.gitCmd.input, cmd = m.gitCmd.input.Update(msg)
+		return cmd
+	}
+	if c := m.creating; c != nil && c.focus <= fieldFolder {
+		var cmd tea.Cmd
+		c.inputs[c.focus], cmd = c.inputs[c.focus].Update(msg)
 		return cmd
 	}
 	if m.filterActive {
@@ -392,6 +410,13 @@ func (m *Model) onScan(msg scanMsg) tea.Cmd {
 		// Files may have changed underneath the cached diffs.
 		m.diffCache = map[string]string{}
 		m.diffErrs = map[string]error{}
+		if m.selectPath != "" {
+			if i := m.snap.IndexOf(m.selectPath); i >= 0 {
+				delete(m.collapsed, m.snap.States[i].Path)
+				m.lastSel = m.snap.States[i].Path
+				m.selectPath = ""
+			}
+		}
 		m.rebuildRows()
 		cmds = append(cmds, m.selectionChanged(true))
 	}
@@ -514,6 +539,9 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	if m.confirm != nil {
 		return m.onConfirmKey(msg)
 	}
+	if m.creating != nil {
+		return m.onCreateKey(msg)
+	}
 	if m.gitCmd.active {
 		return m.onGitPromptKey(msg)
 	}
@@ -633,6 +661,9 @@ func (m *Model) onListKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.jumpTree(1)
 	case key.Matches(msg, k.PrevTree):
 		return m.jumpTree(-1)
+	case key.Matches(msg, k.New):
+		// List only: in the diff pane n jumps to the next hunk.
+		return m.askCreate()
 	case !ok:
 		return nil
 	case key.Matches(msg, k.Collapse):
@@ -847,7 +878,7 @@ func (m *Model) copyPath() tea.Cmd {
 }
 
 func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
-	if m.confirm != nil {
+	if m.confirm != nil || m.creating != nil {
 		return nil
 	}
 	if m.showHelp {

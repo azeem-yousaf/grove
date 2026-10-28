@@ -69,13 +69,35 @@ grove --base develop      # compare against a different branch
 grove --plain             # print a text summary instead of the UI
 ```
 
-A typical two-feature setup:
+To start a feature, press `n` and type a branch name:
 
-```powershell
-git worktree add ..\my-app-feature-a -b feature/a
-git worktree add ..\my-app-feature-b -b feature/b
-grove
 ```
+ New worktree
+
+ Branch    feature/receipts
+           ✓ new branch
+ From      Development
+ Folder    C:\src\my-app-feature-receipts
+
+ [x] Copy .env, appsettings.Development.json
+ [x] Run setup: dotnet restore
+ [x] Open in code
+```
+
+- A new branch starts from your base branch and doesn't track it, so
+  `git pull` and `git push` in the worktree never touch the base.
+- An existing branch is checked out as is, and a branch that only exists on
+  the remote (`feature/x` or `origin/feature/x`) gets a local branch that
+  tracks it. A branch already checked out in another worktree is refused,
+  with that worktree's name.
+- The folder is suggested next to the main worktree and follows the branch
+  name until you type your own.
+- Files git ignores, which a new worktree wouldn't otherwise get, are
+  copied from the main worktree. By default that's `.env` and `.env.local`;
+  set your own under `[new] copy`. An optional `[new] setup` command runs in
+  the new folder afterwards.
+
+Plain `git worktree add` works too; grove picks new worktrees up on its own.
 
 To run git in one worktree without leaving grove, select it (or any of its
 files) and press `:`, then type the command, with or without the leading
@@ -110,6 +132,7 @@ worktrees work the same way. The main worktree can't be removed.
 | `f` | show in Explorer / Finder |
 | `e` | open the worktree in your editor |
 | `y` | copy the path |
+| `n` | create a worktree (in the list) |
 | `d` | remove the worktree (asks first) |
 | `:` | run a git command in the selected worktree |
 | `m` | toggle branch / uncommitted mode |
@@ -150,6 +173,10 @@ mode = "branch"      # or "uncommitted"
 refresh = "3s"       # how often to rescan while focused
 editor = ""          # for `e`; empty = first of code, cursor, zed, subl on PATH
 theme = "auto"       # "auto", "dark" or "light"
+
+[new]                # new worktrees (key n)
+copy = [".env", ".env.local", "appsettings.Development.json"]  # copied from the main worktree
+setup = "dotnet restore"                                       # run in the new folder; "" = none
 
 [open]               # per-extension override for `enter`
 ".log" = "notepad"

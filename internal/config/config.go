@@ -29,6 +29,17 @@ type Config struct {
 	// Open overrides the program used for a file extension, for example
 	// {".ts" = "code"}. Use "default" for the system default program.
 	Open map[string]string `toml:"open"`
+	// New sets up worktrees created with key n.
+	New NewWorktree `toml:"new"`
+}
+
+// NewWorktree configures creating worktrees.
+type NewWorktree struct {
+	// Copy lists files or folders, relative to the repository root, copied
+	// from the main worktree into a new one: things git ignores, like .env.
+	Copy []string `toml:"copy"`
+	// Setup is a command run in the new worktree, such as "npm install".
+	Setup string `toml:"setup"`
 }
 
 // Duration is a time.Duration written as a string such as "3s".
@@ -50,6 +61,7 @@ func Default() Config {
 		Refresh: Duration{3 * time.Second},
 		Theme:   "auto",
 		Open:    map[string]string{},
+		New:     NewWorktree{Copy: []string{".env", ".env.local"}},
 	}
 }
 
@@ -131,6 +143,14 @@ editor = ""
 
 # "auto", "dark" or "light"
 theme = "auto"
+
+# New worktrees (key: n).
+[new]
+# Files and folders git ignores that a new worktree needs, copied from the
+# main worktree. Glob patterns, relative to the repository root.
+copy = [".env", ".env.local"]
+# Command run in the new worktree after it's created. Empty = none.
+setup = ""
 
 # Files open with their system default program (key: enter).
 # Override that per extension here. "default" means the system default.

@@ -297,6 +297,102 @@ func TestRemoveWorktree(t *testing.T) {
 	}
 }
 
+func TestAddWorktree(t *testing.T) {
+	r, root := testRepo(t)
+	ctx := context.Background()
+	main := filepath.Join(root, "app")
+	g := func(args ...string) string {
+		t.Helper()
+		out, err := run(ctx, main, args...)
+		if err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	g("branch", "spare")
+	g("remote", "add", "origin", main)
+	g("update-ref", "refs/remotes/origin/feature/remote", "HEAD")
+	b, err := ListBranches(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolveCases := []struct {
+		in, local, remote string
+		kind              BranchKind
+	}{
+		{"spare", "spare", "", BranchLocal},
+		{"feature/remote", "feature/remote", "origin/feature/remote", BranchRemote},
+		{"origin/feature/remote", "feature/remote", "origin/feature/remote", BranchRemote},
+		{"feature/new", "feature/new", "", BranchNew},
+	}
+	for _, c := range resolveCases {
+		local, kind, remote := b.Resolve(c.in)
+		if local != c.local || kind != c.kind || remote != c.remote {
+			t.Errorf("Resolve(%s) = %s %d %s, want %s %d %s", c.in, local, kind, remote, c.local, c.kind, c.remote)
+		}
+	}
+
+	// A new branch from main must not track main.
+	newPath := filepath.Join(root, "app-new")
+	if _, err := AddWorktree(ctx, r, b, AddOptions{Path: newPath, Branch: "feature/new", From: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(ctx, main, "rev-parse", "--abbrev-ref", "feature/new@{upstream}"); err == nil {
+		t.Error("a new branch should not track its start point")
+	}
+	if _, err := AddWorktree(ctx, r, b, AddOptions{Path: filepath.Join(root, "app-spare"), Branch: "spare"}); err != nil {
+		t.Errorf("existing branch: %v", err)
+	}
+	local, err := AddWorktree(ctx, r, b, AddOptions{Path: filepath.Join(root, "app-remote"), Branch: "origin/feature/remote"})
+	if err != nil || local != "feature/remote" {
+		t.Fatalf("remote branch: %s, %v", local, err)
+	}
+	if up := g("rev-parse", "--abbrev-ref", "feature/remote@{upstream}"); up != "origin/feature/remote" {
+		t.Errorf("remote branch upstream = %q", up)
+	}
+	if _, err := AddWorktree(ctx, r, b, AddOptions{Path: filepath.Join(root, "app-dup"), Branch: "feature/a"}); err == nil {
+		t.Error("a branch checked out in another worktree should be refused")
+	}
+	if _, err := AddWorktree(ctx, r, b, AddOptions{Path: newPath, Branch: "feature/other"}); err == nil {
+		t.Error("an existing folder should be refused")
+	}
+
+	// Ignored files such as .env are copied from the main worktree.
+	must(t, os.WriteFile(filepath.Join(main, ".env"), []byte("KEY=1\n"), 0o644))
+	must(t, os.MkdirAll(filepath.Join(main, "config", "local"), 0o755))
+	must(t, os.WriteFile(filepath.Join(main, "config", "local", "a.json"), []byte("{}"), 0o644))
+	rels := MatchCopy(main, []string{".env", "config/local", "missing.txt"})
+	if len(rels) != 2 {
+		t.Fatalf("MatchCopy = %v", rels)
+	}
+	if n, err := CopyInto(main, newPath, rels); err != nil || n != 2 {
+		t.Fatalf("CopyInto = %d, %v", n, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(newPath, "config", "local", "a.json")); err != nil || string(b) != "{}" {
+		t.Errorf("copied folder content = %q, %v", b, err)
+	}
+	if n, _ := CopyInto(main, newPath, rels); n != 0 {
+		t.Errorf("second copy should skip existing files, copied %d", n)
+	}
+}
+
+func TestValidBranchName(t *testing.T) {
+	for _, ok := range []string{"feature/x", "fix-12", "release/2.3", "a.b"} {
+		if err := ValidBranchName(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "-x", "a b", "a..b", "a/", "/a", "a.lock", "a/.b", "x~1", "HEAD", "a//b"} {
+		if ValidBranchName(bad) == nil {
+			t.Errorf("%q should be invalid", bad)
+		}
+	}
+	if got := DefaultWorktreePath(filepath.FromSlash("/src/shop"), "shop", "feature/receipts"); got != filepath.FromSlash("/src/shop-feature-receipts") {
+		t.Errorf("DefaultWorktreePath = %s", got)
+	}
+}
+
 // resolve expands short (8.3) and symlinked temp paths the way git reports
 // them.
 func resolve(t *testing.T, p string) string {

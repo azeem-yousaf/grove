@@ -77,6 +77,8 @@ func (m *Model) render() string {
 	switch {
 	case m.confirm != nil:
 		return m.overlay(screen, m.removeModal())
+	case m.creating != nil:
+		return m.overlay(screen, m.createModal())
 	case m.showHelp:
 		return m.overlay(screen, m.helpModal())
 	}
@@ -167,6 +169,8 @@ func (m *Model) footer() string {
 	switch {
 	case m.confirm != nil:
 		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
+	case m.creating != nil:
+		pairs = [][2]string{{"enter", "create"}, {"tab", "next field"}, {"esc", "cancel"}}
 	case m.showHelp:
 		pairs = [][2]string{{"esc", "close"}}
 	case m.focus == focusDiff:
@@ -174,7 +178,7 @@ func (m *Model) footer() string {
 	case ok && r.kind == rowFile:
 		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	default:
-		pairs = [][2]string{{"enter", "fold"}, {":", "git"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "fold"}, {":", "git"}, {"n", "new"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	}
 
 	right := ""
@@ -624,11 +628,10 @@ func (m *Model) summaryLines(wt, width int) []string {
 	if len(m.snap.States) == 1 {
 		out = append(out, "",
 			"  "+st.bold.Render("Work on a second feature side by side"),
-			"  "+st.muted.Render("Each worktree is its own folder and branch, so nothing needs stashing:"),
+			"  "+st.muted.Render("Each worktree is its own folder and branch, so nothing needs stashing."),
 			"",
-			"    "+st.accent.Render(fmt.Sprintf("git worktree add ../%s-feature -b feature/name", m.repo.Name)),
-			"",
-			"  "+st.muted.Render("grove picks it up automatically."))
+			"    "+m.hints([][2]string{{"n", "create a worktree"}}),
+		)
 	}
 	return out
 }

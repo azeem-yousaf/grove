@@ -6,7 +6,7 @@ type keyMap struct {
 	Up, Down, PageUp, PageDown, Top, Bottom key.Binding
 	Collapse, Expand, NextTree, PrevTree    key.Binding
 	SwitchPane, Open, Reveal, Editor, Copy  key.Binding
-	Remove, Git                             key.Binding
+	Remove, Git, New                        key.Binding
 	Mode, Overlaps, Filter, Refresh         key.Binding
 	Help, Quit, Back                        key.Binding
 }
@@ -33,6 +33,7 @@ func defaultKeys() keyMap {
 		Copy:       b("y", "copy path", "y"),
 		Remove:     b("d", "remove worktree", "d"),
 		Git:        b(":", "run git here", ":"),
+		New:        b("n", "new worktree", "n"),
 		Mode:       b("m", "branch / uncommitted", "m"),
 		Overlaps:   b("o", "overlaps only", "o"),
 		Filter:     b("/", "filter", "/"),
@@ -63,6 +64,7 @@ var helpSections = []helpSection{
 		{"f", "show in folder"},
 		{"e", "open in editor"},
 		{"y", "copy path"},
+		{"n", "new worktree"},
 		{"d", "remove worktree"},
 		{":", "run a git command"},
 	}},

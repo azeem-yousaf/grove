@@ -78,6 +78,8 @@ func press(m *Model, keys ...string) {
 			msg = tea.KeyPressMsg{Code: tea.KeyLeft}
 		case "right":
 			msg = tea.KeyPressMsg{Code: tea.KeyRight}
+		case "shift+tab":
+			msg = tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
 		default:
 			r := []rune(k)[0]
 			msg = tea.KeyPressMsg{Code: r, Text: k}
@@ -89,7 +91,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -98,6 +100,11 @@ func TestRenderFitsScreen(t *testing.T) {
 			case "remove":
 				m = fakeModel(t, size[0], size[1])
 				press(m, "d", "enter", "b")
+			case "create":
+				m = fakeModel(t, size[0], size[1])
+				press(m, "n")
+				typeText(m, "feature/a-much-longer-branch-name-than-usual")
+				press(m, "enter")
 			}
 			out := m.render()
 			lines := strings.Split(out, "\n")
@@ -263,6 +270,186 @@ func TestGitPrompt(t *testing.T) {
 	if m.gitCmd.active {
 		t.Error("q after closing the prompt should not reopen it")
 	}
+}
+
+func TestCreateDialog(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	press(m, "n")
+	c := m.creating
+	if c == nil {
+		t.Fatal("n should open the new-worktree dialog")
+	}
+	m.Update(branchesMsg{b: git.Branches{
+		Local:  map[string]bool{"main": true, "feature/auth": true, "feature/cart": true, "spare": true},
+		Remote: map[string]bool{"origin/feature/remote": true},
+	}})
+	if got := c.inputs[fieldFrom].Value(); got != "main" {
+		t.Errorf("From should default to the base branch, got %q", got)
+	}
+
+	typeText(m, "feature/receipts")
+	if got, want := c.inputs[fieldFolder].Value(), filepath.FromSlash("/src/shop-feature-receipts"); got != want {
+		t.Errorf("suggested folder = %q, want %q", got, want)
+	}
+	if text, ok := m.branchStatus(); !ok || text != "new branch" {
+		t.Errorf("status = %q, %v", text, ok)
+	}
+
+	// A branch that another worktree has checked out can't be used.
+	clearInput(m, fieldBranch)
+	typeText(m, "feature/auth")
+	if text, ok := m.branchStatus(); ok || !strings.Contains(text, "checked out in feature/auth") {
+		t.Errorf("status = %q, %v", text, ok)
+	}
+	press(m, "enter")
+	if c.running || !strings.Contains(c.err, "checked out") {
+		t.Errorf("enter on a bad branch should explain, not create: running=%v err=%q", c.running, c.err)
+	}
+
+	// Existing and remote branches skip the From field.
+	clearInput(m, fieldBranch)
+	typeText(m, "feature/remote")
+	if text, _ := m.branchStatus(); text != "new local branch tracking origin/feature/remote" {
+		t.Errorf("remote status = %q", text)
+	}
+	for _, f := range m.fields() {
+		if f == fieldFrom {
+			t.Error("From should not be offered for an existing branch")
+		}
+	}
+
+	// Typing a folder stops the suggestion from overwriting it.
+	press(m, "tab")
+	if c.focus != fieldFolder {
+		t.Fatalf("tab should go to Folder, focus = %d", c.focus)
+	}
+	typeText(m, "-mine")
+	press(m, "shift+tab")
+	typeText(m, "x")
+	if !strings.HasSuffix(c.inputs[fieldFolder].Value(), "-mine") {
+		t.Errorf("custom folder was replaced: %q", c.inputs[fieldFolder].Value())
+	}
+
+	press(m, "esc")
+	if m.creating != nil {
+		t.Error("esc should close the dialog")
+	}
+}
+
+// TestCreateEndToEnd creates a real worktree through the dialog.
+func TestCreateEndToEnd(t *testing.T) {
+	if git.Available() != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "shop")
+	gitc := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", mainDir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.MkdirAll(mainDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitc("init", "-q", "-b", "main")
+	os.WriteFile(filepath.Join(mainDir, "a.txt"), []byte("a\n"), 0o644)
+	os.WriteFile(filepath.Join(mainDir, ".gitignore"), []byte(".env\n"), 0o644)
+	gitc("add", ".")
+	gitc("commit", "-qm", "init")
+	os.WriteFile(filepath.Join(mainDir, ".env"), []byte("SECRET=1\n"), 0o644)
+
+	ctx := context.Background()
+	repo, err := git.Open(ctx, mainDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Editor = "none-for-test"
+	m := New(ctx, Options{Repo: repo, Config: cfg, Version: "test"})
+	m.opener.Editor = ""
+	m.Update(tea.WindowSizeMsg{Width: 140, Height: 36})
+	m.Update(baseMsg{base: "main"})
+	scan := func() {
+		snap, err := git.Scan(ctx, repo, "main", git.ModeBranch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Update(scanMsg{seq: m.scanSeq, snap: snap})
+	}
+	scan()
+
+	press(m, "n")
+	b, err := git.ListBranches(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Update(branchesMsg{b: b})
+	typeText(m, "feature/receipts")
+	want := filepath.Join(filepath.Dir(m.creating.mainPath), "shop-feature-receipts")
+	if got := m.creating.inputs[fieldFolder].Value(); !git.SamePath(got, want) {
+		t.Fatalf("folder = %s, want %s", got, want)
+	}
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	var created *createdMsg
+	for _, msg := range runCmds(cmd) {
+		if c, ok := msg.(createdMsg); ok {
+			created = &c
+		}
+	}
+	if created == nil || created.err != nil {
+		t.Fatalf("create = %+v", created)
+	}
+	m.Update(*created)
+	if m.creating != nil || created.copied != 1 {
+		t.Errorf("after create: dialog open=%v, copied=%d", m.creating != nil, created.copied)
+	}
+	if b, err := os.ReadFile(filepath.Join(created.path, ".env")); err != nil || string(b) != "SECRET=1\n" {
+		t.Errorf(".env not copied: %q %v", b, err)
+	}
+
+	scan()
+	r, ok := m.selected()
+	if !ok || r.kind != rowTree || m.snap.States[r.wt].Branch != "feature/receipts" {
+		t.Errorf("the new worktree should be selected after the scan, got %+v", r)
+	}
+}
+
+// runCmds runs a command and any batch it returns, collecting the messages.
+// Ticks are skipped so the test doesn't wait on animations.
+func runCmds(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	var out []tea.Msg
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	select {
+	case msg := <-done:
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, c := range batch {
+				out = append(out, runCmds(c)...)
+			}
+			return out
+		}
+		return append(out, msg)
+	case <-time.After(30 * time.Second):
+		return out
+	}
+}
+
+func typeText(m *Model, s string) {
+	for _, r := range s {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+}
+
+func clearInput(m *Model, field int) {
+	m.creating.inputs[field].SetValue("")
+	m.syncFolder()
 }
 
 func TestLeftAtDiffEdgeReturnsToList(t *testing.T) {
