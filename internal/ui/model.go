@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/open"
@@ -21,6 +22,7 @@ type focusArea uint8
 const (
 	focusList focusArea = iota
 	focusDiff
+	focusChat // the worktree agent, shown in place of the diff
 )
 
 // Options configure a new Model.
@@ -99,6 +101,20 @@ type Model struct {
 
 	creating   *creation // the new-worktree dialog, while open
 	selectPath string    // worktree to select once the next scan shows it
+
+	sessions   map[string]*session // worktree agents by folder
+	chatPath   string              // worktree whose agent the chat pane shows
+	chatInput  textinput.Model
+	chatView   viewport.Model
+	chatFollow bool // keep the chat scrolled to the newest line
+	picker     *picker
+	undo       *undoAsk
+	quitAsk    bool
+
+	// Hooks for the agent, replaced in tests.
+	installed func() []agent.Kind
+	runAgent  func(context.Context, agent.Request, func(agent.Event))
+	saveAgent func(string) error
 }
 
 type toastKind uint8
@@ -166,6 +182,12 @@ func New(ctx context.Context, o Options) *Model {
 		termFocused:  true,
 		lastClickRow: -1,
 		gitCmd:       newGitPrompt(),
+		sessions:     map[string]*session{},
+		chatInput:    newChatInput(),
+		chatView:     newChatView(),
+		installed:    agent.Installed,
+		runAgent:     agent.Run,
+		saveAgent:    defaultSaveAgent,
 	}
 	switch o.Config.Theme {
 	case "light":
@@ -181,6 +203,7 @@ func (m *Model) applyTheme() {
 	m.st = newStyles(m.dark)
 	m.filter.SetStyles(textinput.DefaultStyles(m.dark))
 	m.gitCmd.input.SetStyles(textinput.DefaultStyles(m.dark))
+	m.chatInput.SetStyles(textinput.DefaultStyles(m.dark))
 	m.renderedFor = ""
 }
 
@@ -243,6 +266,10 @@ func (m *Model) refreshInterval() time.Duration {
 	}
 	if !m.termFocused {
 		d = max(d*5, 15*time.Second)
+	}
+	// Agents' edits should show up while they work.
+	if m.anyAgentRunning() {
+		d = min(d, time.Second)
 	}
 	return d
 }
@@ -312,7 +339,9 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case frameMsg:
 		m.frame++
-		if !m.scanning && !m.diffPending() && m.removing == nil && (m.creating == nil || !m.creating.running) {
+		busy := m.scanning || m.diffPending() || m.removing != nil || m.anyAgentRunning() ||
+			m.creating != nil && m.creating.running || m.undo != nil && m.undo.running
+		if !busy {
 			m.animating = false
 			return nil
 		}
@@ -349,6 +378,24 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case createdMsg:
 		return m.onCreated(msg)
 
+	case agentMsg:
+		return m.onAgent(msg)
+
+	case agentSavedMsg:
+		if msg.err != nil {
+			return m.notify("Couldn't save the choice: "+msg.err.Error(), toastErr)
+		}
+		return nil
+
+	case undoReadyMsg:
+		return m.onUndoReady(msg)
+
+	case undoDoneMsg:
+		return m.onUndoDone(msg)
+
+	case quitNowMsg:
+		return tea.Quit
+
 	case actionMsg:
 		if msg.err != nil {
 			return m.notify(msg.err.Error(), toastErr)
@@ -376,9 +423,14 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		m.gitCmd.input, cmd = m.gitCmd.input.Update(msg)
 		return cmd
 	}
-	if c := m.creating; c != nil && c.focus <= fieldFolder {
+	if c := m.creating; c != nil && c.focus <= fieldTask {
 		var cmd tea.Cmd
 		c.inputs[c.focus], cmd = c.inputs[c.focus].Update(msg)
+		return cmd
+	}
+	if m.focus == focusChat {
+		var cmd tea.Cmd
+		m.chatInput, cmd = m.chatInput.Update(msg)
 		return cmd
 	}
 	if m.filterActive {
@@ -536,21 +588,28 @@ func (m *Model) toggleCollapse(wt int) tea.Cmd {
 func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	k := m.keys
 
-	if m.confirm != nil {
+	switch {
+	case m.quitAsk:
+		return m.onQuitKey(msg)
+	case m.confirm != nil:
 		return m.onConfirmKey(msg)
-	}
-	if m.creating != nil {
+	case m.creating != nil:
 		return m.onCreateKey(msg)
-	}
-	if m.gitCmd.active {
+	case m.picker != nil:
+		return m.onPickerKey(msg)
+	case m.undo != nil:
+		return m.onUndoKey(msg)
+	case m.gitCmd.active:
 		return m.onGitPromptKey(msg)
+	case m.focus == focusChat:
+		return m.onChatKey(msg)
 	}
 	if m.showHelp {
 		if key.Matches(msg, k.Help, k.Back, k.Quit) || msg.String() == "enter" {
 			m.showHelp = false
 		}
 		if msg.String() == "ctrl+c" {
-			return tea.Quit
+			return m.quitNow()
 		}
 		return nil
 	}
@@ -572,7 +631,7 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		case "down", "ctrl+n":
 			return m.move(1)
 		case "ctrl+c":
-			return tea.Quit
+			return m.quitNow()
 		}
 		var cmd tea.Cmd
 		m.filter, cmd = m.filter.Update(msg)
@@ -584,8 +643,10 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	switch {
+	case msg.String() == "ctrl+c":
+		return m.quitNow()
 	case key.Matches(msg, k.Quit):
-		return tea.Quit
+		return m.quit()
 	case key.Matches(msg, k.Help):
 		m.showHelp = true
 		return nil
@@ -606,11 +667,15 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.filter.CursorEnd()
 		return m.filter.Focus()
 	case key.Matches(msg, k.SwitchPane):
-		if m.focus == focusList {
-			m.focus = focusDiff
-		} else {
+		if m.focus != focusList {
 			m.focus = focusList
+			return nil
 		}
+		// Back to the agent if its worktree is the one selected.
+		if r, ok := m.selected(); ok && m.chatPath != "" && git.SamePath(m.snap.States[r.wt].Path, m.chatPath) && m.chatSession() != nil {
+			return m.showChat(m.chatSession())
+		}
+		m.focus = focusDiff
 		return nil
 	case key.Matches(msg, k.Back):
 		switch {
@@ -633,6 +698,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.askRemove()
 	case key.Matches(msg, k.Git):
 		return m.openGitPrompt()
+	case key.Matches(msg, k.Agent):
+		return m.openChat()
 	}
 
 	if m.focus == focusDiff {
@@ -666,6 +733,8 @@ func (m *Model) onListKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.askCreate()
 	case !ok:
 		return nil
+	case key.Matches(msg, k.Undo):
+		return m.askUndo(m.sessionFor(m.snap.States[r.wt].Path))
 	case key.Matches(msg, k.Collapse):
 		if r.kind == rowFile {
 			for i := m.cursor; i >= 0; i-- {
@@ -878,7 +947,7 @@ func (m *Model) copyPath() tea.Cmd {
 }
 
 func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
-	if m.confirm != nil || m.creating != nil {
+	if m.confirm != nil || m.creating != nil || m.picker != nil || m.undo != nil || m.quitAsk {
 		return nil
 	}
 	if m.showHelp {
@@ -890,8 +959,10 @@ func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
 	if msg.Y < top || msg.Y >= top+paneH {
 		return nil
 	}
-	if m.narrow() && m.focus == focusDiff || !m.narrow() && msg.X >= listW {
-		m.focus = focusDiff
+	if m.narrow() && m.focus != focusList || !m.narrow() && msg.X >= listW {
+		if m.focus != focusChat {
+			m.focus = focusDiff
+		}
 		return nil
 	}
 	m.focus = focusList
@@ -920,6 +991,17 @@ func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
 func (m *Model) onWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	listW, _, _ := m.layout()
 	overDiff := m.narrow() && m.focus == focusDiff || !m.narrow() && msg.X >= listW
+	if overDiff && m.focus == focusChat {
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			m.chatView.ScrollUp(3)
+			m.chatFollow = false
+		case tea.MouseWheelDown:
+			m.chatView.ScrollDown(3)
+			m.chatFollow = m.chatView.AtBottom()
+		}
+		return nil
+	}
 	switch msg.Button {
 	case tea.MouseWheelUp:
 		if overDiff {

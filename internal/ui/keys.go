@@ -6,7 +6,7 @@ type keyMap struct {
 	Up, Down, PageUp, PageDown, Top, Bottom key.Binding
 	Collapse, Expand, NextTree, PrevTree    key.Binding
 	SwitchPane, Open, Reveal, Editor, Copy  key.Binding
-	Remove, Git, New                        key.Binding
+	Remove, Git, New, Agent, Undo           key.Binding
 	Mode, Overlaps, Filter, Refresh         key.Binding
 	Help, Quit, Back                        key.Binding
 }
@@ -34,6 +34,8 @@ func defaultKeys() keyMap {
 		Remove:     b("d", "remove worktree", "d"),
 		Git:        b(":", "run git here", ":"),
 		New:        b("n", "new worktree", "n"),
+		Agent:      b("a", "worktree agent", "a"),
+		Undo:       b("u", "undo agent changes", "u"),
 		Mode:       b("m", "branch / uncommitted", "m"),
 		Overlaps:   b("o", "overlaps only", "o"),
 		Filter:     b("/", "filter", "/"),
@@ -74,6 +76,14 @@ var helpSections = []helpSection{
 		{"/", "filter files"},
 		{"r", "refresh now"},
 		{"q", "quit"},
+	}},
+	{"Agent", [][2]string{
+		{"a", "open worktree agent"},
+		{"enter", "send / allow / run"},
+		{"esc", "deny or skip a card"},
+		{"ctrl+x", "stop the agent"},
+		{"ctrl+z u", "undo its changes"},
+		{"ctrl+a", "claude / codex"},
 	}},
 	{"Diff pane", [][2]string{
 		{"↑↓ ←→", "scroll"},

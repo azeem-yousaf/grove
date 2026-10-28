@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/charmbracelet/x/ansi"
@@ -22,6 +23,7 @@ func fakeModel(t *testing.T, w, h int) *Model {
 	t.Helper()
 	repo := &git.Repo{Here: filepath.FromSlash("/src/shop-auth"), Name: "shop"}
 	m := New(context.Background(), Options{Repo: repo, Config: config.Default(), Version: "test"})
+	noAgents(m)
 	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	m.Update(baseMsg{base: "main"})
 	now := time.Now()
@@ -60,6 +62,18 @@ func fakeModel(t *testing.T, w, h int) *Model {
 
 func plain(m *Model) string { return ansi.Strip(m.render()) }
 
+// noAgents makes a model independent of the AI tools and editors on this
+// machine. Without clearing the editor, tests that create a worktree would
+// launch VS Code for real.
+func noAgents(m *Model) {
+	m.opener.Editor = ""
+	m.installed = func() []agent.Kind { return nil }
+	m.saveAgent = func(string) error { return nil }
+	m.runAgent = func(_ context.Context, _ agent.Request, emit func(agent.Event)) {
+		emit(agent.Event{Kind: agent.EvDone, Err: fmt.Errorf("no agent in tests")})
+	}
+}
+
 func press(m *Model, keys ...string) {
 	for _, k := range keys {
 		var msg tea.KeyPressMsg
@@ -91,7 +105,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "picker"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -105,6 +119,21 @@ func TestRenderFitsScreen(t *testing.T) {
 				press(m, "n")
 				typeText(m, "feature/a-much-longer-branch-name-than-usual")
 				press(m, "enter")
+			case "agent":
+				m = fakeModel(t, size[0], size[1])
+				m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude} }
+				press(m, "a")
+				s := m.chatSession()
+				s.entries = []chatEntry{
+					{roleUser, strings.Repeat("please change a lot of things ", 8)},
+					{roleAgent, "Done.\n\n```grove-run\ngit commit -m \"" + strings.Repeat("long message ", 12) + "\"\n```"},
+					{roleTool, "Edit " + strings.Repeat("deep/", 30) + "file.ts"},
+				}
+				s.pending = []pendingAction{{pendingApproval, strings.Repeat("npm run test -- --long-flag ", 6)}}
+			case "picker":
+				m = fakeModel(t, size[0], size[1])
+				m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude, agent.Codex} }
+				press(m, "a")
 			}
 			out := m.render()
 			lines := strings.Split(out, "\n")
@@ -369,6 +398,7 @@ func TestCreateEndToEnd(t *testing.T) {
 	cfg := config.Default()
 	cfg.Editor = "none-for-test"
 	m := New(ctx, Options{Repo: repo, Config: cfg, Version: "test"})
+	noAgents(m)
 	m.opener.Editor = ""
 	m.Update(tea.WindowSizeMsg{Width: 140, Height: 36})
 	m.Update(baseMsg{base: "main"})

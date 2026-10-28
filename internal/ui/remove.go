@@ -65,7 +65,7 @@ func (m *Model) onConfirmKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "esc", "q", "n":
 		m.confirm = nil
 	case "ctrl+c":
-		return tea.Quit
+		return m.quitNow()
 	case "b":
 		if r.canBranch {
 			r.deleteBranch = !r.deleteBranch

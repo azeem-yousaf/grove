@@ -112,6 +112,58 @@ prompts behave normally (`commit` without `-m`, `log`, `rebase -i`, `push`
 asking for credentials). Press enter afterwards to return; the worktree is
 rescanned straight away. `↑` brings back earlier commands.
 
+### An AI agent per worktree
+
+Press `a` on a worktree to give it an agent: Claude Code or Codex, whichever
+is installed and signed in on your PC. grove never asks for an API key; it
+runs the tool you already use. If both are installed, grove asks once and
+remembers (`ctrl+a` switches later; it's saved as `[ai] agent` in the
+config).
+
+```
+╭─ ✦ feature/auth · Claude Code ─────────────────── $0.04 ─╮
+│ you  Add a remember-me checkbox to the login page        │
+│      ↳ Read src/auth/login.ts                            │
+│      ↳ Edit src/auth/login.ts                            │
+│                                                          │
+│ ✦    Added the checkbox. When you're happy:              │
+│        git commit -am "Add remember me"                  │
+│──────────────────────────────────────────────────────────│
+│ Claude Code wants to run                                 │
+│ npm test -- auth                                         │
+│ enter allow  esc deny                                    │
+╰──────────────────────────────────────────────────────────╯
+```
+
+- Each worktree has its own agent and conversation, and they can work at
+  the same time. The worktree's dot in the list shows what its agent is
+  doing (spinning while it works, amber `✦` when it needs you), files it
+  changed get a `✦`, and a toast tells you when an agent in another
+  worktree finishes or needs you.
+- **An agent edits only its own worktree.** It runs in that folder, is told
+  the paths of the other worktrees and to keep out of them, and:
+  - with Claude Code, edits inside the folder are accepted, while shell
+    commands and anything outside the folder are refused unless you allow
+    them. Refused commands come back as cards (`enter` allow, `esc` deny);
+    files outside the worktree are simply blocked.
+  - with Codex, its `workspace-write` sandbox limits writes to the folder.
+    Codex can still read outside it, so isolation is stronger with Claude
+    Code.
+- **Git changes stay yours.** Agents are asked not to commit, check out,
+  rebase or push. They suggest those commands instead, which appear as
+  cards you can run (`enter`), edit in the `:` prompt (`e`) or skip.
+- **Undo.** Before an agent's first turn grove takes a checkpoint of the
+  worktree (a git tree object; your index, branch and files are untouched).
+  `ctrl+z` in the chat, or `u` in the list, shows every file changed since
+  and puts them back byte for byte.
+- `ctrl+x` stops a working agent. Quitting while agents work asks first.
+- Creating a worktree with `n` has a **Task** field: fill it in and the new
+  worktree starts with its agent already at work (after the setup command,
+  if there is one).
+
+The agent reads your project's `CLAUDE.md` / `AGENTS.md` as usual. It
+sends your code to Anthropic or OpenAI just as the tool would on its own.
+
 When a feature is done, select its worktree and press `d`. grove deletes the
 folder and keeps the branch unless you tick *Also delete branch*, which also
 shows how many commits aren't in the base branch yet. A worktree with
@@ -133,6 +185,8 @@ worktrees work the same way. The main worktree can't be removed.
 | `e` | open the worktree in your editor |
 | `y` | copy the path |
 | `n` | create a worktree (in the list) |
+| `a` | open the worktree's AI agent |
+| `u` | undo everything the worktree's agent changed |
 | `d` | remove the worktree (asks first) |
 | `:` | run a git command in the selected worktree |
 | `m` | toggle branch / uncommitted mode |
@@ -177,6 +231,10 @@ theme = "auto"       # "auto", "dark" or "light"
 [new]                # new worktrees (key n)
 copy = [".env", ".env.local", "appsettings.Development.json"]  # copied from the main worktree
 setup = "dotnet restore"                                       # run in the new folder; "" = none
+
+[ai]                 # the worktree agents (key a)
+agent = "claude"     # "claude" or "codex"; "" = ask when both are installed
+model = ""           # passed to the agent; "" = its default
 
 [open]               # per-extension override for `enter`
 ".log" = "notepad"

@@ -393,6 +393,71 @@ func TestValidBranchName(t *testing.T) {
 	}
 }
 
+func TestCheckpointUndo(t *testing.T) {
+	r, root := testRepo(t)
+	ctx := context.Background()
+	a := filepath.Join(root, "app-a")
+	_ = r
+	read := func(p string) string {
+		b, _ := os.ReadFile(filepath.Join(a, filepath.FromSlash(p)))
+		return string(b)
+	}
+	before := read("shared.txt")
+	newFileBefore := read("src/new file.go") // untracked, must survive undo as it was
+
+	tree, err := Checkpoint(ctx, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := func() string {
+		out, _ := run(ctx, a, "status", "--porcelain")
+		return string(out)
+	}
+	statusBefore := status()
+
+	// What an agent might do: edit a tracked file, edit an untracked one,
+	// create files in a new folder, delete a file.
+	must(t, os.WriteFile(filepath.Join(a, "shared.txt"), []byte("agent was here\n"), 0o644))
+	must(t, os.WriteFile(filepath.Join(a, "src", "new file.go"), []byte("changed\n"), 0o644))
+	must(t, os.MkdirAll(filepath.Join(a, "gen", "deep"), 0o755))
+	must(t, os.WriteFile(filepath.Join(a, "gen", "deep", "out.txt"), []byte("x"), 0o644))
+	must(t, os.Remove(filepath.Join(a, "keep.txt")))
+
+	changes, err := ChangedSince(ctx, a, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Status{}
+	for _, c := range changes {
+		got[c.Path] = c.Status
+	}
+	want := map[string]Status{"shared.txt": Modified, "src/new file.go": Modified, "gen/deep/out.txt": Added, "keep.txt": Deleted}
+	if len(got) != len(want) {
+		t.Fatalf("changes = %v, want %v", got, want)
+	}
+	for p, s := range want {
+		if got[p] != s {
+			t.Errorf("%s: %c, want %c", p, got[p], s)
+		}
+	}
+
+	if err := RestoreCheckpoint(ctx, a, tree, changes); err != nil {
+		t.Fatal(err)
+	}
+	if read("shared.txt") != before || read("src/new file.go") != newFileBefore || read("keep.txt") != "keep\n" {
+		t.Error("files were not restored")
+	}
+	if _, err := os.Stat(filepath.Join(a, "gen")); !os.IsNotExist(err) {
+		t.Error("the folder the agent created should be gone")
+	}
+	if s := status(); s != statusBefore {
+		t.Errorf("git status changed:\nbefore %q\nafter  %q", statusBefore, s)
+	}
+	if left, _ := ChangedSince(ctx, a, tree); len(left) != 0 {
+		t.Errorf("still differs from the checkpoint: %v", left)
+	}
+}
+
 // resolve expands short (8.3) and symlinked temp paths the way git reports
 // them.
 func resolve(t *testing.T, p string) string {

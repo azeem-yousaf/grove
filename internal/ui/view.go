@@ -63,22 +63,34 @@ func (m *Model) render() string {
 	}
 
 	listW, diffW, paneH := m.layout()
+	right := func() string {
+		if m.focus == focusChat && m.chatSession() != nil {
+			return m.chatPane(diffW, paneH)
+		}
+		return m.diffPane(diffW, paneH)
+	}
 	var body string
 	switch {
-	case m.narrow() && m.focus == focusDiff:
-		body = m.diffPane(diffW, paneH)
+	case m.narrow() && m.focus != focusList:
+		body = right()
 	case m.narrow():
 		body = m.listPane(listW, paneH)
 	default:
-		body = lipgloss.JoinHorizontal(lipgloss.Top, m.listPane(listW, paneH), m.diffPane(diffW, paneH))
+		body = lipgloss.JoinHorizontal(lipgloss.Top, m.listPane(listW, paneH), right())
 	}
 	screen := lipgloss.JoinVertical(lipgloss.Left, m.header(), body, m.footer())
 
 	switch {
+	case m.quitAsk:
+		return m.overlay(screen, m.quitModal())
 	case m.confirm != nil:
 		return m.overlay(screen, m.removeModal())
 	case m.creating != nil:
 		return m.overlay(screen, m.createModal())
+	case m.picker != nil:
+		return m.overlay(screen, m.pickerModal())
+	case m.undo != nil:
+		return m.overlay(screen, m.undoModal())
 	case m.showHelp:
 		return m.overlay(screen, m.helpModal())
 	}
@@ -171,6 +183,10 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
 	case m.creating != nil:
 		pairs = [][2]string{{"enter", "create"}, {"tab", "next field"}, {"esc", "cancel"}}
+	case m.picker != nil, m.undo != nil, m.quitAsk:
+		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
+	case m.focus == focusChat:
+		pairs = [][2]string{{"enter", "send"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
 	case m.showHelp:
 		pairs = [][2]string{{"esc", "close"}}
 	case m.focus == focusDiff:
@@ -178,7 +194,7 @@ func (m *Model) footer() string {
 	case ok && r.kind == rowFile:
 		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	default:
-		pairs = [][2]string{{"enter", "fold"}, {":", "git"}, {"n", "new"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {":", "git"}, {"n", "new"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	}
 
 	right := ""
@@ -619,7 +635,11 @@ func (m *Model) summaryLines(wt, width int) []string {
 		out = append(out, shared...)
 	}
 
-	acts := [][2]string{{":", "run git"}, {"e", "open in " + m.editorName()}, {"f", "open folder"}, {"y", "copy path"}}
+	acts := [][2]string{{"a", "agent"}}
+	if ses := m.sessionFor(s.Path); ses != nil && ses.checkpoint != "" {
+		acts = append(acts, [2]string{"u", "undo agent"})
+	}
+	acts = append(acts, [][2]string{{":", "run git"}, {"e", "open in " + m.editorName()}, {"f", "folder"}, {"y", "copy path"}}...)
 	if !s.Main && !s.Bare {
 		acts = append(acts, [2]string{"d", "remove"})
 	}
@@ -650,7 +670,7 @@ func (m *Model) helpModal() string {
 	col := func(sec helpSection) string {
 		lines := []string{st.bold.Foreground(st.p.accent).Render(sec.title)}
 		for _, k := range sec.keys {
-			lines = append(lines, st.key.Render(fmt.Sprintf("%-7s", k[0]))+st.keyDesc.Render(k[1]))
+			lines = append(lines, st.key.Render(fmt.Sprintf("%-9s", k[0]))+st.keyDesc.Render(k[1]))
 		}
 		return lipgloss.NewStyle().Width(30).Render(strings.Join(lines, "\n"))
 	}
@@ -658,10 +678,17 @@ func (m *Model) helpModal() string {
 	for _, sec := range helpSections {
 		cols = append(cols, col(sec))
 	}
-	oneRow := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
-	twoRows := lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.JoinHorizontal(lipgloss.Top, cols[0], cols[1]), "",
-		lipgloss.JoinHorizontal(lipgloss.Top, cols[2], cols[3]))
+	// grid lays the sections out perRow to a row.
+	grid := func(perRow int) string {
+		var rows []string
+		for i := 0; i < len(cols); i += perRow {
+			if i > 0 {
+				rows = append(rows, "")
+			}
+			rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, cols[i:min(i+perRow, len(cols))]...))
+		}
+		return lipgloss.JoinVertical(lipgloss.Left, rows...)
+	}
 
 	legend := strings.Join([]string{
 		st.warn.Render("●") + st.muted.Render(" uncommitted edits   ") +
@@ -679,7 +706,8 @@ func (m *Model) helpModal() string {
 		legend bool
 		padY   int
 	}{
-		{oneRow, true, 1}, {twoRows, true, 1}, {twoRows, true, 0}, {twoRows, false, 0},
+		{grid(len(cols)), true, 1}, {grid(3), true, 1}, {grid(3), true, 0}, {grid(3), false, 0},
+		{grid(2), true, 0}, {grid(2), false, 0},
 	}
 	var box string
 	for _, v := range variants {

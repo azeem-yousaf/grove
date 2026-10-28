@@ -214,6 +214,12 @@ func (m *Model) treeLines(wt, width int, selected bool) (string, string) {
 	if s.Locked {
 		tags = append(tags, st.warn.Render("locked"))
 	}
+	// With an agent, the dot becomes its status icon; the words follow
+	// below if there's room for them.
+	badge := m.agentBadge(s.Path)
+	if icon := m.agentIcon(s.Path); icon != "" {
+		dot = icon
+	}
 
 	right := ""
 	if s.Err == nil && (s.Added > 0 || s.Deleted > 0) {
@@ -224,6 +230,9 @@ func (m *Model) treeLines(wt, width int, selected bool) (string, string) {
 	left := " " + st.faint.Render(chev) + " " + dot + " " + name
 	if len(tags) > 0 {
 		left += "  " + strings.Join(tags, " ")
+	}
+	if badge != "" && ansi.StringWidth(left)+2+ansi.StringWidth(badge)+ansi.StringWidth(right)+2 <= width {
+		left += "  " + badge
 	}
 	head := spread(left, right+" ", width)
 
@@ -267,6 +276,15 @@ func (m *Model) fileLine(r row, width int, selected bool) string {
 	}
 
 	marks := ""
+	// Only worktrees with an agent get the extra column, so the others keep
+	// their usual layout.
+	if ses := m.sessionFor(s.Path); ses != nil {
+		if ses.touched[f.Path] {
+			marks += st.accent.Render("✦") + " "
+		} else {
+			marks += "  "
+		}
+	}
 	if f.Uncommitted && m.snap.Mode == git.ModeBranch {
 		marks += st.warn.Render("●")
 	} else {

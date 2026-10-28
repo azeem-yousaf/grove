@@ -10,6 +10,7 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -19,6 +20,7 @@ const (
 	fieldBranch = iota
 	fieldFrom
 	fieldFolder
+	fieldTask // text inputs end here
 	fieldCopy
 	fieldSetup
 	fieldEditor
@@ -26,9 +28,10 @@ const (
 
 // creation is the new-worktree dialog.
 type creation struct {
-	inputs       [3]textinput.Model // branch, from, folder
+	inputs       [4]textinput.Model // branch, from, folder, task
 	focus        int
-	folderEdited bool // the user typed their own folder; stop suggesting
+	agents       []agent.Kind // installed agents; the task field needs one
+	folderEdited bool         // the user typed their own folder; stop suggesting
 	autoFolder   string
 
 	branches *git.Branches // nil while loading
@@ -63,8 +66,8 @@ func (m *Model) askCreate() tea.Cmd {
 	if m.snap == nil {
 		return nil
 	}
-	c := &creation{editor: m.opener.Editor != "", setup: m.cfg.New.Setup != ""}
-	labels := [3]string{"feature/name", "", ""}
+	c := &creation{editor: m.opener.Editor != "", setup: m.cfg.New.Setup != "", agents: m.installed()}
+	labels := [4]string{"feature/name", "", "", "optional: what the agent should build"}
 	for i := range c.inputs {
 		ti := textinput.New()
 		ti.Prompt = ""
@@ -104,6 +107,9 @@ func (m *Model) fields() []int {
 		out = append(out, fieldFrom)
 	}
 	out = append(out, fieldFolder)
+	if len(c.agents) > 0 {
+		out = append(out, fieldTask)
+	}
 	if len(c.copyFiles) > 0 {
 		out = append(out, fieldCopy)
 	}
@@ -184,7 +190,7 @@ func (m *Model) onCreateKey(msg tea.KeyPressMsg) tea.Cmd {
 	c := m.creating
 	if c.running {
 		if msg.String() == "ctrl+c" {
-			return tea.Quit
+			return m.quitNow()
 		}
 		return nil
 	}
@@ -201,7 +207,7 @@ func (m *Model) onCreateKey(msg tea.KeyPressMsg) tea.Cmd {
 			c.inputs[k].Blur()
 		}
 		c.focus = fields[i]
-		if c.focus <= fieldFolder {
+		if c.focus <= fieldTask {
 			c.inputs[c.focus].CursorEnd()
 			return c.inputs[c.focus].Focus()
 		}
@@ -213,7 +219,7 @@ func (m *Model) onCreateKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.creating = nil
 		return nil
 	case "ctrl+c":
-		return tea.Quit
+		return m.quitNow()
 	case "tab", "down":
 		return moveTo(pos + 1)
 	case "shift+tab", "up":
@@ -233,7 +239,7 @@ func (m *Model) onCreateKey(msg tea.KeyPressMsg) tea.Cmd {
 			return nil
 		}
 	}
-	if c.focus > fieldFolder {
+	if c.focus > fieldTask {
 		return nil
 	}
 	var cmd tea.Cmd
@@ -304,6 +310,19 @@ func (m *Model) onCreated(msg createdMsg) tea.Cmd {
 		text += " · copied " + plural(msg.copied, "file")
 	}
 	cmds := []tea.Cmd{m.notify(text, kind), m.startScan()}
+
+	// With a task, the new worktree starts with its agent at work. If setup
+	// runs, the agent waits for it so it finds dependencies installed.
+	var startAgent func() tea.Cmd
+	if task := strings.TrimSpace(msg.c.inputs[fieldTask].Value()); task != "" && len(msg.c.agents) > 0 {
+		path, branch := msg.path, msg.branch
+		startAgent = func() tea.Cmd {
+			return m.withAgent(func(k agent.Kind) tea.Cmd {
+				s := m.newSession(path, branch, k)
+				return tea.Batch(m.showChat(s), m.send(s, task))
+			})
+		}
+	}
 	if msg.c.editor {
 		opener, path := m.opener, msg.path
 		cmds = append(cmds, func() tea.Msg {
@@ -316,7 +335,9 @@ func (m *Model) onCreated(msg createdMsg) tea.Cmd {
 	}
 	if msg.c.setup && m.cfg.New.Setup != "" {
 		prog, args := shellCommand(m.cfg.New.Setup)
-		cmds = append(cmds, m.runInTerminal(msg.branch, msg.path, prog, args, m.cfg.New.Setup))
+		cmds = append(cmds, m.runInTerminalThen(msg.branch, msg.path, prog, args, m.cfg.New.Setup, startAgent))
+	} else if startAgent != nil {
+		cmds = append(cmds, startAgent())
 	}
 	return tea.Batch(cmds...)
 }
@@ -372,6 +393,16 @@ func (m *Model) createModal() string {
 	parts = append(parts, label(fieldFolder, "Folder")+c.inputs[fieldFolder].View())
 	if text, ok := m.folderStatus(); !ok && strings.TrimSpace(c.inputs[fieldFolder].Value()) != "" {
 		parts = append(parts, status(text, ok))
+	}
+	if len(c.agents) > 0 {
+		who := "agent"
+		if k, ok := agent.Parse(m.cfg.AI.Agent); ok {
+			who = string(k)
+		} else if len(c.agents) == 1 {
+			who = string(c.agents[0])
+		}
+		parts = append(parts, "", label(fieldTask, "Task")+st.faint.Render("for "+who+", who starts on it right away"))
+		parts = append(parts, strings.Repeat(" ", labelW)+c.inputs[fieldTask].View())
 	}
 
 	var opts []string

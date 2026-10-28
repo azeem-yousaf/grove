@@ -31,6 +31,17 @@ type Config struct {
 	Open map[string]string `toml:"open"`
 	// New sets up worktrees created with key n.
 	New NewWorktree `toml:"new"`
+	// AI chooses the assistant used for each worktree's agent (key a).
+	AI AI `toml:"ai"`
+}
+
+// AI configures the per-worktree assistant. grove drives a command-line
+// agent that is already installed and signed in; it never handles API keys.
+type AI struct {
+	// Agent is "claude" or "codex". Empty means ask the first time.
+	Agent string `toml:"agent"`
+	// Model is passed to the agent; empty uses the agent's default.
+	Model string `toml:"model"`
 }
 
 // NewWorktree configures creating worktrees.
@@ -122,6 +133,64 @@ func WriteDefault() (string, error) {
 	return path, os.WriteFile(path, []byte(Template), 0o644)
 }
 
+// SaveAgent records the chosen assistant under [ai] agent, keeping the
+// rest of the file (and its comments) as it is. It creates the file from
+// the template when there is none.
+func SaveAgent(agent string) error {
+	path, err := Path()
+	if err != nil {
+		return err
+	}
+	if _, err := WriteDefault(); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(setKey(string(b), "ai", "agent", fmt.Sprintf("%q", agent))), 0o644)
+}
+
+// setKey sets key = value inside [section] of a TOML document, replacing an
+// existing assignment or adding one, and adding the section if needed.
+func setKey(doc, section, key, value string) string {
+	nl := "\n"
+	if strings.Contains(doc, "\r\n") {
+		nl = "\r\n"
+	}
+	lines := strings.Split(strings.ReplaceAll(doc, "\r\n", "\n"), "\n")
+	line := key + " = " + value
+	start := -1
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if t == "["+section+"]" {
+			start = i
+			continue
+		}
+		if start < 0 {
+			continue
+		}
+		if strings.HasPrefix(t, "[") {
+			// End of the section without the key: insert before the next one.
+			lines = append(lines[:i], append([]string{line, ""}, lines[i:]...)...)
+			return strings.Join(lines, nl)
+		}
+		if k, _, ok := strings.Cut(t, "="); ok && strings.TrimSpace(k) == key {
+			lines[i] = line
+			return strings.Join(lines, nl)
+		}
+	}
+	if start >= 0 {
+		for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+			lines = lines[:len(lines)-1]
+		}
+		lines = append(lines, line, "")
+		return strings.Join(lines, nl)
+	}
+	out := strings.TrimRight(strings.Join(lines, nl), "\r\n")
+	return out + nl + nl + "[" + section + "]" + nl + line + nl
+}
+
 // Template is the commented starter config written by `grove --init-config`.
 const Template = `# grove configuration
 # Every setting is optional. Delete anything you don't need.
@@ -151,6 +220,14 @@ theme = "auto"
 copy = [".env", ".env.local"]
 # Command run in the new worktree after it's created. Empty = none.
 setup = ""
+
+# The assistant each worktree's agent uses (key: a). grove runs a tool that
+# is already installed and signed in on this PC.
+[ai]
+# "claude" (Claude Code) or "codex". Empty = ask when both are installed.
+agent = ""
+# Model passed to the agent. Empty = the agent's own default.
+model = ""
 
 # Files open with their system default program (key: enter).
 # Override that per extension here. "default" means the system default.

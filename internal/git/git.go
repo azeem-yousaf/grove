@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +42,18 @@ func run(ctx context.Context, dir string, args ...string) ([]byte, error) {
 // runCodes is run, but treats the given exit codes as success. `git diff
 // --no-index` exits 1 when files differ, for example.
 func runCodes(ctx context.Context, dir string, okCodes []int, args ...string) ([]byte, error) {
+	return runWith(ctx, dir, call{ok: okCodes}, args...)
+}
+
+// call holds the less common options for running git.
+type call struct {
+	ok    []int     // exit codes that count as success
+	env   []string  // extra environment, e.g. GIT_INDEX_FILE=...
+	stdin io.Reader // input for --stdin / --pathspec-from-file=-
+}
+
+func runWith(ctx context.Context, dir string, c call, args ...string) ([]byte, error) {
+	okCodes := c.ok
 	full := append([]string{
 		"-C", dir,
 		"--no-pager",
@@ -56,6 +69,8 @@ func runCodes(ctx context.Context, dir string, okCodes []int, args ...string) ([
 		"GIT_TERMINAL_PROMPT=0",
 		"LC_ALL=C",
 	)
+	cmd.Env = append(cmd.Env, c.env...)
+	cmd.Stdin = c.stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

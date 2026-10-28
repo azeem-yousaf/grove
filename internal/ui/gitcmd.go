@@ -31,6 +31,7 @@ type gitDoneMsg struct {
 	display string // the command as shown, e.g. "git status"
 	code    int
 	err     error
+	then    func() tea.Cmd // runs afterwards, whatever the outcome
 }
 
 func newGitPrompt() gitPrompt {
@@ -65,7 +66,7 @@ func (m *Model) onGitPromptKey(msg tea.KeyPressMsg) tea.Cmd {
 		g.input.Blur()
 		return nil
 	case "ctrl+c":
-		return tea.Quit
+		return m.quitNow()
 	case "up":
 		if g.hist > 0 {
 			if g.hist == len(g.history) {
@@ -113,6 +114,11 @@ func (m *Model) runGit(st git.State, line string) tea.Cmd {
 
 // runInTerminal runs prog in dir with the terminal handed over.
 func (m *Model) runInTerminal(name, dir, prog string, args []string, display string) tea.Cmd {
+	return m.runInTerminalThen(name, dir, prog, args, display, nil)
+}
+
+// runInTerminalThen is runInTerminal followed by then, if not nil.
+func (m *Model) runInTerminalThen(name, dir, prog string, args []string, display string, then func() tea.Cmd) tea.Cmd {
 	run := &gitRun{
 		dir:   dir,
 		prog:  prog,
@@ -125,7 +131,7 @@ func (m *Model) runInTerminal(name, dir, prog string, args []string, display str
 		if err == nil {
 			err = run.err
 		}
-		return gitDoneMsg{name: name, display: display, code: run.code, err: err}
+		return gitDoneMsg{name: name, display: display, code: run.code, err: err, then: then}
 	})
 }
 
@@ -140,7 +146,11 @@ func (m *Model) onGitDone(msg gitDoneMsg) tea.Cmd {
 		note = m.notify(fmt.Sprintf("%s · done in %s", msg.display, msg.name), toastOK)
 	}
 	// Whatever ran, the worktrees may have changed.
-	return tea.Batch(note, m.startScan())
+	cmds := []tea.Cmd{note, m.startScan()}
+	if msg.then != nil {
+		cmds = append(cmds, msg.then())
+	}
+	return tea.Batch(cmds...)
 }
 
 // shellCommand runs a configured command line through the platform shell.
