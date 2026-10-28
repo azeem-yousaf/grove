@@ -984,9 +984,8 @@ func (m *Model) chatLines(s *session, width int) []string {
 			"  "+st.muted.Render("Model: "+modelName(s.model)+". Type /model to change it."))
 		return out
 	}
-	text := lipgloss.NewStyle().Width(max(width-6, 10))
 	add := func(prefix lipgloss.Style, label string, body string, style lipgloss.Style) {
-		lines := renderChatText(body, width-6, st, style, text)
+		lines := renderChatText(body, max(width-7, 10), st, style) // a column clear of the border
 		for i, l := range lines {
 			p := "      "
 			if i == 0 {
@@ -1021,9 +1020,10 @@ func (m *Model) chatLines(s *session, width int) []string {
 	return out
 }
 
-// renderChatText wraps prose, lays out Markdown tables and keeps fenced
-// code blocks as they are.
-func renderChatText(body string, width int, st styles, style, wrap lipgloss.Style) []string {
+// renderChatText renders a message's Markdown to width: prose is wrapped
+// with its inline formatting applied, tables are laid out in columns, and
+// fenced code blocks are kept as they are.
+func renderChatText(body string, width int, st styles, style lipgloss.Style) []string {
 	var out []string
 	inCode, lang := false, ""
 	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
@@ -1054,7 +1054,7 @@ func renderChatText(body string, width int, st styles, style, wrap lipgloss.Styl
 			out = append(out, "")
 			continue
 		}
-		out = append(out, strings.Split(wrap.Render(style.Render(l)), "\n")...)
+		out = append(out, renderProse(l, width, st, style)...)
 	}
 	return out
 }

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
@@ -526,12 +525,40 @@ func TestAgentWarmAndRemoval(t *testing.T) {
 	}
 }
 
+func TestChatMarkdown(t *testing.T) {
+	st := newStyles(true)
+	render := func(body string, width int) string {
+		var out []string
+		for _, l := range renderChatText(body, width, st, st.text) {
+			out = append(out, strings.TrimRight(ansi.Strip(l), " "))
+		}
+		return strings.Join(out, "\n")
+	}
+	// Marks are dropped; a mark with no partner stays.
+	if got := render("Use `go test` and **always** run `gofmt`. 2 * 3, a ` b, **open", 80); got != "Use go test and always run gofmt. 2 * 3, a ` b, **open" {
+		t.Errorf("inline = %q", got)
+	}
+	// List items get a bullet, and wrapped lines line up with the text.
+	got := render("- **`MachineTypes.Pay`** (PAY, WEB_PAY): payment and fee logic treat them the same\n  1. nested", 30)
+	want := "• MachineTypes.Pay (PAY,\n  WEB_PAY): payment and fee\n  logic treat them the same\n  1. nested"
+	if got != want {
+		t.Errorf("list =\n%s\nwant\n%s", got, want)
+	}
+	if got := render("## Summary\n\n---\nText", 10); got != "Summary\n\n──────────\nText" {
+		t.Errorf("heading and rule = %q", got)
+	}
+	// Not a list: emphasis at the start of a line.
+	if got := render("**Note** this", 40); got != "Note this" {
+		t.Errorf("bold start = %q", got)
+	}
+}
+
 func TestChatTable(t *testing.T) {
 	st := newStyles(true)
 	body := "Changes:\n\n| File | What changed | Lines |\n|------|--------------|------:|\n| `a.go` | **New** login handler with a session check | 42 |\n| b.go | Tests | 7 |\n\n```\n| kept | as is |\n|---|---|\n```"
 	render := func(width int) []string {
 		var out []string
-		for _, l := range renderChatText(body, width, st, st.text, lipgloss.NewStyle().Width(width)) {
+		for _, l := range renderChatText(body, width, st, st.text) {
 			out = append(out, ansi.Strip(l))
 		}
 		return out
