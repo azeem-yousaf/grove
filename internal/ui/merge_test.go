@@ -97,7 +97,10 @@ func mergeModel(t *testing.T) (*Model, string) {
 	m.Update(tea.WindowSizeMsg{Width: 140, Height: 40})
 	m.Update(baseMsg{base: "main"})
 	rescan(t, m)
-	return m, mainDir
+	// git's spelling of the folder, which grove uses everywhere: the temp
+	// folder can differ (/var vs /private/var on macOS, short 8.3 names on
+	// Windows).
+	return m, repo.Here
 }
 
 func rescan(t *testing.T, m *Model) {
