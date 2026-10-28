@@ -8,25 +8,7 @@ per-file `+`/`−` counts, a syntax-highlighted diff, and a warning whenever two
 worktrees touch the same file, which is where your merge conflicts will come
 from.
 
-```
- grove  shop  ·  changes since main                     ⚠ 1 overlap  ·  3 worktrees  ·  ● live · just now
-╭─ Worktrees ─────────────── 6 files  +34 −4 ─╮╭─ src/api/client.ts ───────────────────────────── +3 −2 ─╮
-│ ▾ ○ main  base                              ││ feature/auth · modified               enter open in code │
-│     ~\…\shop · 4m ago                       ││ ⚠ Also changed in feature/cart +4 −0                     │
-│     ✓ no uncommitted changes                ││──────────────────────────────────────────────────────────│
-│                                             ││  1   1 │   import { retry } from './retry'               │
-│ ▾ ● feature/auth  ◆ here          +19 −3    ││  2   2 │                                                 │
-│     ~\…\shop-auth · 3 files · ↑1 · 4m ago   ││  3     │ - const TIMEOUT = 5000                          │
-│     M src/api/client.ts      ⚠  +3 −2 ■■■·· ││      3 │ + const TIMEOUT = 10_000                        │
-│     M src/auth/login.ts    ●    +6 −1 ■■■■· ││      4 │ + const MAX_RETRIES = 3                         │
-│     ? src/auth/session.ts  ●   +10 −0 ■■■■■ ││  4   5 │                                                 │
-│                                             ││  5   6 │   export async function get(path: string) {     │
-│ ▾ ● feature/cart                  +15 −1    ││                                                          │
-│     M src/api/client.ts    ● ⚠  +4 −0 ■■■·· ││                                                          │
-│     A src/cart/cart.ts          +9 −0 ■■■■■ ││                                                          │
-╰─────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
- enter open  f folder  y copy  e editor  tab diff  m mode  / filter  ? help  q quit
-```
+![grove showing three worktrees, with src/api/client.ts changed in both feature branches](docs/screenshot.svg)
 
 ## Features
 
@@ -193,6 +175,14 @@ repository to text files for a visual check:
 ```powershell
 $env:GROVE_DEMO = "C:\path\to\repo"; $env:GROVE_DUMP = "C:\tmp\shots"
 go test ./internal/ui -run Dump -count=1
+```
+
+The README screenshot is rendered from the real UI. To update it after a UI
+change:
+
+```powershell
+$env:GROVE_SHOT = "$PWD\docs\screenshot.svg"
+go test ./internal/ui -run ReadmeShot -count=1
 ```
 
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea),
