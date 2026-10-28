@@ -66,7 +66,7 @@ func (m *Model) askCreate() tea.Cmd {
 	if m.snap == nil {
 		return nil
 	}
-	c := &creation{editor: m.opener.Editor != "", setup: m.cfg.New.Setup != "", agents: m.installed()}
+	c := &creation{editor: m.cfg.New.OpenEditor && m.opener.Editor != "", setup: m.cfg.New.Setup != "", agents: m.installed()}
 	labels := [4]string{"feature/name", "", "", "optional: what the agent should build"}
 	for i := range c.inputs {
 		ti := textinput.New()
