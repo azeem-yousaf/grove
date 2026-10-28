@@ -72,6 +72,7 @@ Opt-in tests, skipped unless their environment variable is set:
 
 ## Tests
 
+- Releases (`.github/workflows/release.yml`) follow a CI run that passed for a push to master: `.github/scripts/next-release.sh <commit> [notes]` picks the next tag (from v0.1.0; patch by default, `[minor]`, `[major]`/`BREAKING CHANGE` in commit messages) and writes notes from the commit subjects, and `gh release create` tags that commit. Run the script locally to preview the next release.
 - CI (`.github/workflows/ci.yml`) runs build, vet and `go test ./... -count=1` on Windows, Linux and macOS for every push to master and every pull request into it, plus a gofmt check on Linux. Keep tests passing on Windows: paths, line endings and what counts as an absolute path differ there.
 
 - UI tests drive the model directly with no terminal: `fakeModel` builds a hand-made `Snapshot`, `press()` sends keys, and `plain()` renders with ANSI stripped. `TestRenderFitsScreen` checks every screen at several sizes; add new overlays or screens to it.

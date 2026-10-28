@@ -62,9 +62,15 @@ go build -o grove.exe .
 ```
 
 The version you are running is shown next to the logo in grove's header,
-and by `grove --version`: a release number for a tagged install, or
+and by `grove --version`: a release number such as `0.1.3`, or
 `dev-<commit>` for a build from a clone (`-dirty` when it had uncommitted
 changes).
+
+Every push to master that passes CI becomes a release on GitHub, with notes
+listing its commits, so `@latest` is always the newest tested version.
+Versions go up by a patch number each time; a commit message containing
+`[minor]` bumps the minor version, and `[major]` or `BREAKING CHANGE` the
+major one.
 
 ## Use
 

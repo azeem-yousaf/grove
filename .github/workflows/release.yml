@@ -1,0 +1,49 @@
+name: Release
+
+# After CI passes for a push to master, release that commit: the next
+# semver tag and a GitHub release with notes from the commits since the
+# last one. .github/scripts/next-release.sh decides the version.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+
+permissions:
+  contents: write
+
+# One release at a time, in order; never cancel one halfway.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0 # every commit and tag, to find the last release
+
+      - name: Work out the version and notes
+        id: version
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          tag=$(.github/scripts/next-release.sh "$SHA" "$RUNNER_TEMP/notes.md")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -z "$tag" ]; then
+            echo "Nothing to release: $SHA is already part of a release."
+          else
+            echo "Releasing $SHA as $tag"
+          fi
+
+      - name: Create the release
+        if: steps.version.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: gh release create "$TAG" --target "$SHA" --title "grove $TAG" --notes-file "$RUNNER_TEMP/notes.md"
