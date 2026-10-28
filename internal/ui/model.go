@@ -418,6 +418,16 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case tea.KeyPressMsg:
 		return m.onKey(msg)
 
+	case tea.PasteMsg:
+		// Bubble Tea delivers bracketed terminal pastes as a separate message,
+		// rather than as key input. Forward it to the focused chat input so
+		// pasted text is inserted instead of being ignored.
+		if m.focus == focusChat && m.chatSession() != nil {
+			var cmd tea.Cmd
+			m.chatInput, cmd = m.chatInput.Update(msg)
+			return cmd
+		}
+
 	case tea.MouseClickMsg:
 		return m.onClick(msg)
 
