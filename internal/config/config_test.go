@@ -39,3 +39,18 @@ func TestSetKey(t *testing.T) {
 		t.Error("template gained a second [ai] section")
 	}
 }
+
+func TestModelFor(t *testing.T) {
+	var cfg Config
+	if _, err := toml.Decode(setKey(Template, "ai", "claude_model", `"sonnet"`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AI.ModelFor("claude") != "sonnet" || cfg.AI.ModelFor("codex") != "" {
+		t.Errorf("models = %+v", cfg.AI)
+	}
+	// The older shared key still applies where an agent has none.
+	ai := AI{Model: "old", CodexModel: "gpt"}
+	if ai.ModelFor("claude") != "old" || ai.ModelFor("codex") != "gpt" {
+		t.Errorf("fallback = %q, %q", ai.ModelFor("claude"), ai.ModelFor("codex"))
+	}
+}

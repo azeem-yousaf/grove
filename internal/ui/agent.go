@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,9 +23,11 @@ import (
 // Each worktree has at most one, and an agent only ever works in its own
 // worktree's folder.
 type session struct {
-	kind agent.Kind
-	path string // worktree folder, the agent's working directory
-	name string // branch, for display
+	kind  agent.Kind
+	path  string // worktree folder, the agent's working directory
+	name  string // branch, for display
+	model string // "" for the agent's own default
+	menu  *modelMenu
 
 	id      string // Claude session to resume
 	entries []chatEntry
@@ -235,7 +238,7 @@ func (m *Model) openChat() tea.Cmd {
 }
 
 func (m *Model) newSession(path, name string, k agent.Kind) *session {
-	s := &session{kind: k, path: path, name: name, touched: map[string]bool{}, seen: true}
+	s := &session{kind: k, path: path, name: name, model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true}
 	m.sessions[path] = s
 	return s
 }
@@ -302,6 +305,9 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 		})
 	}
 
+	if s.menu != nil {
+		return m.onModelMenuKey(s, key)
+	}
 	if len(s.pending) > 0 {
 		return m.onPendingKey(s, key)
 	}
@@ -311,6 +317,10 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "enter":
 		text := strings.TrimSpace(m.chatInput.Value())
+		if cmd, arg, _ := strings.Cut(text, " "); cmd == "/model" {
+			m.chatInput.SetValue("")
+			return m.modelCommand(s, strings.TrimSpace(arg))
+		}
 		if text == "" || s.running {
 			return nil
 		}
@@ -320,6 +330,88 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 	var cmd tea.Cmd
 	m.chatInput, cmd = m.chatInput.Update(msg)
 	return cmd
+}
+
+// modelMenu offers models for a session's agent (/model).
+type modelMenu struct {
+	options []string // "" is the agent's own default
+	cursor  int
+}
+
+// modelChoices are the models /model offers; any other name can be typed
+// after it. Claude Code resolves these aliases to its latest models.
+func modelChoices(k agent.Kind) []string {
+	if k == agent.Claude {
+		return []string{"", "fable", "opus", "sonnet", "haiku"}
+	}
+	return []string{""}
+}
+
+// modelName is how a model is shown: its name, or "default".
+func modelName(model string) string {
+	if model == "" {
+		return "default"
+	}
+	return model
+}
+
+// modelCommand handles /model: on its own it opens the menu, with a name it
+// switches to that model, and "default" goes back to the agent's own.
+func (m *Model) modelCommand(s *session, arg string) tea.Cmd {
+	if arg != "" {
+		if strings.EqualFold(arg, "default") {
+			arg = ""
+		}
+		return m.setModel(s, arg)
+	}
+	menu := &modelMenu{options: modelChoices(s.kind)}
+	if i := slices.Index(menu.options, s.model); i >= 0 {
+		menu.cursor = i
+	} else {
+		menu.options = append(menu.options, s.model)
+		menu.cursor = len(menu.options) - 1
+	}
+	s.menu = menu
+	return nil
+}
+
+func (m *Model) onModelMenuKey(s *session, key string) tea.Cmd {
+	menu := s.menu
+	switch key {
+	case "left", "up", "h", "k":
+		menu.cursor = max(menu.cursor-1, 0)
+	case "right", "down", "l", "j":
+		menu.cursor = min(menu.cursor+1, len(menu.options)-1)
+	case "enter":
+		return m.setModel(s, menu.options[menu.cursor])
+	case "esc", "q":
+		s.menu = nil
+	}
+	return nil
+}
+
+// setModel switches s to model from its next message, and remembers it for
+// new chats with the same agent, the way /model does in Claude Code.
+func (m *Model) setModel(s *session, model string) tea.Cmd {
+	s.menu = nil
+	s.model = model
+	note := "Model: " + modelName(model)
+	if model == "" && s.kind == agent.Claude {
+		note += " (what /model is set to in Claude Code)"
+	}
+	if s.running {
+		note += ". It applies from your next message"
+	}
+	s.entries = append(s.entries, chatEntry{roleNote, note + "."})
+	m.chatFollow = true
+	switch s.kind {
+	case agent.Claude:
+		m.cfg.AI.ClaudeModel = model
+	case agent.Codex:
+		m.cfg.AI.CodexModel = model
+	}
+	save, kind := m.saveModel, string(s.kind)
+	return tea.Batch(func() tea.Msg { return agentSavedMsg{save(kind, model)} }, m.warm(s))
 }
 
 // onPendingKey handles the approval or suggested-command card.
@@ -438,7 +530,7 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Dir:     s.path,
 		Session: s.id,
 		Allow:   append([]string(nil), s.allow...),
-		Model:   m.cfg.AI.Model,
+		Model:   s.model,
 		History: append([]agent.Turn(nil), s.history...),
 	}
 }
@@ -804,6 +896,9 @@ func (m *Model) chatPane(w, h int) string {
 	st := m.st
 	inner := w - 2
 	title := "✦ " + s.name + " · " + s.kind.Label()
+	if s.model != "" {
+		title += " · " + s.model
+	}
 	info := ""
 	switch {
 	case s.running:
@@ -827,6 +922,27 @@ func (m *Model) chatPane(w, h int) string {
 func (m *Model) chatBottom(s *session, width int) []string {
 	st := m.st
 	rule := st.faint.Render(strings.Repeat("─", width))
+	if menu := s.menu; menu != nil {
+		dflt := "the agent's own setting"
+		if s.kind == agent.Claude {
+			dflt = "your /model in Claude Code"
+		}
+		head := st.accent.Bold(true).Render(" Model for "+s.kind.Label()) + st.faint.Render("  default = "+dflt)
+		var opts []string
+		for i, o := range menu.options {
+			if i == menu.cursor {
+				opts = append(opts, st.accent.Bold(true).Render("▸ "+modelName(o)))
+			} else {
+				opts = append(opts, st.text.Render("  "+modelName(o)))
+			}
+		}
+		return []string{
+			rule,
+			head,
+			" " + strings.Join(opts, " "),
+			" " + m.hints([][2]string{{"←→", "choose"}, {"enter", "use"}, {"esc", "cancel"}, {"/model <name>", "any other"}}),
+		}
+	}
 	if len(s.pending) > 0 {
 		a := s.pending[0]
 		head, keys := st.warn.Bold(true).Render(" "+s.kind.Label()+" wants to run"), [][2]string{{"enter", "allow"}, {"esc", "deny"}}
@@ -845,9 +961,9 @@ func (m *Model) chatBottom(s *session, width int) []string {
 		}
 	}
 	m.chatInput.SetWidth(max(width-4, 10))
-	hint := [][2]string{{"enter", "send"}, {"tab", "list"}, {"ctrl+z", "undo all"}}
+	hint := [][2]string{{"enter", "send"}, {"tab", "list"}, {"ctrl+z", "undo all"}, {"/model", "model"}}
 	if s.running {
-		hint = [][2]string{{"ctrl+x", "stop"}, {"tab", "list"}}
+		hint = [][2]string{{"ctrl+x", "stop"}, {"tab", "list"}, {"/model", "model"}}
 	}
 	return []string{rule, " " + st.accent.Render("▸ ") + m.chatInput.View(), " " + m.hints(hint)}
 }
@@ -862,7 +978,9 @@ func (m *Model) chatLines(s *session, width int) []string {
 			"",
 			"  "+st.muted.Render("It can read and edit files in this worktree only. Shell"),
 			"  "+st.muted.Render("commands and git changes wait for your approval, and"),
-			"  "+st.muted.Render("ctrl+z puts everything back the way it was."))
+			"  "+st.muted.Render("ctrl+z puts everything back the way it was."),
+			"",
+			"  "+st.muted.Render("Model: "+modelName(s.model)+". Type /model to change it."))
 		return out
 	}
 	text := lipgloss.NewStyle().Width(max(width-6, 10))

@@ -84,6 +84,7 @@ var helpSections = []helpSection{
 		{"ctrl+x", "stop the agent"},
 		{"ctrl+z u", "undo its changes"},
 		{"ctrl+a", "claude / codex"},
+		{"/model", "choose its model"},
 	}},
 	{"Diff pane", [][2]string{
 		{"↑↓ ←→", "scroll"},

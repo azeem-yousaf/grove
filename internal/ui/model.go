@@ -117,6 +117,7 @@ type Model struct {
 	warmAgent func(agent.Request)
 	stopAgent func(dir string) // waits until the folder is no longer in use
 	saveAgent func(string) error
+	saveModel func(agent, model string) error
 }
 
 type toastKind uint8
@@ -193,6 +194,7 @@ func New(ctx context.Context, o Options) *Model {
 		warmAgent:    agents.Warm,
 		stopAgent:    agents.Stop,
 		saveAgent:    defaultSaveAgent,
+		saveModel:    config.SaveModel,
 	}
 	switch o.Config.Theme {
 	case "light":

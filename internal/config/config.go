@@ -40,8 +40,23 @@ type Config struct {
 type AI struct {
 	// Agent is "claude" or "codex". Empty means ask the first time.
 	Agent string `toml:"agent"`
-	// Model is passed to the agent; empty uses the agent's default.
+	// ClaudeModel and CodexModel are passed to that agent; empty uses the
+	// agent's own default (for Claude Code, what /model is set to there).
+	// /model in grove's chat changes them.
+	ClaudeModel string `toml:"claude_model"`
+	CodexModel  string `toml:"codex_model"`
+	// Model is the older setting for both agents, used when the agent's
+	// own key is empty.
 	Model string `toml:"model"`
+}
+
+// ModelFor is the model for agent ("claude" or "codex").
+func (a AI) ModelFor(agent string) string {
+	m := map[string]string{"claude": a.ClaudeModel, "codex": a.CodexModel}[agent]
+	if m == "" {
+		return a.Model
+	}
+	return m
 }
 
 // NewWorktree configures creating worktrees.
@@ -136,7 +151,13 @@ func WriteDefault() (string, error) {
 // SaveAgent records the chosen assistant under [ai] agent, keeping the
 // rest of the file (and its comments) as it is. It creates the file from
 // the template when there is none.
-func SaveAgent(agent string) error {
+func SaveAgent(agent string) error { return saveAI("agent", agent) }
+
+// SaveModel records agent's model ("" for its default) under [ai], the
+// same way.
+func SaveModel(agent, model string) error { return saveAI(agent+"_model", model) }
+
+func saveAI(key, value string) error {
 	path, err := Path()
 	if err != nil {
 		return err
@@ -148,7 +169,7 @@ func SaveAgent(agent string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(setKey(string(b), "ai", "agent", fmt.Sprintf("%q", agent))), 0o644)
+	return os.WriteFile(path, []byte(setKey(string(b), "ai", key, fmt.Sprintf("%q", value))), 0o644)
 }
 
 // setKey sets key = value inside [section] of a TOML document, replacing an
@@ -226,8 +247,11 @@ setup = ""
 [ai]
 # "claude" (Claude Code) or "codex". Empty = ask when both are installed.
 agent = ""
-# Model passed to the agent. Empty = the agent's own default.
-model = ""
+# Model for each agent, set with /model in the chat. A name or an alias
+# such as "opus" or "sonnet". Empty = the agent's own default (for Claude
+# Code, whatever /model is set to there).
+claude_model = ""
+codex_model = ""
 
 # Files open with their system default program (key: enter).
 # Override that per extension here. "default" means the system default.

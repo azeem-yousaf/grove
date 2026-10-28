@@ -397,6 +397,76 @@ func TestCreateStartsAgentWithTask(t *testing.T) {
 	}
 }
 
+func TestAgentModel(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude} }
+	var (
+		mu     sync.Mutex
+		saved  []string
+		warmed []string
+	)
+	m.saveModel = func(k, model string) error { mu.Lock(); saved = append(saved, k+"="+model); mu.Unlock(); return nil }
+	m.warmAgent = func(r agent.Request) { mu.Lock(); warmed = append(warmed, r.Model); mu.Unlock() }
+	fa := &fakeAgent{}
+	m.runAgent = fa.run
+	enter := func(text string) {
+		t.Helper()
+		typeText(m, text)
+		_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		pump(t, m, cmd)
+	}
+
+	press(m, "a")
+	s := m.chatSession()
+	s.checkpoint = "tree"
+	if s.model != "" || !strings.Contains(plain(m), "Model: default") {
+		t.Fatalf("a new chat should use the agent's default: %q", s.model)
+	}
+
+	// /model opens the menu; choosing saves it and applies straight away.
+	enter("/model")
+	if s.menu == nil || !strings.Contains(plain(m), "Model for Claude Code") || !strings.Contains(plain(m), "▸ default") {
+		t.Fatalf("menu not shown:\n%s", plain(m))
+	}
+	press(m, "right", "right")
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	pump(t, m, cmd)
+	if s.menu != nil || s.model != "opus" || m.cfg.AI.ClaudeModel != "opus" {
+		t.Fatalf("after choosing: menu=%v model=%q cfg=%q", s.menu, s.model, m.cfg.AI.ClaudeModel)
+	}
+	mu.Lock()
+	if len(saved) != 1 || saved[0] != "claude=opus" || warmed[len(warmed)-1] != "opus" {
+		t.Errorf("saved=%v warmed=%v", saved, warmed)
+	}
+	mu.Unlock()
+	if out := plain(m); !strings.Contains(out, "Claude Code · opus") || !strings.Contains(out, "Model: opus.") {
+		t.Errorf("the chat should show the model:\n%s", out)
+	}
+	enter("hello")
+	if len(fa.reqs) != 1 || fa.reqs[0].Model != "opus" {
+		t.Errorf("the turn should use the chosen model: %+v", fa.reqs)
+	}
+
+	// Another worktree's new chat starts with it too.
+	press(m, "tab", "]", "a")
+	if other := m.chatSession(); other == s || other.model != "opus" {
+		t.Errorf("new chats should use the remembered model: %q", other.model)
+	}
+
+	// Any name can be typed, and "default" goes back.
+	enter("/model claude-sonnet-5-5")
+	if m.chatSession().model != "claude-sonnet-5-5" {
+		t.Errorf("typed model = %q", m.chatSession().model)
+	}
+	enter("/model default")
+	if m.chatSession().model != "" || m.cfg.AI.ClaudeModel != "" {
+		t.Errorf("default should clear it: %q", m.chatSession().model)
+	}
+	if len(fa.reqs) != 1 {
+		t.Error("/model must not be sent to the agent")
+	}
+}
+
 func TestAgentWarmAndRemoval(t *testing.T) {
 	m := fakeModel(t, 140, 36)
 	m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude} }

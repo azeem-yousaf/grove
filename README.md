@@ -156,6 +156,11 @@ config).
   worktree (a git tree object; your index, branch and files are untouched).
   `ctrl+z` in the chat, or `u` in the list, shows every file changed since
   and puts them back byte for byte.
+- **Model.** Type `/model` in the chat to pick one (`/model sonnet` or any
+  model name works too, `/model default` goes back). Until you do, Claude
+  Code uses whatever `/model` is set to in Claude Code itself. Your choice
+  applies from the next message and is remembered for new chats
+  (`[ai] claude_model` / `codex_model` in the config).
 - `ctrl+x` stops a working agent. Quitting while agents work asks first.
 - Creating a worktree with `n` has a **Task** field: fill it in and the new
   worktree starts with its agent already at work (after the setup command,

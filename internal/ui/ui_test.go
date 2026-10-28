@@ -69,6 +69,7 @@ func noAgents(m *Model) {
 	m.opener.Editor = ""
 	m.installed = func() []agent.Kind { return nil }
 	m.saveAgent = func(string) error { return nil }
+	m.saveModel = func(string, string) error { return nil }
 	m.runAgent = func(_ context.Context, _ agent.Request, emit func(agent.Event)) {
 		emit(agent.Event{Kind: agent.EvDone, Err: fmt.Errorf("no agent in tests")})
 	}
@@ -107,7 +108,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "picker"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -132,6 +133,11 @@ func TestRenderFitsScreen(t *testing.T) {
 					{roleTool, "Edit " + strings.Repeat("deep/", 30) + "file.ts"},
 				}
 				s.pending = []pendingAction{{pendingApproval, strings.Repeat("npm run test -- --long-flag ", 6)}}
+			case "model":
+				s := m.chatSession()
+				s.pending = nil
+				s.model = "a-custom-model-with-a-rather-long-name"
+				m.modelCommand(s, "")
 			case "picker":
 				m = fakeModel(t, size[0], size[1])
 				m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude, agent.Codex} }
