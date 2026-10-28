@@ -1,34 +1,75 @@
 package agent
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The test binary doubles as a fake agent: with GROVE_FAKE_AGENT set it
 // records its arguments and stdin, prints canned output and exits.
 func TestMain(m *testing.M) {
 	if kind := os.Getenv("GROVE_FAKE_AGENT"); kind != "" {
-		in, _ := io.ReadAll(os.Stdin)
-		if rec := os.Getenv("GROVE_FAKE_RECORD"); rec != "" {
-			os.WriteFile(rec, []byte(strings.Join(os.Args[1:], "\n")+"\n---\n"+string(in)), 0o644)
-		}
 		switch kind {
 		case "claude":
-			fmt.Println(claudeSample)
+			fakeClaude()
 		case "codex":
+			in, _ := io.ReadAll(os.Stdin)
+			os.WriteFile(os.Getenv("GROVE_FAKE_RECORD"), []byte(strings.Join(os.Args[1:], "\n")+"\n---\n"+string(in)), 0o644)
 			fmt.Println(codexSample)
 		case "broken":
+			// Fails at startup without waiting for input, like a signed-out claude.
 			fmt.Fprintln(os.Stderr, "Error: not logged in. Run claude to sign in.")
 			os.Exit(1)
 		}
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+// fakeClaude acts like `claude -p --input-format stream-json`: a turn per
+// input line until stdin closes. A message of "wait" streams a little and
+// then waits for an interrupt. Each start and message is appended to
+// GROVE_FAKE_RECORD.
+func fakeClaude() {
+	rec, _ := os.OpenFile(os.Getenv("GROVE_FAKE_RECORD"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	fmt.Fprintf(rec, "start %s\n", strings.Join(os.Args[1:], " "))
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(nil, 1<<20)
+	for sc.Scan() {
+		var in struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Request struct {
+				Subtype string `json:"subtype"`
+			} `json:"request"`
+		}
+		json.Unmarshal(sc.Bytes(), &in)
+		switch {
+		case in.Type == "user":
+			fmt.Fprintf(rec, "user %q\n", in.Message.Content)
+			if strings.HasSuffix(in.Message.Content, "wait") {
+				fmt.Println(`{"type":"system","subtype":"init","session_id":"s-123"}`)
+				fmt.Println(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Thinking"}},"parent_tool_use_id":null}`)
+				continue
+			}
+			fmt.Println(claudeSample)
+		case in.Type == "control_request" && in.Request.Subtype == "interrupt":
+			fmt.Fprintln(rec, "interrupt")
+			fmt.Println(`{"type":"control_response","response":{"subtype":"success","request_id":"grove-stop"}}`)
+			fmt.Println(`{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"s-123"}`)
+		}
+	}
 }
 
 const claudeSample = `{"type":"system","subtype":"init","session_id":"s-123","cwd":"/w","tools":["Read","Edit"]}
@@ -135,9 +176,10 @@ func TestCodexParser(t *testing.T) {
 }
 
 func TestArgs(t *testing.T) {
-	args, in := claudeArgs(Request{Message: "fix it", Context: "CTX", Session: "s1", Allow: []string{ClaudeRule("npm test")}, Model: "sonnet"})
+	req := Request{Message: "fix it", Context: "CTX", Session: "s1", Allow: []string{ClaudeRule("npm test")}, Model: "sonnet"}
+	args := claudeArgs(req)
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"--output-format stream-json", "--verbose", "--permission-mode acceptEdits", "--resume s1", "--model sonnet", "Bash(git diff *)", "Bash(npm test)"} {
+	for _, want := range []string{"--input-format stream-json", "--output-format stream-json", "--verbose", "--permission-mode acceptEdits", "--resume s1", "--model sonnet", "Bash(git diff *)", "Bash(npm test)"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("claude args missing %q: %s", want, joined)
 		}
@@ -145,11 +187,19 @@ func TestArgs(t *testing.T) {
 	if args[len(args)-1] != "Bash(npm test)" {
 		t.Error("--allowedTools values must come last")
 	}
-	if !strings.HasPrefix(in, "CTX") || !strings.HasSuffix(in, "## Request\n\nfix it") {
-		t.Errorf("claude input = %q", in)
+	var msg struct {
+		Type    string
+		Message struct{ Role, Content string }
+	}
+	line := claudeInput(req)
+	if err := json.Unmarshal(line, &msg); err != nil || line[len(line)-1] != '\n' {
+		t.Fatalf("claude input isn't one JSON line: %q", line)
+	}
+	if msg.Type != "user" || msg.Message.Role != "user" || !strings.HasPrefix(msg.Message.Content, "CTX") || !strings.HasSuffix(msg.Message.Content, "## Request\n\nfix it") {
+		t.Errorf("claude input = %+v", msg)
 	}
 
-	args, in = codexArgs(Request{Message: "and now?", Context: "CTX", History: []Turn{{User: "hi", Agent: "hello"}}})
+	args, in := codexArgs(Request{Message: "and now?", Context: "CTX", History: []Turn{{User: "hi", Agent: "hello"}}})
 	if strings.Join(args, " ") != "exec --json --sandbox workspace-write -" {
 		t.Errorf("codex args = %q", args)
 	}
@@ -158,44 +208,173 @@ func TestArgs(t *testing.T) {
 	}
 }
 
-func TestRunWithFakeAgents(t *testing.T) {
+// turn runs one turn and returns its events, checking it ends with exactly
+// one EvDone.
+func turn(t *testing.T, r *Runner, ctx context.Context, req Request) []Event {
+	t.Helper()
+	var evs []Event
+	r.Run(ctx, req, func(ev Event) { evs = append(evs, ev) })
+	for i, ev := range evs {
+		if (ev.Kind == EvDone) != (i == len(evs)-1) {
+			t.Fatalf("a turn must end with exactly one EvDone: %+v", evs)
+		}
+	}
+	return evs
+}
+
+// record is what the fake agents wrote to GROVE_FAKE_RECORD.
+func record(t *testing.T) string {
+	t.Helper()
+	b, _ := os.ReadFile(os.Getenv("GROVE_FAKE_RECORD"))
+	return string(b)
+}
+
+func fakeAgent(t *testing.T, kind string) (bin, dir string) {
+	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	for _, kind := range []Kind{Claude, Codex} {
-		rec := dir + "/" + string(kind) + ".txt"
-		t.Setenv("GROVE_FAKE_AGENT", string(kind))
-		t.Setenv("GROVE_FAKE_RECORD", rec)
-		var evs []Event
-		Run(context.Background(), Request{Kind: kind, Bin: self, Dir: dir, Message: "hello there", Context: "CTX"}, func(ev Event) {
-			evs = append(evs, ev)
-		})
-		last := evs[len(evs)-1]
-		if last.Kind != EvDone || last.Err != nil {
-			t.Fatalf("%s: last event = %+v", kind, last)
-		}
-		for _, ev := range evs[:len(evs)-1] {
-			if ev.Kind == EvDone {
-				t.Errorf("%s: more than one EvDone", kind)
+	dir = t.TempDir()
+	t.Setenv("GROVE_FAKE_AGENT", kind)
+	t.Setenv("GROVE_FAKE_RECORD", filepath.Join(dir, "record.txt"))
+	return self, dir
+}
+
+func TestClaudeKeepsItsProcess(t *testing.T) {
+	bin, dir := fakeAgent(t, "claude")
+	r := NewRunner()
+	defer r.Stop(dir)
+	ctx := context.Background()
+	req := Request{Kind: Claude, Bin: bin, Dir: dir, Message: "hello there", Context: "CTX"}
+
+	evs := turn(t, r, ctx, req)
+	done := evs[len(evs)-1]
+	if done.Err != nil || done.Session != "s-123" {
+		t.Fatalf("first turn done = %+v", done)
+	}
+	// The next message goes to the same process.
+	req.Message, req.Context, req.Session = "and again", "", done.Session
+	if evs := turn(t, r, ctx, req); evs[len(evs)-1].Err != nil {
+		t.Fatalf("second turn = %+v", evs)
+	}
+	rec := record(t)
+	if strings.Count(rec, "start ") != 1 {
+		t.Fatalf("both turns should share one process:\n%s", rec)
+	}
+	if !strings.Contains(rec, `user "CTX\n\n## Request\n\nhello there"`) || !strings.Contains(rec, `user "## Request\n\nand again"`) {
+		t.Errorf("messages not delivered:\n%s", rec)
+	}
+
+	// A newly approved command needs a process that allows it; it picks up
+	// the conversation.
+	req.Message, req.Allow = "go on", []string{ClaudeRule("npm test")}
+	turn(t, r, ctx, req)
+	rec = record(t)
+	last := rec[strings.LastIndex(rec, "start "):]
+	last = last[:strings.IndexByte(last, '\n')]
+	if strings.Count(rec, "start ") != 2 || !strings.Contains(last, "--resume s-123") || !strings.HasSuffix(last, "Bash(npm test)") {
+		t.Errorf("approving should restart with --resume and the rule:\n%s", rec)
+	}
+}
+
+func TestClaudeStopKeepsProcess(t *testing.T) {
+	bin, dir := fakeAgent(t, "claude")
+	r := NewRunner()
+	defer r.Stop(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	var evs []Event
+	go func() {
+		// Stop once the reply has started.
+		for {
+			time.Sleep(10 * time.Millisecond)
+			if strings.Contains(record(t), "wait") {
+				cancel()
+				return
 			}
 		}
-		b, _ := os.ReadFile(rec)
-		if !strings.Contains(string(b), "---\nCTX") || !strings.HasSuffix(string(b), "hello there") {
-			t.Errorf("%s: stdin not delivered: %q", kind, b)
-		}
+	}()
+	r.Run(ctx, Request{Kind: Claude, Bin: bin, Dir: dir, Message: "wait"}, func(ev Event) { evs = append(evs, ev) })
+	done := evs[len(evs)-1]
+	if done.Kind != EvDone || !errors.Is(done.Err, errStopped) || done.Session != "s-123" {
+		t.Fatalf("stopped turn done = %+v", done)
+	}
+	if !strings.Contains(record(t), "interrupt") {
+		t.Error("stopping should interrupt the turn, not kill the process")
+	}
+	evs = turn(t, r, context.Background(), Request{Kind: Claude, Bin: bin, Dir: dir, Message: "next", Session: "s-123"})
+	if evs[len(evs)-1].Err != nil || strings.Count(record(t), "start ") != 1 {
+		t.Errorf("the process should still be usable after a stop:\n%s", record(t))
+	}
+}
+
+func TestClaudeWarmIdleAndStop(t *testing.T) {
+	bin, dir := fakeAgent(t, "claude")
+	r := NewRunner()
+	req := Request{Kind: Claude, Bin: bin, Dir: dir}
+	r.Warm(req)
+	r.Warm(req)
+	req.Message = "hi"
+	turn(t, r, context.Background(), req)
+	if n := strings.Count(record(t), "start "); n != 1 {
+		t.Fatalf("a turn should use the warmed process; started %d", n)
 	}
 
-	t.Setenv("GROVE_FAKE_AGENT", "broken")
-	var last Event
-	Run(context.Background(), Request{Kind: Claude, Bin: self, Dir: dir, Message: "x"}, func(ev Event) { last = ev })
-	if last.Kind != EvDone || last.Err == nil || !strings.Contains(last.Err.Error(), "not logged in") {
+	r.mu.Lock()
+	p := r.procs[dir]
+	r.mu.Unlock()
+	r.Stop(dir)
+	if p == nil || !p.ended() {
+		t.Fatal("Stop should wait for the process to exit")
+	}
+
+	// An idle process ends by itself.
+	r.Idle = 20 * time.Millisecond
+	r.Warm(Request{Kind: Claude, Bin: bin, Dir: dir})
+	r.mu.Lock()
+	p = r.procs[dir]
+	r.mu.Unlock()
+	select {
+	case <-p.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("an idle process should end")
+	}
+	// Codex has nothing to warm.
+	r.Warm(Request{Kind: Codex, Bin: bin, Dir: dir})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.procs) != 0 {
+		t.Error("an ended process should be forgotten, and Codex not warmed")
+	}
+}
+
+func TestCodexRunsOnce(t *testing.T) {
+	bin, dir := fakeAgent(t, "codex")
+	evs := turn(t, NewRunner(), context.Background(), Request{Kind: Codex, Bin: bin, Dir: dir, Message: "hello there", Context: "CTX"})
+	if done := evs[len(evs)-1]; done.Err != nil {
+		t.Fatalf("codex done = %+v", done)
+	}
+	if rec := record(t); !strings.Contains(rec, "---\nCTX") || !strings.HasSuffix(rec, "hello there") {
+		t.Errorf("stdin not delivered: %q", rec)
+	}
+}
+
+func TestAgentErrors(t *testing.T) {
+	bin, dir := fakeAgent(t, "broken")
+	r := NewRunner()
+	evs := turn(t, r, context.Background(), Request{Kind: Claude, Bin: bin, Dir: dir, Message: "x"})
+	if last := evs[len(evs)-1]; last.Err == nil || !strings.Contains(last.Err.Error(), "not logged in") {
 		t.Errorf("broken agent = %+v", last)
 	}
+	if len(r.procs) != 0 {
+		t.Error("a process that exited should be forgotten")
+	}
 
-	if Run(context.Background(), Request{Kind: Claude, Bin: "", Dir: dir}, func(ev Event) { last = ev }); last.Err == nil && Find(Claude) == "" {
-		t.Error("a missing agent should report it isn't installed")
+	old := lookPath
+	defer func() { lookPath = old }()
+	lookPath = func(string) (string, error) { return "", fmt.Errorf("not found") }
+	if evs := turn(t, r, context.Background(), Request{Kind: Claude, Dir: dir}); evs[0].Err == nil || !strings.Contains(evs[0].Err.Error(), "isn't installed") {
+		t.Errorf("a missing agent should say so: %+v", evs)
 	}
 }
 

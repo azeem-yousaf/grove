@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Kind is a supported agent.
@@ -132,36 +134,151 @@ type parser interface {
 	done(exitErr error, stderr string) Event
 }
 
-// Run starts the agent for one turn and reports what it does through emit,
-// ending with exactly one EvDone. Cancelling ctx stops the agent.
-func Run(ctx context.Context, req Request, emit func(Event)) {
-	bin := req.Bin
-	if bin == "" {
-		bin = Find(req.Kind)
+var errStopped = errors.New("stopped")
+
+// Runner runs agent turns. Claude Code keeps one process per worktree
+// between turns, so its startup (settings, hooks, MCP servers) is paid once
+// per conversation rather than once per message; Codex starts fresh every
+// turn. A kept process exits when grove does, because its input closes.
+type Runner struct {
+	// Idle is how long a Claude process with nothing to do is kept.
+	Idle time.Duration
+
+	mu    sync.Mutex
+	procs map[string]*claudeProc // by Request.Dir
+}
+
+func NewRunner() *Runner {
+	return &Runner{Idle: 10 * time.Minute, procs: map[string]*claudeProc{}}
+}
+
+func binFor(req Request) string {
+	if req.Bin != "" {
+		return req.Bin
 	}
+	return Find(req.Kind)
+}
+
+// Run runs one turn and reports what the agent does through emit, ending
+// with exactly one EvDone. Cancelling ctx stops the turn.
+func (r *Runner) Run(ctx context.Context, req Request, emit func(Event)) {
+	bin := binFor(req)
 	if bin == "" {
 		emit(Event{Kind: EvDone, Err: fmt.Errorf("%s isn't installed or isn't on PATH", req.Kind.Label())})
 		return
 	}
-	var (
-		args  []string
-		input string
-		p     parser
-	)
 	switch req.Kind {
 	case Claude:
-		args, input = claudeArgs(req)
-		p = &claudeParser{}
+		p, err := r.claim(bin, req)
+		if err != nil {
+			emit(Event{Kind: EvDone, Err: err})
+			return
+		}
+		ev := p.turn(ctx, req, emit)
+		r.release(req.Dir, p)
+		emit(ev)
 	case Codex:
-		args, input = codexArgs(req)
-		p = &codexParser{}
+		args, input := codexArgs(req)
+		runOnce(ctx, bin, req.Dir, args, input, &codexParser{}, emit)
 	default:
 		emit(Event{Kind: EvDone, Err: fmt.Errorf("unknown agent %q", req.Kind)})
+	}
+}
+
+// Warm starts Claude for req's next turn ahead of time, so that turn
+// doesn't wait for it to start. Other agents have nothing to warm up.
+func (r *Runner) Warm(req Request) {
+	bin := binFor(req)
+	if req.Kind != Claude || bin == "" {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.procs[req.Dir]; p != nil {
+		if p.busy || p.fits(bin, req) {
+			return
+		}
+		p.end()
+	}
+	p, err := startClaude(bin, req)
+	if err != nil {
+		delete(r.procs, req.Dir)
+		return // the turn will start it again and report the error
+	}
+	r.procs[req.Dir] = p
+	r.idleLater(req.Dir, p)
+}
 
+// Stop ends the agent kept for dir and waits for it to exit, so the folder
+// is no longer in use.
+func (r *Runner) Stop(dir string) {
+	r.mu.Lock()
+	p := r.procs[dir]
+	delete(r.procs, dir)
+	r.mu.Unlock()
+	if p != nil {
+		p.end()
+		<-p.exited
+	}
+}
+
+// claim returns a process ready for req's turn, reusing the kept one when
+// it was started the same way and is in the same conversation.
+func (r *Runner) claim(bin string, req Request) (*claudeProc, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.procs[req.Dir]; p != nil {
+		if !p.busy && p.fits(bin, req) {
+			p.busy = true
+			if p.idle != nil {
+				p.idle.Stop()
+			}
+			return p, nil
+		}
+		p.end()
+		delete(r.procs, req.Dir)
+	}
+	p, err := startClaude(bin, req)
+	if err != nil {
+		return nil, err
+	}
+	p.busy = true
+	r.procs[req.Dir] = p
+	return p, nil
+}
+
+// release keeps p for the next turn, or forgets it if it has exited.
+func (r *Runner) release(dir string, p *claudeProc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p.busy = false
+	if r.procs[dir] != p {
+		return
+	}
+	if p.ended() {
+		delete(r.procs, dir)
+		return
+	}
+	r.idleLater(dir, p)
+}
+
+// idleLater ends p once it has had nothing to do for r.Idle. Callers hold
+// r.mu.
+func (r *Runner) idleLater(dir string, p *claudeProc) {
+	p.idle = time.AfterFunc(r.Idle, func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.procs[dir] == p && !p.busy {
+			delete(r.procs, dir)
+			p.end()
+		}
+	})
+}
+
+// runOnce runs an agent process for a single turn.
+func runOnce(ctx context.Context, bin, dir string, args []string, input string, p parser, emit func(Event)) {
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Dir = req.Dir
+	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(input) // closed at EOF, so the agent doesn't wait for more
 	var stderr tailBuffer
 	cmd.Stderr = &stderr
@@ -188,15 +305,20 @@ func Run(ctx context.Context, req Request, emit func(Event)) {
 	}
 	err = cmd.Wait()
 	if ctx.Err() != nil {
-		err = errors.New("stopped")
+		err = errStopped
 	}
 	emit(p.done(err, stderr.String()))
 }
 
 // tailBuffer keeps the last few KB written to it, for error messages.
-type tailBuffer struct{ b []byte }
+type tailBuffer struct {
+	mu sync.Mutex
+	b  []byte
+}
 
 func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.b = append(t.b, p...)
 	if len(t.b) > 8192 {
 		t.b = t.b[len(t.b)-8192:]
@@ -204,7 +326,11 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (t *tailBuffer) String() string { return strings.TrimSpace(string(t.b)) }
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(string(t.b))
+}
 
 // lastLine is the most useful line of an error stream.
 func lastLine(s string) string {

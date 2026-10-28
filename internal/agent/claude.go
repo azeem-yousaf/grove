@@ -1,23 +1,33 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os/exec"
+	"slices"
 	"strings"
+	"sync"
+	"time"
 )
 
 // readOnlyGit are git commands an agent may run without asking; they can't
 // change the repository.
 var readOnlyGit = []string{"status", "diff", "log", "show", "blame"}
 
-// claudeArgs builds a `claude -p` run. File edits inside the working folder
-// are accepted automatically (acceptEdits); anything else that needs
-// permission, such as a shell command or a file outside the worktree, is
-// denied and reported in the result so grove can ask the user.
-func claudeArgs(req Request) (args []string, input string) {
-	args = []string{
-		"-p", "Do what the request at the end of the piped input asks.",
+// claudeArgs starts `claude -p` taking one JSON message per turn on stdin.
+// File edits inside the working folder are accepted automatically
+// (acceptEdits); anything else that needs permission, such as a shell
+// command or a file outside the worktree, is denied and reported in the
+// turn's result so grove can ask the user.
+func claudeArgs(req Request) []string {
+	args := []string{
+		"-p",
+		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
@@ -34,8 +44,11 @@ func claudeArgs(req Request) (args []string, input string) {
 	for _, c := range readOnlyGit {
 		args = append(args, "Bash(git "+c+")", "Bash(git "+c+" *)")
 	}
-	args = append(args, req.Allow...)
+	return append(args, req.Allow...)
+}
 
+// claudeInput is the stdin line that starts a turn.
+func claudeInput(req Request) []byte {
 	var in strings.Builder
 	if req.Context != "" {
 		in.WriteString(req.Context)
@@ -43,7 +56,182 @@ func claudeArgs(req Request) (args []string, input string) {
 	}
 	in.WriteString("## Request\n\n")
 	in.WriteString(req.Message)
-	return args, in.String()
+	b, _ := json.Marshal(map[string]any{
+		"type":    "user",
+		"message": map[string]any{"role": "user", "content": in.String()},
+	})
+	return append(b, '\n')
+}
+
+// claudeInterrupt ends the turn in progress; the process stays usable.
+var claudeInterrupt = []byte(`{"type":"control_request","request_id":"grove-stop","request":{"subtype":"interrupt"}}` + "\n")
+
+// endGrace is how long a Claude process gets to wind down, after being
+// interrupted or having its input closed, before it is killed.
+const endGrace = 5 * time.Second
+
+// claudeProc is a Claude Code process kept between turns.
+type claudeProc struct {
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stderr  tailBuffer
+	exited  chan struct{} // closed once the process has exited and its output is read
+	waitErr error         // set before exited closes
+	endOnce sync.Once
+
+	// What it was started with; a turn needing anything else gets a new
+	// process.
+	bin, model string
+	allow      []string
+
+	curMu sync.Mutex
+	cur   *claudeTurn // the turn in progress, if any
+
+	// Guarded by the Runner's lock; session is also written by the turn
+	// while busy.
+	session string // conversation it is in, "" until its first turn starts one
+	busy    bool
+	idle    *time.Timer
+}
+
+// claudeTurn receives the output of one turn.
+type claudeTurn struct {
+	lines chan []byte
+	done  chan struct{} // closed when the turn stops reading
+}
+
+func startClaude(bin string, req Request) (*claudeProc, error) {
+	p := &claudeProc{
+		exited:  make(chan struct{}),
+		bin:     bin,
+		model:   req.Model,
+		allow:   slices.Clone(req.Allow),
+		session: req.Session,
+	}
+	p.cmd = exec.Command(bin, claudeArgs(req)...)
+	p.cmd.Dir = req.Dir
+	p.cmd.Stderr = &p.stderr
+	var err error
+	if p.stdin, err = p.cmd.StdinPipe(); err != nil {
+		return nil, err
+	}
+	out, err := p.cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.cmd.Start(); err != nil {
+		return nil, err
+	}
+	go p.read(out)
+	return p, nil
+}
+
+// read hands each output line to the turn in progress. Lines between turns
+// belong to none and are dropped.
+func (p *claudeProc) read(out io.Reader) {
+	r := bufio.NewReaderSize(out, 64*1024)
+	for {
+		b, err := r.ReadBytes('\n')
+		if len(bytes.TrimSpace(b)) > 0 {
+			p.curMu.Lock()
+			t := p.cur
+			p.curMu.Unlock()
+			if t != nil {
+				select {
+				case t.lines <- b:
+				case <-t.done:
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	p.waitErr = p.cmd.Wait()
+	close(p.exited)
+}
+
+func (p *claudeProc) fits(bin string, req Request) bool {
+	return !p.ended() && p.bin == bin && p.model == req.Model && p.session == req.Session && slices.Equal(p.allow, req.Allow)
+}
+
+func (p *claudeProc) ended() bool {
+	select {
+	case <-p.exited:
+		return true
+	default:
+		return false
+	}
+}
+
+// end closes the process's input, which makes it exit once it has nothing
+// left to do, and kills it if it hasn't after endGrace.
+func (p *claudeProc) end() {
+	p.endOnce.Do(func() {
+		p.stdin.Close()
+		go func() {
+			select {
+			case <-p.exited:
+			case <-time.After(endGrace):
+				p.cmd.Process.Kill()
+			}
+		}()
+	})
+}
+
+// turn sends one message and reports the turn's events until its result,
+// returning the final EvDone for the caller to emit. Cancelling ctx
+// interrupts the turn, which leaves the process ready for the next one.
+func (p *claudeProc) turn(ctx context.Context, req Request, emit func(Event)) Event {
+	t := &claudeTurn{lines: make(chan []byte), done: make(chan struct{})}
+	p.curMu.Lock()
+	p.cur = t
+	p.curMu.Unlock()
+	defer func() {
+		p.curMu.Lock()
+		p.cur = nil
+		p.curMu.Unlock()
+		close(t.done)
+	}()
+
+	parse := &claudeParser{session: p.session}
+	finish := func(ev Event, stopped bool) Event {
+		if stopped {
+			ev.Err = errStopped
+		}
+		p.session = parse.session
+		return ev
+	}
+	if _, err := p.stdin.Write(claudeInput(req)); err != nil {
+		// The process ended before the turn could start; its exit explains why.
+		select {
+		case <-p.exited:
+			return finish(parse.done(p.waitErr, p.stderr.String()), false)
+		case <-time.After(endGrace):
+			return finish(parse.done(err, p.stderr.String()), false)
+		}
+	}
+	cancel, stopped := ctx.Done(), false
+	var kill <-chan time.Time // after an interrupt, in case it isn't heeded
+	for {
+		select {
+		case b := <-t.lines:
+			for _, ev := range parse.line(b) {
+				emit(ev)
+			}
+			if parse.result != nil {
+				return finish(parse.done(nil, ""), stopped)
+			}
+		case <-p.exited:
+			return finish(parse.done(p.waitErr, p.stderr.String()), stopped)
+		case <-cancel:
+			cancel, stopped = nil, true
+			p.stdin.Write(claudeInterrupt)
+			kill = time.After(endGrace)
+		case <-kill:
+			p.cmd.Process.Kill()
+		}
+	}
 }
 
 // ClaudeRule is the permission rule that lets Claude run exactly command.

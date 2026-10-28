@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,9 +12,11 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // fakeAgent records each request and replies with a script per turn.
@@ -391,6 +394,85 @@ func TestCreateStartsAgentWithTask(t *testing.T) {
 	}
 	if m.focus != focusChat || m.chatPath != path {
 		t.Error("the new worktree's agent should be on screen")
+	}
+}
+
+func TestAgentWarmAndRemoval(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude} }
+	var (
+		mu      sync.Mutex
+		warmed  []agent.Request
+		stopped []string
+	)
+	m.warmAgent = func(r agent.Request) { mu.Lock(); warmed = append(warmed, r); mu.Unlock() }
+	m.stopAgent = func(dir string) { mu.Lock(); stopped = append(stopped, dir); mu.Unlock() }
+
+	// Opening the chat starts the agent while the user types.
+	auth := filepath.FromSlash("/src/shop-auth")
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	pump(t, m, cmd)
+	mu.Lock()
+	if len(warmed) != 1 || warmed[0].Dir != auth || warmed[0].Kind != agent.Claude {
+		t.Errorf("warmed = %+v", warmed)
+	}
+	mu.Unlock()
+
+	// Removing the worktree stops its agent first, so the folder is free.
+	s := m.chatSession()
+	cancelled := false
+	s.running, s.cancel = true, func() { cancelled = true }
+	m.removing = &removal{st: m.snap.States[m.snapIndex(auth)]}
+	pump(t, m, m.runRemoval())
+	mu.Lock()
+	defer mu.Unlock()
+	if !cancelled || len(stopped) != 1 || stopped[0] != auth {
+		t.Errorf("removal should stop the agent: cancelled=%v stopped=%v", cancelled, stopped)
+	}
+}
+
+func TestChatTable(t *testing.T) {
+	st := newStyles(true)
+	body := "Changes:\n\n| File | What changed | Lines |\n|------|--------------|------:|\n| `a.go` | **New** login handler with a session check | 42 |\n| b.go | Tests | 7 |\n\n```\n| kept | as is |\n|---|---|\n```"
+	render := func(width int) []string {
+		var out []string
+		for _, l := range renderChatText(body, width, st, st.text, lipgloss.NewStyle().Width(width)) {
+			out = append(out, ansi.Strip(l))
+		}
+		return out
+	}
+
+	wide := render(80)
+	// Columns are as wide as their widest cell (38 for the second); the
+	// rule row's ---: right-aligns the last.
+	row := func(a, b, c string) string { return fmt.Sprintf("%-4s │ %-38s │ %5s", a, b, c) }
+	want := []string{
+		row("File", "What changed", "Lines"),
+		strings.Repeat("─", 4) + "─┼─" + strings.Repeat("─", 38) + "─┼─" + strings.Repeat("─", 5),
+		row("a.go", "New login handler with a session check", "42"),
+		row("b.go", "Tests", "7"),
+	}
+	if got := strings.Join(wide[2:6], "\n"); got != strings.Join(want, "\n") {
+		t.Errorf("wide table =\n%s\nwant\n%s", got, strings.Join(want, "\n"))
+	}
+	if !strings.Contains(strings.Join(wide, "\n"), "  | kept | as is |") {
+		t.Error("a table inside a code block should stay as written")
+	}
+
+	// Narrow: the long column wraps and every line fits.
+	narrow := render(30)
+	for _, l := range narrow {
+		if ansi.StringWidth(l) > 30 {
+			t.Errorf("line wider than 30: %q", l)
+		}
+	}
+	if joined := strings.Join(narrow, "\n"); !strings.Contains(joined, "a.go │ New login ") || !strings.Contains(joined, "     │ session check ") {
+		t.Errorf("narrow table should wrap the cell within its column:\n%s", joined)
+	}
+
+	// Too narrow for columns: header: value lines.
+	if joined := strings.Join(render(12), "\n"); !strings.Contains(joined, "File: a.go") || !strings.Contains(joined, "Lines: 7") {
+		t.Errorf("tiny table should list header: value:\n%s", joined)
 	}
 }
 

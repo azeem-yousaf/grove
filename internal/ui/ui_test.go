@@ -72,6 +72,8 @@ func noAgents(m *Model) {
 	m.runAgent = func(_ context.Context, _ agent.Request, emit func(agent.Event)) {
 		emit(agent.Event{Kind: agent.EvDone, Err: fmt.Errorf("no agent in tests")})
 	}
+	m.warmAgent = func(agent.Request) {}
+	m.stopAgent = func(string) {}
 }
 
 func press(m *Model, keys ...string) {

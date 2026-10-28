@@ -97,7 +97,18 @@ func (m *Model) runRemoval() tea.Cmd {
 	r.queued = false
 	repo := m.repo
 	opt := git.RemoveOptions{Force: r.force, DeleteBranch: r.deleteBranch}
+	// The worktree's agent works in the folder, which Windows won't delete
+	// while a process is using it.
+	dir := r.st.Path
+	if s := m.sessionFor(dir); s != nil {
+		dir = s.path // how the agent knows the folder
+		if s.running && s.cancel != nil {
+			s.cancel()
+		}
+	}
+	stop := m.stopAgent
 	run := func() tea.Msg {
+		stop(dir)
 		ctx, cancel := context.WithTimeout(m.ctx, 5*time.Minute)
 		defer cancel()
 		res, err := git.RemoveWorktree(ctx, repo, r.st.Worktree, opt)

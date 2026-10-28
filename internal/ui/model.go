@@ -114,6 +114,8 @@ type Model struct {
 	// Hooks for the agent, replaced in tests.
 	installed func() []agent.Kind
 	runAgent  func(context.Context, agent.Request, func(agent.Event))
+	warmAgent func(agent.Request)
+	stopAgent func(dir string) // waits until the folder is no longer in use
 	saveAgent func(string) error
 }
 
@@ -162,6 +164,7 @@ func New(ctx context.Context, o Options) *Model {
 	ti.Prompt = "/ "
 	ti.Placeholder = "filter files"
 
+	agents := agent.NewRunner()
 	m := &Model{
 		ctx:          ctx,
 		repo:         o.Repo,
@@ -186,7 +189,9 @@ func New(ctx context.Context, o Options) *Model {
 		chatInput:    newChatInput(),
 		chatView:     newChatView(),
 		installed:    agent.Installed,
-		runAgent:     agent.Run,
+		runAgent:     agents.Run,
+		warmAgent:    agents.Warm,
+		stopAgent:    agents.Stop,
 		saveAgent:    defaultSaveAgent,
 	}
 	switch o.Config.Theme {

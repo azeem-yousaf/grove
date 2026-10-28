@@ -246,7 +246,7 @@ func (m *Model) showChat(s *session) tea.Cmd {
 	s.seen = true
 	m.chatFollow = true
 	m.chatInput.SetValue("")
-	return m.chatInput.Focus()
+	return tea.Batch(m.chatInput.Focus(), m.warm(s))
 }
 
 // chatSession is the session shown in the chat pane.
@@ -297,7 +297,8 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 			ns := m.newSession(path, name, k)
 			ns.checkpoint, ns.touched = s.checkpoint, s.touched
 			ns.entries = []chatEntry{{roleNote, "Switched to " + k.Label() + ". It starts a new conversation."}}
-			return m.showChat(ns)
+			stop := m.stopAgent
+			return tea.Batch(func() tea.Msg { stop(path); return nil }, m.showChat(ns))
 		})
 	}
 
@@ -410,15 +411,8 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	s.cancel = cancel
 	ch := make(chan agentMsg, 64)
 	s.events = ch
-	req := agent.Request{
-		Kind:    s.kind,
-		Dir:     s.path,
-		Message: text,
-		Session: s.id,
-		Allow:   append([]string(nil), s.allow...),
-		Model:   m.cfg.AI.Model,
-		History: append([]agent.Turn(nil), s.history...),
-	}
+	req := m.agentRequest(s)
+	req.Message = text
 	// Claude keeps the conversation itself, so it needs the instructions
 	// once; Codex starts fresh every turn.
 	if s.id == "" || s.kind == agent.Codex {
@@ -435,6 +429,30 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, ev: ev} })
 	}()
 	return tea.Batch(listen(ch), m.startAnimating())
+}
+
+// agentRequest describes s's next turn, without the message.
+func (m *Model) agentRequest(s *session) agent.Request {
+	return agent.Request{
+		Kind:    s.kind,
+		Dir:     s.path,
+		Session: s.id,
+		Allow:   append([]string(nil), s.allow...),
+		Model:   m.cfg.AI.Model,
+		History: append([]agent.Turn(nil), s.history...),
+	}
+}
+
+// warm gets s's agent started while the user types, when it can be.
+func (m *Model) warm(s *session) tea.Cmd {
+	if s.running || len(s.pending) > 0 {
+		return nil // the next turn's permissions aren't known yet
+	}
+	req, warm := m.agentRequest(s), m.warmAgent
+	return func() tea.Msg {
+		warm(req)
+		return nil
+	}
 }
 
 // listen delivers the next event from a running agent.
@@ -884,11 +902,14 @@ func (m *Model) chatLines(s *session, width int) []string {
 	return out
 }
 
-// renderChatText wraps prose and keeps fenced code blocks as they are.
+// renderChatText wraps prose, lays out Markdown tables and keeps fenced
+// code blocks as they are.
 func renderChatText(body string, width int, st styles, style, wrap lipgloss.Style) []string {
 	var out []string
 	inCode, lang := false, ""
-	for _, l := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	for i := 0; i < len(lines); i++ {
+		l := lines[i]
 		trimmed := strings.TrimSpace(l)
 		if strings.HasPrefix(trimmed, "```") {
 			inCode = !inCode
@@ -903,6 +924,11 @@ func renderChatText(body string, width int, st styles, style, wrap lipgloss.Styl
 				code = st.warn.Bold(true)
 			}
 			out = append(out, code.Render(ansi.Truncate("  "+expandTabs(l), width, "…")))
+			continue
+		}
+		if n := tableLen(lines[i:]); n > 0 {
+			out = append(out, renderTable(lines[i:i+n], width, st, style)...)
+			i += n - 1
 			continue
 		}
 		if trimmed == "" {
