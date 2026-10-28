@@ -94,6 +94,8 @@ type Model struct {
 
 	confirm  *removal // the remove dialog, while open
 	removing *removal // a removal git is working on
+
+	gitCmd gitPrompt
 }
 
 type toastKind uint8
@@ -160,6 +162,7 @@ func New(ctx context.Context, o Options) *Model {
 		now:          time.Now(),
 		termFocused:  true,
 		lastClickRow: -1,
+		gitCmd:       newGitPrompt(),
 	}
 	switch o.Config.Theme {
 	case "light":
@@ -174,6 +177,7 @@ func New(ctx context.Context, o Options) *Model {
 func (m *Model) applyTheme() {
 	m.st = newStyles(m.dark)
 	m.filter.SetStyles(textinput.DefaultStyles(m.dark))
+	m.gitCmd.input.SetStyles(textinput.DefaultStyles(m.dark))
 	m.renderedFor = ""
 }
 
@@ -329,6 +333,9 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case removeMsg:
 		return m.onRemoved(msg)
 
+	case gitDoneMsg:
+		return m.onGitDone(msg)
+
 	case actionMsg:
 		if msg.err != nil {
 			return m.notify(msg.err.Error(), toastErr)
@@ -351,6 +358,11 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		return m.onWheel(msg)
 	}
 
+	if m.gitCmd.active {
+		var cmd tea.Cmd
+		m.gitCmd.input, cmd = m.gitCmd.input.Update(msg)
+		return cmd
+	}
 	if m.filterActive {
 		var cmd tea.Cmd
 		m.filter, cmd = m.filter.Update(msg)
@@ -502,6 +514,9 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	if m.confirm != nil {
 		return m.onConfirmKey(msg)
 	}
+	if m.gitCmd.active {
+		return m.onGitPromptKey(msg)
+	}
 	if m.showHelp {
 		if key.Matches(msg, k.Help, k.Back, k.Quit) || msg.String() == "enter" {
 			m.showHelp = false
@@ -588,6 +603,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.copyPath()
 	case key.Matches(msg, k.Remove):
 		return m.askRemove()
+	case key.Matches(msg, k.Git):
+		return m.openGitPrompt()
 	}
 
 	if m.focus == focusDiff {

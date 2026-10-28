@@ -77,6 +77,19 @@ git worktree add ..\my-app-feature-b -b feature/b
 grove
 ```
 
+To run git in one worktree without leaving grove, select it (or any of its
+files) and press `:`, then type the command, with or without the leading
+`git`:
+
+```
+ feature/auth  git commit -m "Add session refresh"
+```
+
+grove hands the terminal to git while it runs, so editors, pagers and
+prompts behave normally (`commit` without `-m`, `log`, `rebase -i`, `push`
+asking for credentials). Press enter afterwards to return; the worktree is
+rescanned straight away. `↑` brings back earlier commands.
+
 When a feature is done, select its worktree and press `d`. grove deletes the
 folder and keeps the branch unless you tick *Also delete branch*, which also
 shows how many commits aren't in the base branch yet. A worktree with
@@ -97,6 +110,7 @@ worktrees work the same way. The main worktree can't be removed.
 | `e` | open the worktree in your editor |
 | `y` | copy the path |
 | `d` | remove the worktree (asks first) |
+| `:` | run a git command in the selected worktree |
 | `m` | toggle branch / uncommitted mode |
 | `o` | show only files changed in several worktrees |
 | `/` | filter files |

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -230,6 +231,79 @@ func TestRemoveDialog(t *testing.T) {
 	press(m, "esc")
 	if m.confirm != nil {
 		t.Error("esc should close the dialog")
+	}
+}
+
+func TestGitPrompt(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	press(m, "]", ":") // feature/cart
+	if !m.gitCmd.active || m.gitCmd.target.Branch != "feature/cart" {
+		t.Fatalf("prompt should target feature/cart: %+v", m.gitCmd.target.Worktree)
+	}
+	press(m, "g", "i", "t", " ", "s", "t", "a", "t", "u", "s")
+	if out := plain(m); !strings.Contains(out, "feature/cart  git git status") {
+		t.Errorf("footer doesn't show the prompt:\n%s", out)
+	}
+	press(m, "enter")
+	if m.gitCmd.active || len(m.gitCmd.history) != 1 || m.gitCmd.history[0] != "status" {
+		t.Fatalf("after enter: active=%v history=%q", m.gitCmd.active, m.gitCmd.history)
+	}
+
+	press(m, ":", "up")
+	if v := m.gitCmd.input.Value(); v != "status" {
+		t.Errorf("up should recall the last command, got %q", v)
+	}
+	press(m, "esc")
+	if m.gitCmd.active {
+		t.Error("esc should close the prompt")
+	}
+	press(m, "q")
+	if m.gitCmd.active {
+		t.Error("q after closing the prompt should not reopen it")
+	}
+}
+
+func TestSplitCommand(t *testing.T) {
+	cases := map[string][]string{
+		`status`:                         {"status"},
+		`commit -m "fix login bug"`:      {"commit", "-m", "fix login bug"},
+		`commit -m 'it''s'`:              {"commit", "-m", "its"},
+		`log  --oneline   -5`:            {"log", "--oneline", "-5"},
+		`commit -m "say 'hi'" --no-edit`: {"commit", "-m", "say 'hi'", "--no-edit"},
+		`commit -m ""`:                   {"commit", "-m", ""},
+	}
+	for in, want := range cases {
+		if got := splitCommand(in); strings.Join(got, "|") != strings.Join(want, "|") || len(got) != len(want) {
+			t.Errorf("splitCommand(%s) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestGitRun(t *testing.T) {
+	if git.Available() != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	run := func(args ...string) (*gitRun, string) {
+		var out strings.Builder
+		g := &gitRun{dir: dir, args: args, st: newStyles(true)}
+		g.SetStdin(strings.NewReader("\n"))
+		g.SetStdout(&out)
+		g.SetStderr(&out)
+		if err := g.Run(); err != nil {
+			t.Fatal(err)
+		}
+		return g, ansi.Strip(out.String())
+	}
+	g, out := run("status", "--short", "--branch")
+	if g.code != 0 || !strings.Contains(out, "##") || !strings.Contains(out, "press enter") {
+		t.Errorf("status: code %d, output:\n%s", g.code, out)
+	}
+	if g, out := run("not-a-command"); g.code == 0 || !strings.Contains(out, "exit") {
+		t.Errorf("bad command: code %d, output:\n%s", g.code, out)
 	}
 }
 

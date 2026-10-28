@@ -155,6 +155,12 @@ func (m *Model) footer() string {
 		hint := count + m.hints([][2]string{{"enter", "done"}, {"esc", "clear"}})
 		return spread(" "+m.filter.View(), hint+" ", m.width)
 	}
+	if g := &m.gitCmd; g.active {
+		label := " " + st.pillAccent.Render(g.target.Name()) + " " + st.accent.Render("git ")
+		hint := m.hints([][2]string{{"enter", "run"}, {"↑", "history"}, {"esc", "cancel"}}) + " "
+		g.input.SetWidth(max(m.width-lipgloss.Width(label)-lipgloss.Width(hint)-2, 10))
+		return spread(label+g.input.View(), hint, m.width)
+	}
 
 	var pairs [][2]string
 	r, ok := m.selected()
@@ -166,9 +172,9 @@ func (m *Model) footer() string {
 	case m.focus == focusDiff:
 		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", "hunk"}, {"[ ]", "file"}, {"enter", "open"}, {"tab", "list"}, {"?", "help"}}
 	case ok && r.kind == rowFile:
-		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	default:
-		pairs = [][2]string{{"enter", "fold"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "fold"}, {":", "git"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	}
 
 	right := ""
@@ -609,7 +615,7 @@ func (m *Model) summaryLines(wt, width int) []string {
 		out = append(out, shared...)
 	}
 
-	acts := [][2]string{{"e", "open in " + m.editorName()}, {"f", "open folder"}, {"y", "copy path"}}
+	acts := [][2]string{{":", "run git"}, {"e", "open in " + m.editorName()}, {"f", "open folder"}, {"y", "copy path"}}
 	if !s.Main && !s.Bare {
 		acts = append(acts, [2]string{"d", "remove"})
 	}
