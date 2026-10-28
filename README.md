@@ -236,6 +236,7 @@ theme = "auto"       # "auto", "dark" or "light"
 [new]                # new worktrees (key n)
 copy = [".env", ".env.local", "appsettings.Development.json"]  # copied from the main worktree
 setup = "dotnet restore"                                       # run in the new folder; "" = none
+open_editor = false                                             # open new worktrees in the editor after creation
 
 [ai]                 # the worktree agents (key a)
 agent = "claude"     # "claude" or "codex"; "" = ask when both are installed

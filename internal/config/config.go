@@ -66,6 +66,8 @@ type NewWorktree struct {
 	Copy []string `toml:"copy"`
 	// Setup is a command run in the new worktree, such as "npm install".
 	Setup string `toml:"setup"`
+	// OpenEditor opens the new worktree in the configured editor after creation.
+	OpenEditor bool `toml:"open_editor"`
 }
 
 // Duration is a time.Duration written as a string such as "3s".
@@ -241,6 +243,8 @@ theme = "auto"
 copy = [".env", ".env.local"]
 # Command run in the new worktree after it's created. Empty = none.
 setup = ""
+# Open the new worktree in the configured editor after creation.
+open_editor = false
 
 # The assistant each worktree's agent uses (key: a). grove runs a tool that
 # is already installed and signed in on this PC.
