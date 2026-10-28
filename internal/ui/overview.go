@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -104,6 +105,10 @@ func (m *Model) dashboardPane(w, h int) string {
 	}
 
 	var work []string
+	if p := m.activePlan(); p != nil {
+		c := planCounts(p)
+		work = append(work, st.accent.Render(fmt.Sprintf("▸ %s %d/%d", ansi.Truncate(p.Title, 18, "…"), c[plan.Finished], len(p.Tasks))))
+	}
 	if o.ahead > 0 {
 		work = append(work, st.accent.Render(fmt.Sprintf("↑%d ahead", o.ahead)))
 	}
@@ -192,6 +197,34 @@ func (m *Model) attentionItems() []attention {
 			names = append(names, m.snap.States[i].Name())
 		}
 		later = append(later, attention{st.warn.Render("⚠"), path + " is changed in " + strings.Join(names, ", "), m.snap.States[idx[0]].Path})
+	}
+	for _, p := range m.plans {
+		if p.Status == plan.Draft {
+			continue
+		}
+		c := planCounts(p)
+		for _, t := range p.Tasks {
+			if t.Status == plan.Failed {
+				urgent = append(urgent, attention{st.del.Render("✕"), fmt.Sprintf("%s (%s) failed: %s", t.Title, p.Title, t.Error), t.Path})
+			}
+		}
+		for _, g := range p.Groups {
+			if log, ok := m.groupLog(p, g.ID); ok {
+				if gs := m.groups[log.Dir]; gs != nil && gs.paused {
+					path := ""
+					if mem := p.Members(g.ID); len(mem) > 0 {
+						path = mem[0].Path
+					}
+					urgent = append(urgent, attention{st.warn.Bold(true).Render("⇄"), fmt.Sprintf("%s's agents are waiting for you to post in their group chat (t)", g.Name), path})
+				}
+			}
+		}
+		switch {
+		case p.Status == plan.Done:
+			later = append(later, attention{st.add.Render("✓"), p.Title + " is done; review its worktrees and merge them with c", ""})
+		case c[plan.Queued] > 0:
+			later = append(later, attention{st.faint.Render("◌"), fmt.Sprintf("%s: %s waiting for a free agent slot", p.Title, plural(c[plan.Queued], "task")), ""})
+		}
 	}
 	// Map order is random; keep the list steady between refreshes.
 	sortAttention(later)
@@ -353,7 +386,12 @@ func (m *Model) overviewPane(w, h int) string {
 
 	items := m.attentionItems()
 	n := len(m.snap.States)
-	avail := max(ih-3, 1) // below the totals and the column titles
+	plans := m.planLines(inner, 3)
+	above := 3 // the totals, a gap and the column titles
+	if len(plans) > 0 {
+		above += len(plans) + 1
+	}
+	avail := max(ih-above, 1)
 	tableRoom, attnRoom := min(n, avail), 0
 	if len(items) > 0 {
 		// Attention always keeps a few lines; the table gets the rest.
@@ -361,7 +399,11 @@ func (m *Model) overviewPane(w, h int) string {
 		attnRoom = min(len(items), max(avail-tableRoom-2, 0))
 	}
 
-	body := []string{" " + strings.Join(totals, sep), "", header}
+	body := []string{" " + strings.Join(totals, sep), ""}
+	if len(plans) > 0 {
+		body = append(append(body, plans...), "")
+	}
+	body = append(body, header)
 	cur := m.ovIndex()
 	m.ovStart = max(0, min(cur-tableRoom/2, n-tableRoom))
 	m.ovEnd = min(n, m.ovStart+tableRoom)
@@ -493,7 +535,14 @@ func (m *Model) overviewColumns(width int) []ovColumn {
 		}
 		return st.faint.Render(ago(m.now, s.Last.When)+" ") + st.muted.Render(s.Last.Subject)
 	}}
-	task := ovColumn{"AGENT'S TASK", 0, 'l', func(_ int, s git.State) string {
+	task := ovColumn{"TASK", 0, 'l', func(_ int, s git.State) string {
+		if p, t := m.taskFor(s.Path); t != nil {
+			out := m.taskIcon(t) + " " + st.text.Render(t.Title)
+			if g, ok := p.Group(t.Group); ok {
+				out += st.warn.Render(" ⇄ " + g.Name)
+			}
+			return out
+		}
 		if ses := m.sessionFor(s.Path); ses != nil && ses.lastUser != "" {
 			return st.muted.Render(firstLine(ses.lastUser))
 		}
@@ -530,4 +579,77 @@ func fitCell(s string, width int, align byte) string {
 		return ansi.Truncate(s, width, "…")
 	}
 	return padCell(s, width, align)
+}
+
+// planCounts counts a plan's tasks by status.
+func planCounts(p *plan.Plan) map[plan.TaskStatus]int {
+	c := map[plan.TaskStatus]int{}
+	for _, t := range p.Tasks {
+		c[t.Status]++
+	}
+	return c
+}
+
+// activePlan is the newest running plan, if any.
+func (m *Model) activePlan() *plan.Plan {
+	for _, p := range m.plans {
+		if p.Status == plan.Running {
+			return p
+		}
+	}
+	return nil
+}
+
+// taskIcon shows a task's status.
+func (m *Model) taskIcon(t *plan.Task) string {
+	st := m.st
+	switch t.Status {
+	case plan.Working:
+		if s := m.sessionFor(t.Path); s != nil && s.running {
+			return st.accent.Render(spinnerFrames[m.frame%len(spinnerFrames)])
+		}
+		return st.accent.Render("●")
+	case plan.Finished:
+		return st.add.Render("✓")
+	case plan.Failed:
+		return st.del.Render("✕")
+	}
+	return st.faint.Render("◌")
+}
+
+// planLines summarise the newest started plans for the overview.
+func (m *Model) planLines(width, most int) []string {
+	st := m.st
+	var out []string
+	for _, p := range m.plans {
+		if p.Status == plan.Draft {
+			continue
+		}
+		if len(out) == most {
+			break
+		}
+		c := planCounts(p)
+		status := st.accent.Render("running")
+		if p.Status == plan.Done {
+			status = st.add.Render("done")
+		}
+		parts := []string{st.add.Render(fmt.Sprintf("✓ %d finished", c[plan.Finished]))}
+		if n := c[plan.Working]; n > 0 {
+			parts = append(parts, st.accent.Render(fmt.Sprintf("● %d working", n)))
+		}
+		if n := c[plan.Queued]; n > 0 {
+			parts = append(parts, st.faint.Render(fmt.Sprintf("◌ %d waiting", n)))
+		}
+		if n := c[plan.Failed]; n > 0 {
+			parts = append(parts, st.del.Render(fmt.Sprintf("✕ %d failed", n)))
+		}
+		groups := ""
+		if len(p.Groups) > 0 {
+			groups = st.faint.Render(" · ") + st.warn.Render(plural(len(p.Groups), "group"))
+		}
+		line := " " + st.bold.Render("▸ "+p.Title) + st.faint.Render(" · ") + status + st.faint.Render(fmt.Sprintf(" · %d tasks: ", len(p.Tasks))) +
+			strings.Join(parts, st.faint.Render(", ")) + groups
+		out = append(out, ansi.Truncate(line, width, "…"))
+	}
+	return out
 }

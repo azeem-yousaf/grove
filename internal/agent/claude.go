@@ -74,7 +74,22 @@ func claudeArgs(req Request) []string {
 			args = append(args, "mcp__"+s.Name+"__"+t)
 		}
 	}
+	for _, d := range req.ReadDirs {
+		args = append(args, ReadRule(d))
+	}
 	return append(args, req.Allow...)
+}
+
+// ReadRule lets Claude read everything under dir, and nothing more: edits
+// there still need permission, which a turn never gets. Claude Code matches
+// absolute paths written as //path, with Windows paths in POSIX form
+// (C:\src\app is //c/src/app).
+func ReadRule(dir string) string {
+	p := strings.TrimRight(strings.ReplaceAll(dir, "\\", "/"), "/")
+	if len(p) >= 2 && p[1] == ':' {
+		p = "/" + strings.ToLower(p[:1]) + p[2:]
+	}
+	return "Read(/" + p + "/**)"
 }
 
 // mcpConfig is the --mcp-config JSON for tool servers, or "" for none. It
@@ -142,7 +157,8 @@ type claudeProc struct {
 	// process.
 	bin, model string
 	allow      []string
-	tools      string // mcpConfig it was started with
+	tools      string   // mcpConfig it was started with
+	readDirs   []string // ReadDirs it was started with
 
 	curMu sync.Mutex
 	cur   *claudeTurn // the turn in progress, if any
@@ -162,12 +178,13 @@ type claudeTurn struct {
 
 func startClaude(bin string, req Request) (*claudeProc, error) {
 	p := &claudeProc{
-		exited:  make(chan struct{}),
-		bin:     bin,
-		model:   req.Model,
-		allow:   slices.Clone(req.Allow),
-		tools:   mcpConfig(req.Tools),
-		session: req.Session,
+		exited:   make(chan struct{}),
+		bin:      bin,
+		model:    req.Model,
+		allow:    slices.Clone(req.Allow),
+		tools:    mcpConfig(req.Tools),
+		readDirs: slices.Clone(req.ReadDirs),
+		session:  req.Session,
 	}
 	p.cmd = exec.Command(bin, claudeArgs(req)...)
 	p.cmd.Dir = req.Dir
@@ -213,7 +230,7 @@ func (p *claudeProc) read(out io.Reader) {
 }
 
 func (p *claudeProc) fits(bin string, req Request) bool {
-	return !p.ended() && p.bin == bin && p.model == req.Model && p.session == req.Session && slices.Equal(p.allow, req.Allow) && p.tools == mcpConfig(req.Tools)
+	return !p.ended() && p.bin == bin && p.model == req.Model && p.session == req.Session && slices.Equal(p.allow, req.Allow) && p.tools == mcpConfig(req.Tools) && slices.Equal(p.readDirs, req.ReadDirs)
 }
 
 func (p *claudeProc) ended() bool {

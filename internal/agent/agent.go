@@ -102,6 +102,10 @@ type Request struct {
 	// Tools are MCP servers the agent's CLI starts for it, such as a
 	// grouped task's group chat.
 	Tools []ToolServer
+	// ReadDirs are folders outside Dir the agent may read but not change:
+	// a grouped task's groupmates' worktrees (Claude). Codex's sandbox
+	// already lets it read anywhere.
+	ReadDirs []string
 }
 
 // ToolServer is an MCP server run over stdio by the agent's CLI.

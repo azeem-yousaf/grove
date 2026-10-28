@@ -609,6 +609,7 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,
 		Tools:    m.groupTools(s),
+		ReadDirs: m.groupmateDirs(s),
 	}
 }
 
@@ -793,16 +794,21 @@ func (m *Model) agentContext(s *session) string {
 	}
 	b.WriteString("\n\nRules:\n")
 	b.WriteString("- Read and change files only inside your folder. ")
+	mates := m.groupmateDirs(s)
 	var others []string
 	if m.snap != nil {
 		for _, st := range m.snap.States {
-			if !git.SamePath(st.Path, s.path) {
-				others = append(others, st.Path+" ("+st.Name()+")")
+			if git.SamePath(st.Path, s.path) || slices.ContainsFunc(mates, func(d string) bool { return git.SamePath(d, st.Path) }) {
+				continue
 			}
+			others = append(others, st.Path+" ("+st.Name()+")")
 		}
 	}
 	if len(others) > 0 {
 		b.WriteString("These are other worktrees of the same repository, used for other work; never read or change anything in them: " + strings.Join(others, "; ") + ".")
+	}
+	if len(mates) > 0 {
+		b.WriteString("\n- You may read, but never change, your groupmates' worktrees, to match their APIs, types and names: " + strings.Join(mates, "; ") + ".")
 	}
 	b.WriteString("\n- Don't run git commands that change the repository (commit, checkout, switch, merge, rebase, reset, restore, stash, push, pull, branch). When one is needed, put it in a fenced code block whose language is grove-run, one command per line, and the user will run it from grove:\n\n```grove-run\ngit commit -m \"Describe the change\"\n```\n")
 	b.WriteString("- Some shell commands need the user's approval. If one is refused, say what you wanted to run and why, then stop.\n")

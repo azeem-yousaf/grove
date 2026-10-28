@@ -73,6 +73,22 @@ func (m *Model) groupTools(s *session) []agent.ToolServer {
 	}}
 }
 
+// groupmateDirs are the worktrees of s's groupmates that exist, which its
+// agent may read but not change.
+func (m *Model) groupmateDirs(s *session) []string {
+	p, t := m.taskFor(s.path)
+	if t == nil || t.Group == "" {
+		return nil
+	}
+	var out []string
+	for _, o := range p.Members(t.Group) {
+		if o.ID != t.ID && o.Path != "" {
+			out = append(out, o.Path)
+		}
+	}
+	return out
+}
+
 // groupInfo is who is in a group, for the members tool.
 func groupInfo(p *plan.Plan, g plan.Group) group.Info {
 	info := group.Info{Plan: p.Title, Name: g.Name}

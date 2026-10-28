@@ -240,6 +240,20 @@ func TestReadOnlyArgs(t *testing.T) {
 	if j := strings.Join(cargs, " "); !strings.Contains(j, `-c mcp_servers.grove.command="C:\\bin\\grove.exe" -c mcp_servers.grove.args=["mcp-group","--as","feature/x"]`) {
 		t.Errorf("codex args with tools: %s", j)
 	}
+	for in, want := range map[string]string{
+		"/src/shop-api":       "Read(//src/shop-api/**)",
+		"/src/shop-api/":      "Read(//src/shop-api/**)",
+		`C:\src\shop-api`:     "Read(//c/src/shop-api/**)",
+		`D:\Work\My Repo\ui\`: "Read(//d/Work/My Repo/ui/**)",
+	} {
+		if got := ReadRule(in); got != want {
+			t.Errorf("ReadRule(%q) = %q, want %q", in, got, want)
+		}
+	}
+	args = claudeArgs(Request{ReadDirs: []string{"/src/shop-ui"}, Allow: []string{"Bash(ls)"}})
+	if j := strings.Join(args, " "); !strings.Contains(j, "Read(//src/shop-ui/**) Bash(ls)") || strings.Contains(j, "--add-dir") {
+		t.Errorf("claude args with read dirs: %s", j)
+	}
 	// The planner and the worktree's own agent never share a process.
 	if procKey(req) == procKey(Request{Dir: "/src/app"}) {
 		t.Error("read-only and normal agents in one folder share a process key")

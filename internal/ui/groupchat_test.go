@@ -58,9 +58,22 @@ func TestGroupedAgentsGetTheirGroup(t *testing.T) {
 	if !strings.Contains(ctx, "## Your group: Checkout") || !strings.Contains(ctx, "- feature/b: Work on feature/b") || strings.Contains(ctx, "- feature/c:") {
 		t.Errorf("grouped briefing:\n%s", ctx)
 	}
+	// a may read b's worktree, and is told so instead of being told to keep
+	// out; c stays out of both.
+	bPath := m.taskPath(p, "feature/b")
+	if len(req.ReadDirs) != 1 || req.ReadDirs[0] != bPath {
+		t.Errorf("a's read dirs = %v, want b's worktree", req.ReadDirs)
+	}
+	if !strings.Contains(ctx, "You may read, but never change, your groupmates' worktrees") || !strings.Contains(ctx, bPath) ||
+		strings.Contains(ctx, bPath+" (feature/b)") {
+		t.Errorf("a's briefing about b:\n%s", ctx)
+	}
 	c := m.sessionFor(m.taskPath(p, "feature/c"))
-	if req := m.agentRequest(c); len(req.Tools) != 0 || strings.Contains(m.agentContext(c), "Your group") {
+	if req := m.agentRequest(c); len(req.Tools) != 0 || len(req.ReadDirs) != 0 || strings.Contains(m.agentContext(c), "Your group") {
 		t.Error("an isolated task must not get the group")
+	}
+	if ctx := m.agentContext(c); !strings.Contains(ctx, "never read or change anything in them") || !strings.Contains(ctx, bPath+" (feature/b)") {
+		t.Errorf("c's briefing should keep it out of b:\n%s", ctx)
 	}
 
 	// Saving the plan publishes the members for the members tool.
@@ -167,5 +180,35 @@ func TestBusyAgentsAreNotWoken(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if len(fake.reqs) != 0 {
 		t.Error("a working agent reads its messages itself; grove must not start another turn")
+	}
+}
+
+func TestOverviewShowsPlans(t *testing.T) {
+	m, p, _ := groupedPlan(t)
+	p.Tasks = append(p.Tasks, plan.Task{ID: "q", Title: "Later", Branch: "feature/q", Status: plan.Queued})
+	for i := range p.Tasks {
+		if p.Tasks[i].Branch == "feature/c" {
+			p.Tasks[i].Status, p.Tasks[i].Error = plan.Failed, "it broke"
+		}
+	}
+	log, _ := m.groupLog(p, "g")
+	m.groups[log.Dir] = &groupState{paused: true, wakeups: 6}
+	m.Update(tea.WindowSizeMsg{Width: 180, Height: 40})
+	press(m, "w")
+	out := plain(m)
+	for _, want := range []string{
+		"▸ Shop · running · 4 tasks: ✓ 0 finished, ● 2 working, ◌ 1 waiting, ✕ 1 failed · 1 group",
+		"TASK", "Work on feature/a ⇄ Checkout",
+		"Work on feature/c (Shop) failed: it broke",
+		"Checkout's agents are waiting for you to post in their group chat (t)",
+		"Shop: 1 task waiting for a free agent slot",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("overview is missing %q:\n%s", want, out)
+		}
+	}
+	press(m, "esc")
+	if !strings.Contains(plain(m), "▸ Shop 0/4") {
+		t.Errorf("the summary should show the plan's progress:\n%s", plain(m))
 	}
 }

@@ -213,7 +213,11 @@ mcp-group`, started by Claude Code or Codex): `members` (who is in the
 group, their task and worktree), `post` (to everyone, or one member) and
 `read` (new messages, optionally waiting for an answer). Agents are told to
 read their messages when they start and before they finish, and to post
-whatever their groupmates depend on.
+whatever their groupmates depend on. They may also read (never change)
+their groupmates' worktrees, to match APIs and types: Claude Code is given
+read-only permission for those folders, and every other worktree stays off
+limits. (Codex's sandbox can read anywhere, so with Codex this is by
+instruction only.)
 
 Press `t` on a grouped task's worktree (or `ctrl+g` in its agent chat) to
 open the group chat. You see every message and can post too; start with
@@ -231,8 +235,9 @@ A summary above the list counts active and clean worktrees, commits ahead
 of and behind the base, working agents, and anything that needs you:
 agents waiting for approval or failed, unresolved merge conflicts,
 unreadable worktrees and overlapping files. Press `w` (or click the summary)
-for the full overview: a table of every worktree with its files, `+`/`−`
-lines, agent status and task, commits ahead and behind, uncommitted edits,
+for the full overview: running plans with their tasks' progress, a table of
+every worktree with its files, `+`/`−` lines, agent status, its plan task
+and group, commits ahead and behind, uncommitted edits,
 overlaps and last commit, and a list of what needs attention. `enter`
 jumps to the worktree in the list, `a` opens its agent and `c` merges into
 it.
