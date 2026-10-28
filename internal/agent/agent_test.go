@@ -208,6 +208,30 @@ func TestArgs(t *testing.T) {
 	}
 }
 
+func TestReadOnlyArgs(t *testing.T) {
+	req := Request{Dir: "/src/app", ReadOnly: true, Allow: []string{ClaudeRule("Bash", "ls")}}
+	args := claudeArgs(req)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--permission-mode default", "--disallowedTools Edit MultiEdit Write NotebookEdit --allowedTools", "mcp__claude_ai_Atlassian__getJiraIssue", "Bash(git log *)"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("read-only claude args missing %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "acceptEdits") || strings.Contains(joined, "createJiraIssue") {
+		t.Errorf("read-only claude args allow too much: %s", joined)
+	}
+	if args[len(args)-1] != "Bash(ls)" {
+		t.Error("--allowedTools values must come last")
+	}
+	if args, _ := codexArgs(req); strings.Join(args, " ") != "exec --json --sandbox read-only -" {
+		t.Errorf("read-only codex args = %q", args)
+	}
+	// The planner and the worktree's own agent never share a process.
+	if procKey(req) == procKey(Request{Dir: "/src/app"}) {
+		t.Error("read-only and normal agents in one folder share a process key")
+	}
+}
+
 // turn runs one turn and returns its events, checking it ends with exactly
 // one EvDone.
 func turn(t *testing.T, r *Runner, ctx context.Context, req Request) []Event {

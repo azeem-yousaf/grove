@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -35,6 +36,7 @@ type savedSession struct {
 	Cost        string         `json:"cost,omitempty"`
 	Failed      bool           `json:"failed,omitempty"`
 	Interrupted bool           `json:"interrupted,omitempty"` // saved while the agent was working
+	Planner     bool           `json:"planner,omitempty"`
 }
 
 type savedEntry struct {
@@ -52,11 +54,22 @@ var roleNames = map[chatRole]string{roleUser: "user", roleAgent: "agent", roleTo
 
 func sessionFile(path string) string { return "sessions/" + git.PathKey(path) + ".json" }
 
+// plannerFile holds the planner's conversation.
+const plannerFile = "planner/session.json"
+
+// file is where s is saved.
+func (s *session) file() string {
+	if s.planner {
+		return plannerFile
+	}
+	return sessionFile(s.path)
+}
+
 func (s *session) saved() savedSession {
 	out := savedSession{
 		Version: 1, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
 		History: s.history, Checkpoint: s.checkpoint, Allow: s.allow, Cost: s.cost,
-		Failed: s.failed, Interrupted: s.running,
+		Failed: s.failed, Interrupted: s.running, Planner: s.planner,
 	}
 	for _, e := range s.entries {
 		out.Entries = append(out.Entries, savedEntry{roleNames[e.role], e.text})
@@ -77,7 +90,7 @@ func restore(v savedSession, checkpointOK bool) *session {
 	s := &session{
 		kind: v.Kind, path: v.Path, name: v.Name, model: v.Model, id: v.ID,
 		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, cost: v.Cost,
-		failed: v.Failed, touched: map[string]bool{}, seen: true,
+		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner,
 	}
 	for _, e := range v.Entries {
 		role := roleNote
@@ -113,7 +126,10 @@ type (
 		sessions []*session
 		err      error
 	}
-	persistMsg struct{ err error }
+	persistMsg struct {
+		written map[string][]byte // file name to what was written
+		err     error
+	}
 )
 
 // loadSessions reads the saved sessions. Sessions for worktrees whose folder
@@ -127,6 +143,9 @@ func (m *Model) loadSessions() tea.Cmd {
 		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 		defer cancel()
 		names, err := st.List("sessions")
+		if _, perr := os.Stat(filepath.Join(st.Dir(), filepath.FromSlash(plannerFile))); perr == nil {
+			names = append(names, plannerFile)
+		}
 		var out []*session
 		var errs []error
 		if err != nil {
@@ -138,7 +157,7 @@ func (m *Model) loadSessions() tea.Cmd {
 				errs = append(errs, err)
 				continue
 			}
-			if _, err := os.Stat(v.Path); errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(v.Path); errors.Is(err, os.ErrNotExist) && !v.Planner {
 				_ = st.Remove(n)
 				_ = git.DropCheckpoint(ctx, common, v.Path)
 				continue
@@ -153,12 +172,16 @@ func (m *Model) loadSessions() tea.Cmd {
 func (m *Model) onSessionsLoaded(msg sessionsLoadedMsg) tea.Cmd {
 	for _, s := range msg.sessions {
 		// One the user started while loading wins.
-		if m.sessionFor(s.path) != nil {
+		switch {
+		case s.planner && m.planner == nil:
+			m.planner = s
+		case s.planner, m.sessionFor(s.path) != nil:
 			continue
+		default:
+			m.sessions[s.path] = s
 		}
-		m.sessions[s.path] = s
 		if b, err := json.Marshal(s.saved()); err == nil {
-			m.savedJSON[s.path] = b
+			m.savedJSON[s.file()] = b
 		}
 	}
 	if msg.err != nil {
@@ -167,51 +190,69 @@ func (m *Model) onSessionsLoaded(msg sessionsLoadedMsg) tea.Cmd {
 	return nil
 }
 
-// changedSessions marshals the sessions that differ from what was last
-// written, and records them as written.
+// changedSessions marshals the sessions and plans that differ from what
+// was last written. Keys are store file names. They count as written only
+// once the write succeeds, so one queued when grove quits isn't lost.
 func (m *Model) changedSessions() map[string][]byte {
 	if m.store == nil {
 		return nil
 	}
 	out := map[string][]byte{}
-	for path, s := range m.sessions {
-		b, err := json.Marshal(s.saved())
-		if err != nil || bytes.Equal(b, m.savedJSON[path]) {
-			continue
+	add := func(f string, v any) {
+		if b, err := json.Marshal(v); err == nil && !bytes.Equal(b, m.savedJSON[f]) {
+			out[f] = b
 		}
-		m.savedJSON[path] = b
-		out[path] = b
+	}
+	for _, s := range m.allSessions() {
+		add(s.file(), s.saved())
+	}
+	for _, p := range m.plans {
+		add(planFile(p.ID), p)
 	}
 	return out
 }
 
-func writeSessions(st *store.Store, changed map[string][]byte) error {
+// writeState writes changed files, returning the ones written.
+func writeState(st *store.Store, changed map[string][]byte) (map[string][]byte, error) {
+	written := map[string][]byte{}
 	var errs []error
-	for path, b := range changed {
-		errs = append(errs, st.Write(sessionFile(path), b))
+	for name, b := range changed {
+		if err := st.Write(name, b); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		written[name] = b
 	}
-	return errors.Join(errs...)
+	return written, errors.Join(errs...)
 }
 
-// persistSessions saves changed sessions in the background. The clock calls
-// it every second, so a crash loses at most a second of conversation.
+// persistSessions saves changed sessions and plans in the background. The
+// clock calls it every second, so a crash loses at most a second of
+// conversation.
 func (m *Model) persistSessions() tea.Cmd {
 	changed := m.changedSessions()
 	if len(changed) == 0 {
 		return nil
 	}
 	st := m.store
-	return func() tea.Msg { return persistMsg{writeSessions(st, changed)} }
+	return func() tea.Msg {
+		written, err := writeState(st, changed)
+		return persistMsg{written: written, err: err}
+	}
 }
 
-// persistNow saves changed sessions before grove exits.
+// persistNow saves what changed before grove exits.
 func (m *Model) persistNow() {
 	if changed := m.changedSessions(); len(changed) > 0 {
-		_ = writeSessions(m.store, changed)
+		written, err := writeState(m.store, changed)
+		m.onPersisted(persistMsg{written: written, err: err})
 	}
 }
 
 func (m *Model) onPersisted(msg persistMsg) tea.Cmd {
+	for f, b := range msg.written {
+		m.savedJSON[f] = b
+	}
 	if msg.err == nil {
 		m.persistErr = ""
 		return nil
@@ -220,9 +261,7 @@ func (m *Model) onPersisted(msg persistMsg) tea.Cmd {
 		return nil // already said so
 	}
 	m.persistErr = msg.err.Error()
-	// Try again next time rather than trusting what wasn't written.
-	m.savedJSON = map[string][]byte{}
-	return m.notify("Couldn't save agent conversations: "+msg.err.Error(), toastErr)
+	return m.notify("Couldn't save grove's state: "+msg.err.Error(), toastErr)
 }
 
 // forgetSession deletes a worktree's agent, its saved conversation and its
@@ -231,10 +270,10 @@ func (m *Model) forgetSession(path string) tea.Cmd {
 	for p := range m.sessions {
 		if git.SamePath(p, path) {
 			delete(m.sessions, p)
-			delete(m.savedJSON, p)
+			delete(m.savedJSON, sessionFile(p))
 		}
 	}
-	if m.chatPath != "" && git.SamePath(m.chatPath, path) {
+	if !m.chatPlanner && m.chatPath != "" && git.SamePath(m.chatPath, path) {
 		m.chatPath = ""
 		if m.focus == focusChat {
 			m.focus = focusList
@@ -248,6 +287,6 @@ func (m *Model) forgetSession(path string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
 		defer cancel()
 		_ = git.DropCheckpoint(ctx, common, path)
-		return persistMsg{st.Remove(sessionFile(path))}
+		return persistMsg{err: st.Remove(sessionFile(path))}
 	}
 }

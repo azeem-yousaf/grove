@@ -51,9 +51,11 @@ func TestSessionsSurviveRestart(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("a changed session should be saved")
 	}
-	if msg := cmd().(persistMsg); msg.err != nil {
+	msg := cmd().(persistMsg)
+	if msg.err != nil {
 		t.Fatal(msg.err)
 	}
+	m.Update(msg)
 	if m.persistSessions() != nil {
 		t.Error("an unchanged session shouldn't be written again")
 	}

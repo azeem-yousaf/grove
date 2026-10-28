@@ -183,6 +183,32 @@ config).
 The agent reads your project's `CLAUDE.md` / `AGENTS.md` as usual. It
 sends your code to Anthropic or OpenAI just as the tool would on its own.
 
+### Planner
+
+Press `P` to open the planner, an agent that reads the repository but never
+changes it. Describe what you want built, or name a Jira issue or epic (with
+Claude Code, the planner reads Jira through your Atlassian connector; it can
+only read, never create or edit issues). It asks about anything unclear and
+then proposes a plan: tasks, each with a branch and a brief for its agent,
+and groups of tasks whose agents will need to coordinate.
+
+The plan opens for review (`ctrl+o` in the planner brings it back). Nothing
+is created until you start it:
+
+- `enter` edits a task's title, branch and brief, `g` moves it between
+  groups (or makes it isolated), `r` renames its group and `d` removes it.
+- `s` checks that no branch or folder already exists and starts the plan.
+  grove creates a worktree per task (copying the `[new] copy` files), and
+  starts each task's agent with its brief, at most `[planner] max_agents`
+  (default 3) at a time; the rest wait for a free slot.
+- A task is finished when its agent ends a turn without needing you. A
+  reply that ends with a question, or an approval card, keeps it working.
+  Once every task has finished, the planner says so; review the worktrees
+  and merge them with `c`.
+
+Plans and the planner's conversation are saved with the agents' and
+survive restarts.
+
 ### Overview of every worktree
 
 A summary above the list counts active and clean worktrees, commits ahead
@@ -234,6 +260,7 @@ worktrees work the same way. The main worktree can't be removed.
 | `y` | copy the path |
 | `n` | create a worktree (in the list) |
 | `a` | open the worktree's AI agent |
+| `P` | the planner: turn requirements into tasks and worktrees |
 | `w` | overview of every worktree |
 | `c` | merge other worktrees' branches into this one |
 | `u` | undo everything the worktree's agent changed |

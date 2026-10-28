@@ -94,6 +94,20 @@ type Request struct {
 	Session string   // session to resume (Claude)
 	Allow   []string // extra permission rules the user approved (Claude)
 	Model   string
+	// ReadOnly lets the agent read but not change files: the planner.
+	// Claude refuses edits and may use read-only Jira tools; Codex runs in
+	// its read-only sandbox. It gets its own process even in a folder that
+	// also has a worktree agent.
+	ReadOnly bool
+}
+
+// procKey is the kept Claude process for req: one per folder, plus one for
+// a read-only agent there.
+func procKey(req Request) string {
+	if req.ReadOnly {
+		return req.Dir + "\x00read-only"
+	}
+	return req.Dir
 }
 
 // EventKind classifies an Event.
@@ -175,7 +189,7 @@ func (r *Runner) Run(ctx context.Context, req Request, emit func(Event)) {
 			return
 		}
 		ev := p.turn(ctx, req, emit)
-		r.release(req.Dir, p)
+		r.release(procKey(req), p)
 		emit(ev)
 	case Codex:
 		args, input := codexArgs(req)
@@ -192,9 +206,10 @@ func (r *Runner) Warm(req Request) {
 	if req.Kind != Claude || bin == "" {
 		return
 	}
+	key := procKey(req)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if p := r.procs[req.Dir]; p != nil {
+	if p := r.procs[key]; p != nil {
 		if p.busy || p.fits(bin, req) {
 			return
 		}
@@ -202,11 +217,11 @@ func (r *Runner) Warm(req Request) {
 	}
 	p, err := startClaude(bin, req)
 	if err != nil {
-		delete(r.procs, req.Dir)
+		delete(r.procs, key)
 		return // the turn will start it again and report the error
 	}
-	r.procs[req.Dir] = p
-	r.idleLater(req.Dir, p)
+	r.procs[key] = p
+	r.idleLater(key, p)
 }
 
 // Stop ends the agent kept for dir and waits for it to exit, so the folder
@@ -225,9 +240,10 @@ func (r *Runner) Stop(dir string) {
 // claim returns a process ready for req's turn, reusing the kept one when
 // it was started the same way and is in the same conversation.
 func (r *Runner) claim(bin string, req Request) (*claudeProc, error) {
+	key := procKey(req)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if p := r.procs[req.Dir]; p != nil {
+	if p := r.procs[key]; p != nil {
 		if !p.busy && p.fits(bin, req) {
 			p.busy = true
 			if p.idle != nil {
@@ -236,18 +252,19 @@ func (r *Runner) claim(bin string, req Request) (*claudeProc, error) {
 			return p, nil
 		}
 		p.end()
-		delete(r.procs, req.Dir)
+		delete(r.procs, key)
 	}
 	p, err := startClaude(bin, req)
 	if err != nil {
 		return nil, err
 	}
 	p.busy = true
-	r.procs[req.Dir] = p
+	r.procs[key] = p
 	return p, nil
 }
 
-// release keeps p for the next turn, or forgets it if it has exited.
+// release keeps p for the next turn, or forgets it if it has exited. key
+// is its procKey.
 func (r *Runner) release(dir string, p *claudeProc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

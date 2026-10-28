@@ -108,7 +108,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -169,6 +169,29 @@ func TestRenderFitsScreen(t *testing.T) {
 				}
 				c.merged = []string{c.checks[0].name}
 				c.remaining = []string{c.checks[2].name, c.checks[3].name}
+			case "planner":
+				m = fakeModel(t, size[0], size[1])
+				m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude} }
+				press(m, "P")
+			case "review":
+				long := strings.Repeat("A very long task title ", 6)
+				reply := "```grove-plan\n{\"title\": \"" + long + "\", \"groups\": [{\"id\": \"g\", \"name\": \"" + long + "\"}], \"tasks\": ["
+				for i := range 25 {
+					if i > 0 {
+						reply += ","
+					}
+					reply += fmt.Sprintf(`{"title": "%s %d", "branch": "feature/%s-%d", "group": "g", "brief": "%s"}`, long, i, strings.Repeat("x", 80), i, strings.Repeat("Do this and that. ", 40))
+				}
+				reply += "]}\n```"
+				m.onPlannerReply(m.planner, reply)
+				m.review = newReview(m.draft())
+			case "review-edit":
+				press(m, "down", "enter")
+			case "review-problems":
+				press(m, "esc")
+				for i := range 12 {
+					m.review.problems = append(m.review.problems, fmt.Sprintf("%s problem %d", strings.Repeat("very ", 30), i))
+				}
 			}
 			out := m.render()
 			lines := strings.Split(out, "\n")

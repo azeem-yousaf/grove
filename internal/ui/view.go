@@ -96,6 +96,8 @@ func (m *Model) render() string {
 		return m.overlay(screen, m.undoModal())
 	case m.conflicts != nil:
 		return m.overlay(screen, m.conflictModal())
+	case m.review != nil:
+		return m.overlay(screen, m.reviewModal())
 	case m.showHelp:
 		return m.overlay(screen, m.helpModal())
 	}
@@ -190,7 +192,7 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"enter", "create"}, {"tab", "next field"}, {"esc", "cancel"}}
 	case m.picker != nil, m.undo != nil, m.quitAsk:
 		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
-	case m.conflicts != nil:
+	case m.conflicts != nil, m.review != nil:
 		pairs = [][2]string{{"esc", "close"}}
 	case m.showHelp:
 		pairs = [][2]string{{"esc", "close"}}

@@ -16,6 +16,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/open"
+	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/azeem-yousaf/grove/internal/store"
 )
 
@@ -104,25 +105,32 @@ type Model struct {
 	creating   *creation // the new-worktree dialog, while open
 	selectPath string    // worktree to select once the next scan shows it
 
-	sessions   map[string]*session // worktree agents by folder
-	store      *store.Store        // saved sessions and plans; nil without a git dir
-	savedJSON  map[string][]byte   // each session as last written, by folder
-	persistErr string              // the last save error shown
-	chatPath   string              // worktree whose agent the chat pane shows
-	chatInput  textarea.Model
-	chatView   viewport.Model
-	chatFollow bool // keep the chat scrolled to the newest line
-	chatSel    chatSelection
-	picker     *picker
-	undo       *undoAsk
-	quitAsk    bool
-	conflicts  *conflictReview // the merge review, while open
-	overview   bool            // the overview of every worktree, in place of both panes
-	ovPath     string          // worktree under the overview's cursor
-	ovStart    int             // first and past-last rows of the overview table on screen
-	ovEnd      int
-	ovRowsY    int // screen row of the first table row
-	mergeSeq   int
+	sessions     map[string]*session // worktree agents by folder
+	store        *store.Store        // saved sessions and plans; nil without a git dir
+	savedJSON    map[string][]byte   // each session as last written, by folder
+	persistErr   string              // the last save error shown
+	chatPath     string              // worktree whose agent the chat pane shows
+	chatPlanner  bool                // the chat pane shows the planner instead
+	planner      *session            // the planner's conversation, once started
+	plans        []*plan.Plan        // saved plans, newest first
+	review       *planReview         // the plan being reviewed, while open
+	creatingTask map[string]bool     // plan tasks whose worktree is being made, by plan+task ID
+	branchNames  []string            // existing branches, for the planner's briefing
+	planBranches git.Branches        // branches when the last plan started, for creating its worktrees
+	chatInput    textarea.Model
+	chatView     viewport.Model
+	chatFollow   bool // keep the chat scrolled to the newest line
+	chatSel      chatSelection
+	picker       *picker
+	undo         *undoAsk
+	quitAsk      bool
+	conflicts    *conflictReview // the merge review, while open
+	overview     bool            // the overview of every worktree, in place of both panes
+	ovPath       string          // worktree under the overview's cursor
+	ovStart      int             // first and past-last rows of the overview table on screen
+	ovEnd        int
+	ovRowsY      int // screen row of the first table row
+	mergeSeq     int
 
 	// Hooks for the agent, replaced in tests.
 	installed func() []agent.Kind
@@ -201,6 +209,7 @@ func New(ctx context.Context, o Options) *Model {
 		gitCmd:       newGitPrompt(),
 		sessions:     map[string]*session{},
 		savedJSON:    map[string][]byte{},
+		creatingTask: map[string]bool{},
 		chatInput:    newChatInput(),
 		chatView:     newChatView(),
 		installed:    agent.Installed,
@@ -233,7 +242,7 @@ func (m *Model) applyTheme() {
 
 // Init starts base detection, the clock and background colour detection.
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.detectBase(), clockTick(), m.startAnimating(), m.loadSessions()}
+	cmds := []tea.Cmd{m.detectBase(), clockTick(), m.startAnimating(), m.loadSessions(), m.loadPlans()}
 	if !m.themeForced {
 		cmds = append(cmds, tea.RequestBackgroundColor)
 	}
@@ -371,7 +380,8 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		m.frame++
 		busy := m.scanning || m.diffPending() || m.removing != nil || m.anyAgentRunning() ||
 			m.creating != nil && m.creating.running || m.undo != nil && m.undo.running ||
-			m.conflicts != nil && m.conflicts.busy()
+			m.conflicts != nil && m.conflicts.busy() ||
+			m.review != nil && m.review.checking || len(m.creatingTask) > 0
 		if !busy {
 			m.animating = false
 			return nil
@@ -414,6 +424,19 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case sessionsLoadedMsg:
 		return m.onSessionsLoaded(msg)
+
+	case plansLoadedMsg:
+		return m.onPlansLoaded(msg)
+
+	case branchNamesMsg:
+		m.branchNames = msg.names
+		return nil
+
+	case planCheckedMsg:
+		return m.onPlanChecked(msg)
+
+	case taskCreatedMsg:
+		return m.onTaskCreated(msg)
 
 	case persistMsg:
 		return m.onPersisted(msg)
@@ -501,6 +524,14 @@ func (m *Model) onPaste(msg tea.PasteMsg) tea.Cmd {
 	switch {
 	case m.quitAsk, m.conflicts != nil, m.confirm != nil, m.picker != nil, m.undo != nil:
 		return nil
+	case m.review != nil:
+		if e := m.review.edit; e != nil {
+			return e.update(msg)
+		}
+		if m.review.naming != nil {
+			*m.review.naming, cmd = m.review.naming.Update(msg)
+		}
+		return cmd
 	case m.creating != nil:
 		c := m.creating
 		if c.running || c.focus > fieldTask {
@@ -564,7 +595,7 @@ func (m *Model) onScan(msg scanMsg) tea.Cmd {
 			}
 		}
 		m.rebuildRows()
-		cmds = append(cmds, m.selectionChanged(true))
+		cmds = append(cmds, m.selectionChanged(true), m.schedule())
 	}
 	if m.removing != nil && m.removing.queued {
 		cmds = append(cmds, m.runRemoval())
@@ -695,6 +726,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.onPickerKey(msg)
 	case m.undo != nil:
 		return m.onUndoKey(msg)
+	case m.review != nil:
+		return m.onReviewKey(msg)
 	case m.gitCmd.active:
 		return m.onGitPromptKey(msg)
 	case m.focus == focusChat:
@@ -774,7 +807,7 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 			return nil
 		}
 		// Back to the agent if its worktree is the one selected.
-		if r, ok := m.selected(); ok && m.chatPath != "" && git.SamePath(m.snap.States[r.wt].Path, m.chatPath) && m.chatSession() != nil {
+		if r, ok := m.selected(); ok && !m.chatPlanner && m.chatPath != "" && git.SamePath(m.snap.States[r.wt].Path, m.chatPath) && m.chatSession() != nil {
 			return m.showChat(m.chatSession())
 		}
 		m.focus = focusDiff
@@ -804,6 +837,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.openChat()
 	case key.Matches(msg, k.Overview):
 		return m.openOverview()
+	case key.Matches(msg, k.Planner):
+		return m.openPlanner()
 	}
 
 	if m.focus == focusDiff {
@@ -1051,7 +1086,7 @@ func (m *Model) copyPath() tea.Cmd {
 }
 
 func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
-	if m.confirm != nil || m.creating != nil || m.picker != nil || m.undo != nil || m.quitAsk || m.conflicts != nil {
+	if m.confirm != nil || m.creating != nil || m.picker != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil {
 		return nil
 	}
 	if m.showHelp {

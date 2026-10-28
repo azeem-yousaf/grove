@@ -51,6 +51,7 @@ type session struct {
 	cost       string
 	failed     bool
 	seen       bool // the user has looked since it last finished
+	planner    bool // the planner: reads the repository, never edits it
 }
 
 type chatRole uint8
@@ -86,6 +87,7 @@ type (
 	// first turn, back to the UI.
 	agentMsg struct {
 		path       string
+		planner    bool // for the planner rather than path's worktree agent
 		ev         agent.Event
 		checkpoint string
 		err        error
@@ -212,8 +214,20 @@ func (m *Model) sessionFor(path string) *session {
 	return nil
 }
 
-func (m *Model) anyAgentRunning() bool {
+// allSessions is every agent: the worktree agents and the planner.
+func (m *Model) allSessions() []*session {
+	out := make([]*session, 0, len(m.sessions)+1)
 	for _, s := range m.sessions {
+		out = append(out, s)
+	}
+	if m.planner != nil {
+		out = append(out, m.planner)
+	}
+	return out
+}
+
+func (m *Model) anyAgentRunning() bool {
+	for _, s := range m.allSessions() {
 		if s.running {
 			return true
 		}
@@ -247,17 +261,24 @@ func (m *Model) newSession(path, name string, k agent.Kind) *session {
 }
 
 func (m *Model) showChat(s *session) tea.Cmd {
-	m.chatPath = s.path
+	m.chatPath, m.chatPlanner = s.path, s.planner
 	m.focus = focusChat
 	s.seen = true
 	m.chatFollow = true
 	m.chatSel = chatSelection{}
+	m.chatInput.Placeholder = "ask the agent to do something in this worktree…"
+	if s.planner {
+		m.chatInput.Placeholder = "describe what to build, or name a Jira issue or epic…"
+	}
 	m.chatInput.SetValue("")
 	return tea.Batch(m.chatInput.Focus(), m.warm(s))
 }
 
 // chatSession is the session shown in the chat pane.
 func (m *Model) chatSession() *session {
+	if m.chatPlanner {
+		return m.planner
+	}
 	if m.chatPath == "" {
 		return nil
 	}
@@ -297,6 +318,10 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.askUndo(s)
 	case "ctrl+y":
 		return m.copyLastReply(s)
+	case "ctrl+o":
+		if s.planner {
+			return m.openReview()
+		}
 	case "ctrl+a":
 		if s.running {
 			return m.notify("Stop the agent first (ctrl+x)", toastInfo)
@@ -305,6 +330,11 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.chooseAgent(s.kind, func(k agent.Kind) tea.Cmd {
 			if k == s.kind {
 				return nil
+			}
+			if s.planner {
+				m.planner = m.newPlanner(path, k)
+				m.planner.entries = []chatEntry{{roleNote, "Switched to " + k.Label() + ". It starts a new conversation."}}
+				return m.showChat(m.planner)
 			}
 			ns := m.newSession(path, name, k)
 			ns.checkpoint, ns.touched = s.checkpoint, s.touched
@@ -541,8 +571,12 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	// once; Codex starts fresh every turn.
 	if s.id == "" || s.kind == agent.Codex {
 		req.Context = m.agentContext(s)
+		if s.planner {
+			req.Context = m.plannerContext()
+		}
 	}
-	path, needCheckpoint := s.path, s.checkpoint == ""
+	// The planner changes nothing, so there's nothing to undo.
+	path, planner, needCheckpoint := s.path, s.planner, s.checkpoint == "" && !s.planner
 	run := m.runAgent
 	go func() {
 		defer close(ch)
@@ -553,9 +587,9 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				// still works this session if pinning fails.
 				_ = git.KeepCheckpoint(ctx, path, path, tree)
 			}
-			ch <- agentMsg{path: path, checkpoint: tree, err: err}
+			ch <- agentMsg{path: path, planner: planner, checkpoint: tree, err: err}
 		}
-		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, ev: ev} })
+		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, ev: ev} })
 	}()
 	return tea.Batch(listen(ch), m.startAnimating())
 }
@@ -563,12 +597,13 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 // agentRequest describes s's next turn, without the message.
 func (m *Model) agentRequest(s *session) agent.Request {
 	return agent.Request{
-		Kind:    s.kind,
-		Dir:     s.path,
-		Session: s.id,
-		Allow:   append([]string(nil), s.allow...),
-		Model:   s.model,
-		History: append([]agent.Turn(nil), s.history...),
+		Kind:     s.kind,
+		Dir:      s.path,
+		Session:  s.id,
+		Allow:    append([]string(nil), s.allow...),
+		Model:    s.model,
+		History:  append([]agent.Turn(nil), s.history...),
+		ReadOnly: s.planner,
 	}
 }
 
@@ -600,6 +635,9 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 		return nil
 	}
 	s := m.sessionFor(msg.path)
+	if msg.planner {
+		s = m.planner
+	}
 	if s == nil {
 		return nil
 	}
@@ -665,7 +703,11 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 		if rel, inside := relTo(s.path, d.Detail); inside {
 			what = rel
 		}
-		s.entries = append(s.entries, chatEntry{roleNote, fmt.Sprintf("Blocked %s %s: outside this worktree", d.Tool, what)})
+		why := "outside this worktree"
+		if s.planner {
+			why = "the planner only reads"
+		}
+		s.entries = append(s.entries, chatEntry{roleNote, fmt.Sprintf("Blocked %s %s: %s", d.Tool, what, why)})
 	}
 	for _, c := range suggestedCommands(reply) {
 		s.pending = append(s.pending, pendingAction{kind: pendingCommand, text: c})
@@ -674,6 +716,11 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	viewing := m.focus == focusChat && m.chatSession() == s
 	s.seen = viewing
 	cmds := []tea.Cmd{m.startScan()}
+	if s.planner {
+		cmds = append(cmds, m.onPlannerReply(s, reply))
+	} else {
+		cmds = append(cmds, m.onTaskTurn(s, ev))
+	}
 	if !viewing {
 		text, kind := "✦ "+s.name+": "+s.kind.Label()+" finished", toastOK
 		switch {
@@ -755,6 +802,8 @@ func (m *Model) agentContext(s *session) string {
 	b.WriteString("\n- Don't run git commands that change the repository (commit, checkout, switch, merge, rebase, reset, restore, stash, push, pull, branch). When one is needed, put it in a fenced code block whose language is grove-run, one command per line, and the user will run it from grove:\n\n```grove-run\ngit commit -m \"Describe the change\"\n```\n")
 	b.WriteString("- Some shell commands need the user's approval. If one is refused, say what you wanted to run and why, then stop.\n")
 	b.WriteString("- Replies appear in a narrow terminal panel: keep them short and plain.\n")
+
+	b.WriteString(m.taskContext(s))
 
 	if i := m.snapIndex(s.path); i >= 0 {
 		st := m.snap.States[i]
@@ -859,7 +908,7 @@ func (m *Model) quit() tea.Cmd {
 func (m *Model) quitNow() tea.Cmd {
 	m.persistNow() // a working agent is saved as interrupted
 	running := false
-	for _, s := range m.sessions {
+	for _, s := range m.allSessions() {
 		if s.running && s.cancel != nil {
 			s.cancel()
 			running = true
@@ -1001,8 +1050,11 @@ func (m *Model) chatBottom(s *session, width int) []string {
 	}
 	m.chatInput.SetWidth(max(width-4, 10))
 	hint := [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"ctrl+z", "undo all"}, {"/model", "model"}}
-	if s.running {
+	switch {
+	case s.running:
 		hint = [][2]string{{"ctrl+x", "stop"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"/model", "model"}}
+	case s.planner:
+		hint = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+o", "review plan"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"/model", "model"}}
 	}
 	out := []string{rule}
 	for i, l := range strings.Split(m.chatInput.View(), "\n") {
@@ -1019,6 +1071,18 @@ func (m *Model) chatBottom(s *session, width int) []string {
 func (m *Model) chatLines(s *session, width int) []string {
 	st := m.st
 	var out []string
+	if len(s.entries) == 0 && !s.running && s.planner {
+		return append(out, "",
+			"  "+st.bold.Render("Plan work across worktrees"),
+			"",
+			"  "+st.muted.Render("Describe what you want built, or name a Jira issue or"),
+			"  "+st.muted.Render("epic. The planner reads the code, asks about anything"),
+			"  "+st.muted.Render("unclear and proposes tasks, each with its own worktree"),
+			"  "+st.muted.Render("and agent. Nothing is created until you review the plan"),
+			"  "+st.muted.Render("(ctrl+o) and start it."),
+			"",
+			"  "+st.muted.Render("Model: "+modelName(s.model)+". Type /model to change it."))
+	}
 	if len(s.entries) == 0 && !s.running {
 		out = append(out, "",
 			"  "+st.bold.Render("Ask "+s.kind.Label()+" to work on "+s.name),
@@ -1181,7 +1245,7 @@ func (m *Model) undoModal() string {
 func (m *Model) quitModal() string {
 	st := m.st
 	n := 0
-	for _, s := range m.sessions {
+	for _, s := range m.allSessions() {
 		if s.running {
 			n++
 		}

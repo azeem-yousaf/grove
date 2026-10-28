@@ -13,7 +13,11 @@ import (
 // design. Each turn is a fresh run with the conversation so far replayed
 // in the prompt, which works on every Codex version.
 func codexArgs(req Request) (args []string, input string) {
-	args = []string{"exec", "--json", "--sandbox", "workspace-write"}
+	sandbox := "workspace-write"
+	if req.ReadOnly {
+		sandbox = "read-only"
+	}
+	args = []string{"exec", "--json", "--sandbox", sandbox}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}

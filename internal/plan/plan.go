@@ -45,6 +45,7 @@ type Plan struct {
 	Request string    `json:"request"`          // what the user asked for, as typed
 	Source  string    `json:"source,omitempty"` // where it came from, e.g. "jira:SHOP-12"
 	Base    string    `json:"base,omitempty"`   // branch new worktrees start from
+	Agent   string    `json:"agent,omitempty"`  // "claude" or "codex", chosen when the plan starts
 	Status  Status    `json:"status"`
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
@@ -68,6 +69,25 @@ type Task struct {
 	Group  string     `json:"group,omitempty"` // Group.ID, or "" for an isolated task
 	Path   string     `json:"path,omitempty"`  // the worktree, once created
 	Status TaskStatus `json:"status"`
+	Error  string     `json:"error,omitempty"` // why it failed
+}
+
+// Settled reports whether every task has finished or failed.
+func (p *Plan) Settled() bool {
+	for _, t := range p.Tasks {
+		if t.Status != Finished && t.Status != Failed {
+			return false
+		}
+	}
+	return len(p.Tasks) > 0
+}
+
+// Clone copies a plan so it can be edited without touching the original.
+func (p *Plan) Clone() *Plan {
+	c := *p
+	c.Groups = append([]Group(nil), p.Groups...)
+	c.Tasks = append([]Task(nil), p.Tasks...)
+	return &c
 }
 
 // Task returns the task with the given ID.

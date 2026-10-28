@@ -27,20 +27,32 @@ var shells = []string{"Bash", "PowerShell"}
 // (acceptEdits); anything else that needs permission, such as a shell
 // command or a file outside the worktree, is denied and reported in the
 // turn's result so grove can ask the user.
+//
+// A read-only agent (the planner) runs in the default permission mode with
+// the editing tools removed, so it can only read; it may also use the
+// read-only tools of Claude's Atlassian connector to look at Jira.
 func claudeArgs(req Request) []string {
+	mode := "acceptEdits"
+	if req.ReadOnly {
+		mode = "default"
+	}
 	args := []string{
 		"-p",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
-		"--permission-mode", "acceptEdits",
+		"--permission-mode", mode,
 	}
 	if req.Session != "" {
 		args = append(args, "--resume", req.Session)
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
+	}
+	if req.ReadOnly {
+		args = append(args, "--disallowedTools")
+		args = append(args, editTools...)
 	}
 	// --allowedTools takes several values, so it goes last.
 	args = append(args, "--allowedTools")
@@ -49,7 +61,27 @@ func claudeArgs(req Request) []string {
 			args = append(args, ClaudeRule(shell, "git "+c), ClaudeRule(shell, "git "+c+" *"))
 		}
 	}
+	if req.ReadOnly {
+		for _, t := range jiraReadTools {
+			args = append(args, atlassianTools+t)
+		}
+	}
 	return append(args, req.Allow...)
+}
+
+// editTools change files; a read-only agent doesn't get them.
+var editTools = []string{"Edit", "MultiEdit", "Write", "NotebookEdit"}
+
+// atlassianTools prefixes the tools of the Atlassian connector from
+// claude.ai, as Claude Code names them.
+const atlassianTools = "mcp__claude_ai_Atlassian__"
+
+// jiraReadTools are the connector's tools that only read, which the planner
+// may use without asking. Creating or editing issues stays refused.
+var jiraReadTools = []string{
+	"getAccessibleAtlassianResources", "atlassianUserInfo", "getVisibleJiraProjects",
+	"getJiraIssue", "searchJiraIssuesUsingJql", "getJiraIssueRemoteIssueLinks",
+	"getConfluencePage", "searchConfluenceUsingCql", "search", "fetch",
 }
 
 // claudeInput is the stdin line that starts a turn.

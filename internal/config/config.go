@@ -33,6 +33,23 @@ type Config struct {
 	New NewWorktree `toml:"new"`
 	// AI chooses the assistant used for each worktree's agent (key a).
 	AI AI `toml:"ai"`
+	// Planner configures plans: requirements split into tasks (key P).
+	Planner Planner `toml:"planner"`
+}
+
+// Planner configures the planner and the agents it starts.
+type Planner struct {
+	// MaxAgents is how many task agents may work at once; more tasks wait
+	// for a free slot. 0 or less means the default, 3.
+	MaxAgents int `toml:"max_agents"`
+}
+
+// Slots is MaxAgents with the default applied.
+func (p Planner) Slots() int {
+	if p.MaxAgents <= 0 {
+		return 3
+	}
+	return p.MaxAgents
 }
 
 // AI configures the per-worktree assistant. grove drives a command-line
@@ -256,6 +273,12 @@ agent = ""
 # Code, whatever /model is set to there).
 claude_model = ""
 codex_model = ""
+
+# The planner (key: P) splits requirements into tasks, each with its own
+# worktree and agent.
+[planner]
+# How many task agents may work at the same time; the rest wait.
+max_agents = 3
 
 # Files open with their system default program (key: enter).
 # Override that per extension here. "default" means the system default.
