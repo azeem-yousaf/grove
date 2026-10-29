@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // readOnlyGit are git commands an agent may run without asking; they can't
@@ -266,7 +268,9 @@ func (p *claudeProc) end() {
 // turn sends one message and reports the turn's events until its result,
 // returning the final EvDone for the caller to emit. Cancelling ctx
 // interrupts the turn, which leaves the process ready for the next one.
-func (p *claudeProc) turn(ctx context.Context, req Request, emit func(Event)) Event {
+// base is the session's usage before the turn (see claudeParser), nil if
+// unknown.
+func (p *claudeProc) turn(ctx context.Context, req Request, base *usage.Tokens, emit func(Event)) Event {
 	t := &claudeTurn{lines: make(chan []byte), done: make(chan struct{})}
 	p.curMu.Lock()
 	p.cur = t
@@ -279,6 +283,11 @@ func (p *claudeProc) turn(ctx context.Context, req Request, emit func(Event)) Ev
 	}()
 
 	parse := &claudeParser{session: p.session}
+	if base != nil {
+		parse.base = *base
+	} else {
+		parse.noBase = true
+	}
 	finish := func(ev Event, stopped bool) Event {
 		if stopped {
 			ev.Err = errStopped
@@ -322,10 +331,45 @@ func (p *claudeProc) turn(ctx context.Context, req Request, emit func(Event)) Ev
 // with shell, the tool it asked for: "Bash", or "PowerShell" on Windows.
 func ClaudeRule(shell, command string) string { return shell + "(" + command + ")" }
 
+// claudeParser reads one turn of Claude Code's stream-json output.
+//
+// Token usage, as checked against the real Claude Code (Haiku, one kept
+// process, a turn using a Task subagent, then a --resume restart):
+//   - The result line's usage is the turn's own figure, but only the main
+//     conversation's: it leaves out subagents.
+//   - Its modelUsage (per model, every model and subagent) and
+//     total_cost_usd add up over the whole session, and carry on after a
+//     --resume restart rather than starting at zero. So the turn's figure is
+//     the session's modelUsage total minus the total before the turn (base,
+//     from the Runner or Request.SessionTotal; zero for a new session).
+//     Without a base it falls back to result.usage, marked Partial since it
+//     may leave out subagents. Cost is shown as Claude Code reports it.
+//   - output_tokens already includes thinking tokens.
+//   - message_start carries a message's input side (input_tokens leaves out
+//     the cache) and message_delta its usage so far; message_delta has no
+//     message id and belongs to the last message_start.
+//   - assistant lines repeat their message's usage once per content block,
+//     so they are never counted.
+//   - Subagents' messages produce no stream events at all.
+//
+// Live figures are a sum over the turn's messages by id, so they leave out
+// subagents; they stand in, as Partial, when the turn is cut short.
 type claudeParser struct {
 	session string
 	result  *claudeResult
 	sawText bool
+
+	base   usage.Tokens // the session's total before the turn
+	noBase bool         // base is unknown
+
+	msgs        map[string]*anthropicUsage // the turn's messages so far, by id
+	cur         string                     // the message in progress
+	total       usage.Tokens               // the session's total after the turn, when totalOK
+	totalOK     bool
+	final       usage.Tokens // the turn's figure from the result, when finalStatus isn't Unknown
+	finalStatus usage.Status
+	shown       usage.Tokens // the last EvUsage sent, when shownAny
+	shownAny    bool
 }
 
 type claudeLine struct {
@@ -346,17 +390,24 @@ type claudeLine struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"delta"`
+		Message struct {
+			ID    string          `json:"id"`
+			Usage json.RawMessage `json:"usage"`
+		} `json:"message"` // message_start
+		Usage json.RawMessage `json:"usage"` // message_delta
 	} `json:"event"`
 	ParentToolUseID *string `json:"parent_tool_use_id"`
 	claudeResult
 }
 
 type claudeResult struct {
-	IsError bool     `json:"is_error"`
-	Result  string   `json:"result"`
-	Errors  []string `json:"errors"`
-	Cost    float64  `json:"total_cost_usd"`
-	Denials []struct {
+	IsError    bool            `json:"is_error"`
+	Result     string          `json:"result"`
+	Errors     []string        `json:"errors"`
+	Cost       float64         `json:"total_cost_usd"`
+	Usage      json.RawMessage `json:"usage"`
+	ModelUsage json.RawMessage `json:"modelUsage"`
+	Denials    []struct {
 		Tool  string          `json:"tool_name"`
 		Input json.RawMessage `json:"tool_input"`
 	} `json:"permission_denials"`
@@ -375,8 +426,18 @@ func (p *claudeParser) line(b []byte) []Event {
 			return []Event{{Kind: EvSession, Session: l.Session}}
 		}
 	case "stream_event":
-		if !sub && l.Event.Type == "content_block_delta" && l.Event.Delta.Type == "text_delta" {
-			return []Event{{Kind: EvDelta, Text: l.Event.Delta.Text}}
+		if sub {
+			return nil
+		}
+		switch l.Event.Type {
+		case "content_block_delta":
+			if l.Event.Delta.Type == "text_delta" {
+				return []Event{{Kind: EvDelta, Text: l.Event.Delta.Text}}
+			}
+		case "message_start":
+			return p.count(l.Event.Message.ID, l.Event.Message.Usage)
+		case "message_delta":
+			return p.count(p.cur, l.Event.Usage)
 		}
 	case "assistant":
 		if sub {
@@ -402,17 +463,140 @@ func (p *claudeParser) line(b []byte) []Event {
 		}
 		r := l.claudeResult
 		p.result = &r
+		var evs []Event
 		// The final answer is normally already shown as an assistant
 		// message; only use the result text when nothing was.
 		if !p.sawText && !r.IsError && strings.TrimSpace(r.Result) != "" {
-			return []Event{{Kind: EvText, Text: r.Result}}
+			evs = append(evs, Event{Kind: EvText, Text: r.Result})
 		}
+		p.total, p.totalOK = modelUsage(r.ModelUsage)
+		var main usage.Tokens
+		var u anthropicUsage
+		mainOK := u.merge(r.Usage)
+		if mainOK {
+			main, mainOK = u.tokens()
+		}
+		switch {
+		case p.totalOK && !p.noBase && covers(p.total, p.base, main, mainOK):
+			p.final, p.finalStatus = minus(p.total, p.base), usage.Exact
+		case mainOK:
+			// Without the session's earlier total, only the main
+			// conversation's figure is known: subagents may be missing.
+			p.final, p.finalStatus = main, usage.Partial
+		}
+		if p.finalStatus != usage.Unknown {
+			evs = append(evs, p.show(p.final)...)
+		}
+		return evs
 	}
 	return nil
 }
 
+// modelUsage adds up a result's modelUsage over its models, or reports
+// false if any model's figures are unusable.
+func modelUsage(raw json.RawMessage) (sum usage.Tokens, ok bool) {
+	var models map[string]json.RawMessage
+	if json.Unmarshal(raw, &models) != nil || len(models) == 0 {
+		return usage.Tokens{}, false
+	}
+	for _, m := range models {
+		var u anthropicUsage
+		if !u.mergeFields(m, "inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens") {
+			return usage.Tokens{}, false
+		}
+		t, good := u.tokens()
+		if !good {
+			return usage.Tokens{}, false
+		}
+		sum = sum.Add(t)
+	}
+	return sum, true
+}
+
+// minus is a - b, figure by figure.
+func minus(a, b usage.Tokens) usage.Tokens {
+	return usage.Tokens{
+		Input:      a.Input - b.Input,
+		Output:     a.Output - b.Output,
+		CacheRead:  a.CacheRead - b.CacheRead,
+		CacheWrite: a.CacheWrite - b.CacheWrite,
+		HasCache:   a.HasCache,
+	}
+}
+
+// covers checks that total - base can be the turn's figure: no figure goes
+// down, and none is below the main conversation's own, which it includes.
+// It fails when base is stale, such as after the session was used outside
+// grove.
+func covers(total, base, main usage.Tokens, mainOK bool) bool {
+	d := minus(total, base)
+	if d.Input < 0 || d.Output < 0 || d.CacheRead < 0 || d.CacheWrite < 0 {
+		return false
+	}
+	return !mainOK || (d.Input >= main.Input && d.Output >= main.Output && d.CacheRead >= main.CacheRead && d.CacheWrite >= main.CacheWrite)
+}
+
+// count takes a message's usage from message_start or message_delta and
+// reports the turn's new total, if it changed.
+func (p *claudeParser) count(id string, raw json.RawMessage) []Event {
+	if id == "" {
+		return nil
+	}
+	if p.msgs == nil {
+		p.msgs = map[string]*anthropicUsage{}
+	}
+	p.cur = id
+	u := p.msgs[id]
+	if u == nil {
+		u = &anthropicUsage{}
+	}
+	if !u.merge(raw) {
+		return nil
+	}
+	p.msgs[id] = u
+	if t, ok := p.live(); ok {
+		return p.show(t)
+	}
+	return nil
+}
+
+// live is the sum of the turn's messages that have usable figures.
+func (p *claudeParser) live() (sum usage.Tokens, ok bool) {
+	for _, u := range p.msgs {
+		if t, good := u.tokens(); good {
+			sum, ok = sum.Add(t), true
+		}
+	}
+	return sum, ok
+}
+
+// show reports t as the turn's usage unless that's what was last reported.
+func (p *claudeParser) show(t usage.Tokens) []Event {
+	if p.shownAny && t == p.shown {
+		return nil
+	}
+	p.shown, p.shownAny = t, true
+	return []Event{{Kind: EvUsage, Tokens: t}}
+}
+
+// tokens is the turn's usage for EvDone: the result's figure when it came,
+// else what was counted live, as a lower bound.
+func (p *claudeParser) tokens() (usage.Tokens, usage.Status) {
+	if p.finalStatus != usage.Unknown {
+		return p.final, p.finalStatus
+	}
+	if t, ok := p.live(); ok {
+		return t, usage.Partial
+	}
+	return usage.Tokens{}, usage.Unknown
+}
+
 func (p *claudeParser) done(exitErr error, stderr string) Event {
 	ev := Event{Kind: EvDone, Session: p.session}
+	ev.Tokens, ev.TokenStatus = p.tokens()
+	if p.totalOK {
+		ev.SessionTotal = p.total
+	}
 	r := p.result
 	if r == nil {
 		ev.Err = processErr("Claude Code", exitErr, stderr)
