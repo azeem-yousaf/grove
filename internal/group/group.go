@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -92,7 +93,10 @@ func (l Log) lock() (func(), error) {
 			f.Close()
 			return func() { os.Remove(p) }, nil
 		}
-		if !errors.Is(err, os.ErrExist) {
+		// Windows answers "access denied" while another writer's lock is
+		// being deleted, so that is a busy lock too until the deadline.
+		denied := runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission)
+		if !errors.Is(err, os.ErrExist) && !denied {
 			return nil, err
 		}
 		if fi, serr := os.Stat(p); serr == nil && time.Since(fi.ModTime()) > staleLock {
@@ -100,6 +104,9 @@ func (l Log) lock() (func(), error) {
 			continue
 		}
 		if time.Now().After(deadline) {
+			if denied {
+				return nil, err
+			}
 			return nil, errors.New("the group chat is locked by another program")
 		}
 		time.Sleep(20 * time.Millisecond)
