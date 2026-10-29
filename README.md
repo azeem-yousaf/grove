@@ -186,7 +186,9 @@ use; tick *Remember my choice* (off by default) to stop it asking
   without its marks: bold, italics, code, links, headings, quotes, bullets
   and task boxes. Tables are laid out in columns that fit the pane; when
   one is too wide even with its cells wrapped, each row is listed as
-  `Header: value` lines instead.
+  `Header: value` lines instead. Long lines in code blocks wrap, with `↪`
+  marking where a line continues; copying them by dragging joins them
+  back into one line.
 - `ctrl+x` stops a working agent. Quitting while agents work asks first.
 - **Conversations are kept.** Each agent's conversation, the commands you
   allowed and its undo checkpoint are saved in the repository's `.git/grove`

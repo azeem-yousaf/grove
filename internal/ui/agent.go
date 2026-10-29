@@ -1170,7 +1170,7 @@ func renderChatText(body string, width int, st styles, style lipgloss.Style) []s
 			if lang == "grove-run" {
 				code = st.warn.Bold(true)
 			}
-			out = append(out, code.Render(ansi.Truncate("  "+expandTabs(l), width, "…")))
+			out = append(out, codeLines(expandTabs(l), width, st, code)...)
 			continue
 		}
 		if n := tableLen(lines[i:]); n > 0 {
@@ -1186,6 +1186,36 @@ func renderChatText(body string, width int, st styles, style lipgloss.Style) []s
 	}
 	return out
 }
+
+// codeLines wraps one line of a code block to width, between words where
+// it can. The line keeps its indentation, and the lines it continues onto
+// start at the same place with a ↪ in the gutter, so they can't be read
+// as lines of their own (and copying joins them back, see
+// selectedChatText).
+func codeLines(l string, width int, st styles, code lipgloss.Style) []string {
+	if ansi.StringWidth(l) <= width-2 {
+		return []string{"  " + code.Render(l)}
+	}
+	body := strings.TrimLeft(l, " ")
+	indent := l[:len(l)-len(body)]
+	room := width - 2 - len(indent)
+	if room < 10 {
+		indent, room = "", width-2 // indented too deeply to keep it
+	}
+	parts := strings.Split(ansi.Wrap(body, max(room, 1), ""), "\n")
+	out := make([]string, len(parts))
+	for i, p := range parts {
+		gutter := "  "
+		if i > 0 {
+			gutter = st.faint.Render(codeWrap)
+		}
+		out[i] = gutter + code.Render(indent+p)
+	}
+	return out
+}
+
+// codeWrap starts each line a code line was wrapped onto.
+const codeWrap = "↪ "
 
 // pickerModal asks which agent to use, or explains how to get one.
 func (m *Model) pickerModal() string {

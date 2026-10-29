@@ -644,6 +644,46 @@ func TestChatTable(t *testing.T) {
 	}
 }
 
+func TestChatCodeWraps(t *testing.T) {
+	st := newStyles(true)
+	render := func(body string, width int) string {
+		var out []string
+		for _, l := range renderChatText(body, width, st, st.text) {
+			if ansi.StringWidth(l) > width {
+				t.Errorf("line wider than %d: %q", width, ansi.Strip(l))
+			}
+			out = append(out, strings.TrimRight(ansi.Strip(l), " "))
+		}
+		return strings.Join(out, "\n")
+	}
+	// A long line wraps between words; the rest keeps its indentation
+	// behind a ↪, and short lines are left alone.
+	body := "```go\nfunc main() {\n\tfmt.Println(\"hello, a long line of code\")\n}\n```"
+	want := "  func main() {\n      fmt.Println(\"hello,\n↪     a long line of\n↪     code\")\n  }"
+	if got := render(body, 26); got != want {
+		t.Errorf("code =\n%s\nwant\n%s", got, want)
+	}
+	// A word longer than the line is broken, and deep indentation that
+	// leaves no room is given up rather than overflowing.
+	got := render("```\n"+strings.Repeat(" ", 16)+"abcdefghijklmnopqrstuvwxyz\n```", 20)
+	for _, l := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "↪ ") {
+			t.Errorf("every line should start in the gutter: %q", l)
+		}
+	}
+	if joined := strings.NewReplacer("\n", "", "↪", "", " ", "").Replace(got); joined != "abcdefghijklmnopqrstuvwxyz" {
+		t.Errorf("nothing should be lost: %q", got)
+	}
+	// Copying the lines puts a wrapped line back together.
+	var lines []string
+	for _, l := range renderChatText(body, 26, st, st.text) {
+		lines = append(lines, strings.Repeat(" ", chatGutter)+l)
+	}
+	if got := selectedChatText(lines); got != "  func main() {\n      fmt.Println(\"hello, a long line of code\")\n  }" {
+		t.Errorf("copied code = %q", got)
+	}
+}
+
 func TestSuggestedCommands(t *testing.T) {
 	reply := "Here:\n```grove-run\ngit add -A\n# comment\ngit commit -m \"x\"\n```\nand\n```bash\nrm -rf /\n```\n```grove-run\r\ngit push\r\n```"
 	got := suggestedCommands(reply)

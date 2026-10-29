@@ -103,17 +103,23 @@ func (m *Model) onMouseRelease(tea.MouseReleaseMsg) tea.Cmd {
 }
 
 // selectedChatText turns rendered conversation lines back into plain text:
-// colours, the speaker column and trailing padding go.
+// colours, the speaker column and trailing padding go, and wrapped code
+// lines are joined back into one.
 func selectedChatText(lines []string) string {
-	out := make([]string, len(lines))
-	for i, l := range lines {
+	var out []string
+	for _, l := range lines {
 		plain := ansi.Strip(l)
 		if ansi.StringWidth(plain) > chatGutter {
 			plain = ansi.Cut(plain, chatGutter, ansi.StringWidth(plain))
 		} else {
 			plain = ""
 		}
-		out[i] = strings.TrimRight(plain, " ")
+		plain = strings.TrimRight(plain, " ")
+		if rest, ok := strings.CutPrefix(plain, codeWrap); ok && len(out) > 0 {
+			out[len(out)-1] += " " + strings.TrimLeft(rest, " ")
+			continue
+		}
+		out = append(out, plain)
 	}
 	return strings.Trim(strings.Join(out, "\n"), "\n")
 }
