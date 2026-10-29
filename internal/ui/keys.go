@@ -9,6 +9,7 @@ type keyMap struct {
 	Remove, Git, New, Agent, Undo           key.Binding
 	Mode, Overlaps, Filter, Refresh         key.Binding
 	Overview, Merge, Planner, Group, Ship   key.Binding
+	Review                                  key.Binding
 	Help, Actions, Quit, Back               key.Binding
 }
 
@@ -44,6 +45,7 @@ func defaultKeys() keyMap {
 		Planner:    b("P", "planner", "P"),
 		Group:      b("t", "group chat", "t"),
 		Ship:       b("s", "commit, push, pull request", "s"),
+		Review:     b("v", "every change in the worktree", "v"),
 		Filter:     b("/", "filter", "/"),
 		Refresh:    b("r", "refresh", "r"),
 		Help:       b("?", "help", "?"),
@@ -104,6 +106,10 @@ var helpSections = []helpSection{
 		{"←", "back to list at edge"},
 		{"n N", "next / prev hunk"},
 		{"[ ]", "prev / next file"},
+		{"v", "whole worktree, last turn"},
+		{"/", "search; n N next"},
+		{"x", "put a change back"},
+		{">", "ask the agent about it"},
 		{"g G", "top / bottom"},
 	}},
 }

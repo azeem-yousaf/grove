@@ -44,6 +44,12 @@ func onFile(m *Model) bool {
 	return ok
 }
 
+// onHunk reports whether the diff pane shows a change to act on.
+func onHunk(m *Model) bool {
+	_, _, ok := m.currentHunk()
+	return ok && m.focus == focusDiff
+}
+
 // selectedSession is the agent session of the selected worktree, if any.
 func (m *Model) selectedSession() *session {
 	r, ok := m.selected()
@@ -75,6 +81,10 @@ func allActions(m *Model) []paletteAction {
 	return []paletteAction{
 		{"Open the file", "enter", onFile, (*Model).openFile},
 		{"Open the worktree's agent", key(k.Agent), onWorktree, (*Model).openChat},
+		{"Review every change in the worktree", key(k.Review), onWorktree, (*Model).toggleWorktreeView},
+		{"Put back the change at the top of the diff", "x", onHunk, (*Model).askRevert},
+		{"Ask the agent about the change at the top of the diff", ">", onHunk, (*Model).hunkToAgent},
+		{"Search the diff", "/", func(m *Model) bool { return m.focus == focusDiff && len(m.parsed.lines) > 0 }, (*Model).startSearch},
 		{"Run a git command here", key(k.Git), onWorktree, (*Model).openGitPrompt},
 		{"Open the worktree in " + m.editorName(), key(k.Editor), onWorktree, (*Model).openEditor},
 		{"Show in folder", key(k.Reveal), onWorktree, (*Model).reveal},

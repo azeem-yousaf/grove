@@ -30,6 +30,7 @@ type savedSession struct {
 	Entries     []savedEntry   `json:"entries"`
 	History     []agent.Turn   `json:"history,omitempty"`
 	Checkpoint  string         `json:"checkpoint,omitempty"`
+	TurnTree    string         `json:"turn_tree,omitempty"`
 	Touched     []string       `json:"touched,omitempty"`
 	Allow       []string       `json:"allow,omitempty"`
 	Pending     []savedPending `json:"pending,omitempty"`
@@ -69,7 +70,7 @@ func (s *session) file() string {
 func (s *session) saved() savedSession {
 	out := savedSession{
 		Version: 1, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
-		History: s.history, Checkpoint: s.checkpoint, Allow: s.allow, Notes: s.notes, Cost: s.cost,
+		History: s.history, Checkpoint: s.checkpoint, TurnTree: s.turnTree, Allow: s.allow, Notes: s.notes, Cost: s.cost,
 		Failed: s.failed, Interrupted: s.running, Planner: s.planner,
 	}
 	for _, e := range s.entries {
@@ -87,7 +88,7 @@ func (s *session) saved() savedSession {
 
 // restore turns a saved session back into a live one, explaining anything
 // that couldn't come back.
-func restore(v savedSession, checkpointOK bool) *session {
+func restore(v savedSession, checkpointOK, turnOK bool) *session {
 	s := &session{
 		kind: v.Kind, path: v.Path, name: v.Name, model: v.Model, id: v.ID,
 		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, cost: v.Cost,
@@ -114,6 +115,9 @@ func restore(v savedSession, checkpointOK bool) *session {
 	}
 	if v.Interrupted {
 		s.entries = append(s.entries, chatEntry{roleNote, "grove was closed while the agent was working, so that turn was cut short."})
+	}
+	if turnOK {
+		s.turnTree = v.TurnTree // unpinned, so gc may have taken it
 	}
 	if s.checkpoint != "" && !checkpointOK {
 		s.checkpoint = ""
@@ -164,7 +168,8 @@ func (m *Model) loadSessions() tea.Cmd {
 				continue
 			}
 			ok := v.Checkpoint == "" || git.HasObject(ctx, common, v.Checkpoint)
-			out = append(out, restore(v, ok))
+			turnOK := v.TurnTree != "" && git.HasObject(ctx, common, v.TurnTree)
+			out = append(out, restore(v, ok, turnOK))
 		}
 		return sessionsLoadedMsg{out, errors.Join(errs...)}
 	}

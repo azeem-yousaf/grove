@@ -140,6 +140,7 @@ type Model struct {
 	lastGroupPoll time.Time
 	conflictsTold map[string][]string // files each task's agent was told conflict with another worktree (conflictnotify.go)
 	chatInput     textarea.Model
+	chatDraft     string // put in the chat input when the chat next opens (> on a hunk)
 	chatView      viewport.Model
 	chatFollow    bool // keep the chat scrolled to the newest line
 	chatSel       chatSelection
@@ -149,7 +150,15 @@ type Model struct {
 	orch          orchestrator
 	undo          *undoAsk
 	quitAsk       bool
-	conflicts     *conflictReview  // the merge review, while open
+	conflicts     *conflictReview // the merge review, while open
+	wtView        *wtView         // the whole-worktree diff (v), while shown
+	revert        *revertAsk      // putting a hunk back (x), while asked
+	searchInput   textinput.Model // searching the diff pane (/)
+	searchActive  bool
+	searchQuery   string           // lower case
+	searchFrom    int              // line the search started from
+	searchAt      int              // line of the current match
+	curHunk       int              // the hunk x and > act on, index into parsed.hunks (wtdiff.go)
 	actions       *actionMenu      // the action palette (ctrl+k), while open
 	ship          *shipMenu        // the Ship menu (s), while open
 	commit        *commitDialog    // the commit dialog, while open
@@ -236,6 +245,8 @@ func New(ctx context.Context, o Options) *Model {
 		collapsed:    map[string]bool{},
 		hereIdx:      -1,
 		filter:       ti,
+		searchInput:  newSearchInput(),
+		curHunk:      -1,
 		diff:         viewport.New(),
 		diffCache:    map[string]string{},
 		diffErrs:     map[string]error{},
@@ -365,6 +376,18 @@ func (m *Model) notify(text string, kind toastKind) tea.Cmd {
 // Update handles every message.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	cmd := m.update(msg)
+	// The worktree view and the search belong to the diff pane.
+	if _, ok := m.wtState(); m.focus != focusDiff || !ok {
+		m.wtView = nil
+	}
+	if m.focus != focusDiff && (m.searchActive || m.searchQuery != "") {
+		m.clearSearch()
+	}
+	if m.wtView != nil {
+		if c := m.loadWorktreeView(); c != nil {
+			cmd = tea.Batch(cmd, c)
+		}
+	}
 	m.ensureCursorVisible()
 	m.refreshDiffView()
 	return m, cmd
@@ -524,6 +547,12 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case mergeAbortMsg:
 		return m.onMergeAbort(msg)
 
+	case wtDiffMsg:
+		return m.onWorktreeDiff(msg)
+
+	case revertDoneMsg:
+		return m.onRevertDone(msg)
+
 	case shipLoadedMsg:
 		return m.onShipLoaded(msg)
 
@@ -594,8 +623,12 @@ func (m *Model) onPaste(msg tea.PasteMsg) tea.Cmd {
 		return nil
 	case m.actions != nil:
 		return m.actions.update(m, msg)
-	case m.ship != nil:
+	case m.ship != nil, m.revert != nil:
 		return nil
+	case m.searchActive:
+		m.searchInput, cmd = m.searchInput.Update(msg)
+		m.setSearch(m.searchInput.Value())
+		return cmd
 	case m.commit != nil:
 		if !m.commit.onFiles {
 			m.commit.message, cmd = m.commit.message.Update(msg)
@@ -830,6 +863,10 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.onShipKey(msg)
 	case m.commit != nil:
 		return m.onCommitKey(msg)
+	case m.revert != nil:
+		return m.onRevertKey(msg)
+	case m.searchActive:
+		return m.onSearchKey(msg)
 	case m.gitCmd.active:
 		return m.onGitPromptKey(msg)
 	case m.focus == focusChat:
@@ -899,7 +936,12 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Overlaps):
 		return m.toggleOverlaps()
 	case key.Matches(msg, k.Filter):
+		if m.focus == focusDiff {
+			return m.startSearch()
+		}
 		return m.startFilter()
+	case key.Matches(msg, k.Review):
+		return m.toggleWorktreeView()
 	case key.Matches(msg, k.SwitchPane):
 		if m.focus != focusList {
 			m.focus = focusList
@@ -913,6 +955,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case key.Matches(msg, k.Back):
 		switch {
+		case m.focus == focusDiff && m.searchQuery != "":
+			m.clearSearch()
 		case m.focus == focusDiff:
 			m.focus = focusList
 		case m.filtering():
@@ -950,6 +994,9 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 
 func (m *Model) refreshNow() tea.Cmd {
 	m.toastID++
+	if m.wtView != nil {
+		m.wtView.loaded = ""
+	}
 	return tea.Batch(m.startScan(), m.notify("Refreshing…", toastInfo))
 }
 
@@ -1046,22 +1093,37 @@ func (m *Model) onDiffKey(msg tea.KeyPressMsg) tea.Cmd {
 			return m.openFile()
 		}
 		return nil
-	case "n":
-		m.jumpHunk(1)
+	case "n", "N", "p":
+		dir := 1
+		if msg.String() != "n" {
+			dir = -1
+		}
+		if m.searchQuery != "" {
+			m.jumpMatch(dir)
+		} else {
+			m.jumpHunk(dir)
+		}
 		return nil
-	case "N", "p":
-		m.jumpHunk(-1)
-		return nil
+	case "x":
+		return m.askRevert()
+	case ">":
+		return m.hunkToAgent()
 	case "g", "home":
 		m.diff.GotoTop()
 		return nil
 	case "G", "end":
 		m.diff.GotoBottom()
 		return nil
-	case "]":
-		return m.move(1)
-	case "[":
-		return m.move(-1)
+	case "]", "[":
+		dir := 1
+		if msg.String() == "[" {
+			dir = -1
+		}
+		if m.wtView != nil {
+			m.jumpFile(dir)
+			return nil
+		}
+		return m.move(dir)
 	case "left", "h":
 		// Already at the left edge: carry on into the file list.
 		if m.diff.XOffset() == 0 {
@@ -1074,9 +1136,18 @@ func (m *Model) onDiffKey(msg tea.KeyPressMsg) tea.Cmd {
 	return cmd
 }
 
-// jumpHunk scrolls the diff to the next or previous hunk header.
+// jumpHunk makes the next or previous hunk the current one and scrolls to
+// it. Without hunks to act on, it scrolls to the next hunk header.
 func (m *Model) jumpHunk(dir int) {
 	if m.shownKey == "" {
+		return
+	}
+	if n := len(m.parsed.hunks); n > 0 {
+		target := m.currentHunkIndex() + dir
+		if m.currentHunkIndex() < 0 {
+			target = 0
+		}
+		m.setCurrentHunk(max(0, min(target, n-1)))
 		return
 	}
 	y := m.diff.YOffset()
@@ -1235,7 +1306,7 @@ func (m *Model) copyPath() tea.Cmd {
 }
 
 func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
-	if m.confirm != nil || m.creating != nil || m.picker != nil || m.watchAsk != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil || m.actions != nil || m.ship != nil || m.commit != nil {
+	if m.confirm != nil || m.creating != nil || m.picker != nil || m.watchAsk != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil || m.actions != nil || m.ship != nil || m.commit != nil || m.revert != nil {
 		return nil
 	}
 	if m.showHelp {

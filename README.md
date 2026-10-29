@@ -319,6 +319,24 @@ overlaps and last commit, and a list of what needs attention. `enter`
 jumps to the worktree in the list, `a` opens its agent and `c` merges into
 it.
 
+### Reviewing a worktree's changes
+
+Press `v` on a worktree, or any of its files, to read every change it made
+in one scroll, each file under its name. `v` again shows only what changed
+since its agent's last turn began (grove snapshots the worktree before each
+turn), and once more goes back to everything. `[` and `]` go from file to
+file, `n` and `N` from change to change; a bar in the gutter marks the
+current change. In any diff:
+
+- `/` searches; matches are highlighted, and `n` / `N` go from one to the
+  next until `esc` clears the search.
+- `x` puts the current change back, after showing it: its `+` lines are
+  taken out and its `−` lines put back in the file on disk, keeping the
+  file's line endings. On a new file that deletes it; on a deleted file it
+  brings it back.
+- `>` opens the worktree's agent with the change quoted, ready for you to
+  say what's wrong with it.
+
 ### Finishing a feature
 
 Select a worktree and press `s` to ship it. The menu shows where it stands
@@ -425,7 +443,9 @@ one. While the terminal is focused, the usual toasts are enough.
 | `o` | show only files changed in several worktrees |
 | `/` | filter files |
 | `r` | refresh now |
-| `n` `N` | next / previous hunk (diff pane) |
+| `n` `N` | next / previous hunk (diff pane), or search match |
+| `v` | every change in the worktree; again for its agent's last turn |
+| `/` `x` `>` | in the diff pane: search, put the current change back, ask the agent about it |
 | `?` | all shortcuts |
 | `q` | quit |
 

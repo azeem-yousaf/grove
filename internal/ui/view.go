@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/azeem-yousaf/grove/internal/git"
@@ -113,6 +112,8 @@ func (m *Model) render() string {
 		return m.overlay(screen, m.shipModal())
 	case m.commit != nil:
 		return m.overlay(screen, m.commitModal())
+	case m.revert != nil:
+		return m.overlay(screen, m.revertModal())
 	}
 	return screen
 }
@@ -215,6 +216,15 @@ func (m *Model) footer() string {
 		hint := count + m.hints([][2]string{{"enter", "done"}, {"esc", "clear"}})
 		return spread(" "+m.filter.View(), hint+" ", m.width)
 	}
+	if m.searchActive {
+		m.searchInput.SetWidth(max(m.width/2, 20))
+		status := ""
+		if m.searchQuery != "" {
+			status = st.muted.Render(m.searchStatus() + " · ")
+		}
+		hint := status + m.hints([][2]string{{"↑↓", "matches"}, {"enter", "done"}, {"esc", "clear"}})
+		return spread(" "+m.searchInput.View(), hint+" ", m.width)
+	}
 	if g := &m.gitCmd; g.active {
 		label := " " + st.pillAccent.Render(g.target.Name()) + " " + st.accent.Render("git ")
 		hint := m.hints([][2]string{{"enter", "run"}, {"↑", "history"}, {"esc", "cancel"}}) + " "
@@ -245,6 +255,8 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"c p r m b", "choose"}, {"esc", "close"}}
 	case m.commit != nil:
 		pairs = [][2]string{{"enter", "commit"}, {"tab", "files / message"}, {"esc", "cancel"}}
+	case m.revert != nil:
+		pairs = [][2]string{{"enter", "put it back"}, {"esc", "keep it"}}
 	case m.overview:
 		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"w", "close"}, {"r", "refresh"}, {"q", "quit"}}
 		pinned = [][2]string{{"?", "help"}}
@@ -252,8 +264,18 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"tab", "list"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
 	case m.focus == focusGroup:
 		pairs = [][2]string{{"enter", "post"}, {"@branch", "to one agent"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}}
-	case m.focus == focusDiff && onFile:
-		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", "hunk"}, {"[ ]", "file"}, {"enter", "open"}, {"tab", "list"}}
+	case m.focus == focusDiff && (onFile || m.wtView != nil):
+		next := "hunk"
+		if m.searchQuery != "" {
+			next = "match"
+		}
+		view := "whole worktree"
+		if m.wtView != nil && !m.wtView.since {
+			view = "last turn"
+		} else if m.wtView != nil {
+			view = "all changes"
+		}
+		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", next}, {"x", "put back"}, {">", "ask agent"}, {"/", "search"}, {"v", view}, {"[ ]", "file"}, {"tab", "list"}}
 		pinned = everything
 	case m.focus == focusDiff:
 		// A worktree or group summary: nothing to open, no hunks.
@@ -284,6 +306,8 @@ func (m *Model) footer() string {
 			sty, icon = st.del, "✕"
 		}
 		right = sty.Render(icon+" ") + st.text.Render(ansi.Truncate(m.toast.text, m.width/2, "…")) + " "
+	} else if m.searchQuery != "" && m.focus == focusDiff {
+		right = st.accent.Render("/"+m.searchQuery) + st.muted.Render(" "+m.searchStatus()) + st.faint.Render("  esc clears") + " "
 	} else if m.filtering() {
 		var parts []string
 		if m.filterQuery != "" {
@@ -520,6 +544,16 @@ func (m *Model) diffHeader(width int) []string {
 func (m *Model) diffPane(w, h int) string {
 	focused := m.focus == focusDiff
 	inner := w - 2
+	if m.wtView != nil {
+		foot := ""
+		if m.diff.TotalLineCount() > m.diff.Height() {
+			foot = scrollLabel(m.diff.YOffset(), m.diff.TotalLineCount(), m.diff.Height())
+		}
+		if m.parsed.truncated {
+			foot = fmt.Sprintf("first %d lines · %s", maxWorktreeLines, foot)
+		}
+		return m.panel(m.wtView.name, m.wtTitle(), foot, strings.Split(m.diff.View(), "\n"), w, h, focused)
+	}
 	if cr, ok := m.cursorRow(); ok && cr.kind == rowGroup {
 		_, grp := m.groupPlan(cr.grp)
 		foot := ""
@@ -575,6 +609,10 @@ func (m *Model) refreshDiffView() {
 	}
 	_, diffW, paneH := m.layout()
 	inner := diffW - 2
+	if m.wtView != nil {
+		m.refreshWorktreeView(inner, paneH)
+		return
+	}
 	if cr, ok := m.cursorRow(); ok && cr.kind == rowGroup {
 		m.diff.SetWidth(inner)
 		m.diff.SetHeight(max(paneH-2, 1))
@@ -637,7 +675,7 @@ func (m *Model) refreshDiffView() {
 	// Predictions arriving change the highlighted hunks, so they are part of
 	// the key.
 	clash := m.conflictLines(r.wt, f.Path)
-	want := fmt.Sprintf("diff|%s|%d|%t|%d|%v", k, inner, m.dark, len(raw), clash)
+	want := fmt.Sprintf("diff|%s|%d|%t|%d|%v|%s", k, inner, m.dark, len(raw), clash, m.searchQuery)
 	if want == m.renderedFor && raw == m.shownRaw {
 		return
 	}
@@ -664,17 +702,12 @@ func (m *Model) refreshDiffView() {
 		m.diff.SetContentLines(m.placeholder("○", msg, inner))
 	default:
 		m.parsed = pd
-		content, gutter := renderDiff(pd, f.Path, inner, m.st, clash)
-		blank := strings.Repeat(" ", ansi.StringWidth(gutter[0]))
-		m.diff.LeftGutterFunc = func(c viewport.GutterContext) string {
-			if c.Index < len(gutter) && !c.Soft {
-				return gutter[c.Index]
-			}
-			return blank
-		}
+		content, gutter := renderDiff(pd, f.Path, inner, m.st, clash, m.searchQuery)
+		m.diff.LeftGutterFunc = m.diffGutter(gutter)
 		m.diff.SetContentLines(content)
 	}
 	if !sameFile {
+		m.curHunk = -1
 		m.diff.GotoTop()
 		m.diff.SetXOffset(0)
 	}

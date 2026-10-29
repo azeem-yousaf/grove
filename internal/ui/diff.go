@@ -22,10 +22,12 @@ const (
 	lineDel
 	lineHunk
 	lineNote
+	lineFile // a file's name, in a diff of many files
 )
 
 type diffLine struct {
 	kind     lineKind
+	hunk     int    // index into parsedDiff.hunks, -1 outside any
 	old, new int    // line numbers; 0 when not applicable
 	text     string // without the leading +/-/space
 	// hiStart/hiEnd mark the changed part of a line that was edited rather
@@ -36,60 +38,132 @@ type diffLine struct {
 
 type parsedDiff struct {
 	lines     []diffLine
+	hunks     []git.Hunk // diffLine.hunk indexes these
 	binary    bool
 	truncated bool
 	maxLineNo int
 }
 
-const maxDiffLines = 4000
+const (
+	maxDiffLines     = 4000
+	maxWorktreeLines = 20000 // for a whole worktree's diff (v)
+)
 
-// parseDiff turns unified diff text into display lines, skipping git's file
-// headers and pairing edited lines for word-level highlights.
-func parseDiff(raw string) parsedDiff {
+// parseDiff turns one file's unified diff into display lines, skipping
+// git's file headers and pairing edited lines for word-level highlights.
+func parseDiff(raw string) parsedDiff { return parseDiffs(raw, false, maxDiffLines) }
+
+// parseDiffs is parseDiff for a diff of many files: with files set, each
+// file starts with a lineFile line naming it.
+func parseDiffs(raw string, files bool, limit int) parsedDiff {
 	var (
 		pd       parsedDiff
 		old, new int
 		inHunk   bool
+		hunk     = -1
 	)
+	pd.hunks = git.ParseHunks(raw)
+	add := func(l diffLine) {
+		l.hunk = hunk
+		pd.lines = append(pd.lines, l)
+	}
 	for _, l := range strings.Split(raw, "\n") {
 		l = strings.TrimSuffix(l, "\r")
-		if len(pd.lines) >= maxDiffLines {
+		if len(pd.lines) >= limit {
 			pd.truncated = true
 			break
 		}
 		switch {
+		case strings.HasPrefix(l, "diff --git"):
+			inHunk = false
+			if files {
+				// Belongs to no hunk; the count of hunks carries on.
+				pd.lines = append(pd.lines, diffLine{kind: lineFile, hunk: -1, text: diffFileName(l)})
+			}
 		case strings.HasPrefix(l, "@@"):
 			inHunk = true
+			hunk++
 			o, n, heading := parseHunkHeader(l)
 			old, new = o, n
 			// A hunk marker at the very top of the file adds nothing.
-			if len(pd.lines) == 0 && o <= 1 && n <= 1 && heading == "" {
+			top := len(pd.lines) == 0 || pd.lines[len(pd.lines)-1].kind == lineFile
+			if top && o <= 1 && n <= 1 && heading == "" {
 				continue
 			}
-			pd.lines = append(pd.lines, diffLine{kind: lineHunk, text: heading, old: o, new: n})
+			add(diffLine{kind: lineHunk, text: heading, old: o, new: n})
 		case !inHunk:
 			if strings.HasPrefix(l, "Binary files ") || strings.HasPrefix(l, "GIT binary patch") {
 				pd.binary = true
+				if files {
+					pd.lines = append(pd.lines, diffLine{kind: lineNote, hunk: -1, text: "binary file"})
+				}
 			}
 		case strings.HasPrefix(l, "+"):
-			pd.lines = append(pd.lines, diffLine{kind: lineAdd, new: new, text: l[1:]})
+			add(diffLine{kind: lineAdd, new: new, text: l[1:]})
 			new++
 		case strings.HasPrefix(l, "-"):
-			pd.lines = append(pd.lines, diffLine{kind: lineDel, old: old, text: l[1:]})
+			add(diffLine{kind: lineDel, old: old, text: l[1:]})
 			old++
 		case strings.HasPrefix(l, " "):
-			pd.lines = append(pd.lines, diffLine{kind: lineContext, old: old, new: new, text: l[1:]})
+			add(diffLine{kind: lineContext, old: old, new: new, text: l[1:]})
 			old++
 			new++
 		case strings.HasPrefix(l, `\`):
-			pd.lines = append(pd.lines, diffLine{kind: lineNote, text: strings.TrimSpace(l[1:])})
-		case strings.HasPrefix(l, "diff --git"):
-			inHunk = false
+			add(diffLine{kind: lineNote, text: strings.TrimSpace(l[1:])})
 		}
 		pd.maxLineNo = max(pd.maxLineNo, old, new)
 	}
+	if files {
+		pd.binary = false // noted per file instead
+	}
+	// The last hunk may be cut short, so it can't be acted on.
+	if pd.truncated && hunk >= 0 && hunk < len(pd.hunks) {
+		pd.hunks = pd.hunks[:hunk]
+	}
+	if hunk+1 != len(pd.hunks) && !pd.truncated {
+		// The two parsers disagree about the hunks; don't trust either.
+		pd.hunks = nil
+	}
 	markWordChanges(pd.lines)
 	return pd
+}
+
+// diffFileName is the path a "diff --git a/x b/y" line names.
+func diffFileName(l string) string {
+	rest := strings.TrimPrefix(l, "diff --git ")
+	if i := strings.LastIndex(rest, " b/"); i >= 0 {
+		return rest[i+3:]
+	}
+	return rest
+}
+
+// hunkAt is the hunk around line i of the diff (the first one below it when
+// i is above every hunk), or false when there is none to act on.
+func (pd parsedDiff) hunkAt(i int) (git.Hunk, bool) {
+	if len(pd.lines) == 0 {
+		return git.Hunk{}, false
+	}
+	i = max(0, min(i, len(pd.lines)-1))
+	for j := i; j < len(pd.lines); j++ {
+		if h := pd.lines[j].hunk; h >= 0 {
+			if pd.lines[j].kind == lineFile {
+				continue
+			}
+			if h < len(pd.hunks) {
+				return pd.hunks[h], true
+			}
+			return git.Hunk{}, false
+		}
+		if pd.lines[j].kind == lineFile && j > i {
+			break
+		}
+	}
+	for j := i; j >= 0; j-- {
+		if h := pd.lines[j].hunk; h >= 0 && h < len(pd.hunks) {
+			return pd.hunks[h], true
+		}
+	}
+	return git.Hunk{}, false
 }
 
 // parseHunkHeader reads "@@ -12,7 +12,9 @@ func heading".
@@ -301,10 +375,22 @@ func clashingHunks(lines []diffLine, clash []git.LineRange) []bool {
 // renderDiff draws a parsed diff to width columns. It returns the content
 // lines and a matching gutter of line numbers, which stays put while the
 // content scrolls sideways. Hunks touching clash get a bar in the gutter and
-// a tinted header.
-func renderDiff(pd parsedDiff, filename string, width int, st styles, clash []git.LineRange) (content, gutter []string) {
+// a tinted header. In a diff of many files each lineFile switches the
+// syntax highlighting to that file. The first match of search (lower case)
+// on each line is highlighted.
+func renderDiff(pd parsedDiff, filename string, width int, st styles, clash []git.LineRange, search string) (content, gutter []string) {
 	p := st.p
 	h := newHighlighter(filename, p)
+	// hi is the part of a line to highlight: the search match, else the
+	// word-level change.
+	hi := func(l diffLine) (int, int, bool) {
+		if search != "" {
+			if i := strings.Index(strings.ToLower(l.text), search); i >= 0 {
+				return tabShift(l.text, i), tabShift(l.text, i+len(search)), true
+			}
+		}
+		return tabShift(l.text, l.hiStart), tabShift(l.text, l.hiEnd), false
+	}
 	marked := clashingHunks(pd.lines, clash)
 	nw := max(len(strconv.Itoa(pd.maxLineNo)), 3)
 	gutterWidth := nw*2 + 4
@@ -336,7 +422,21 @@ func renderDiff(pd parsedDiff, filename string, width int, st styles, clash []gi
 		if marked[i] {
 			sep = clashSep
 		}
+		start, end, found := hi(l)
+		addHi, delHi := p.addBgHi, p.delBgHi
+		if found {
+			addHi, delHi = p.searchBg, p.searchBg
+		}
 		switch l.kind {
+		case lineFile:
+			h = newHighlighter(l.text, p)
+			bg := p.selBg
+			name := st.bold.Background(bg).Render(" ▍" + ansi.Truncate(l.text, width-4, "…"))
+			if found {
+				name = st.bold.Background(p.searchBg).Render(" ▍" + ansi.Truncate(l.text, width-4, "…"))
+			}
+			gutter = append(gutter, lipgloss.NewStyle().Background(bg).Render(strings.Repeat(" ", gutterWidth)))
+			content = append(content, pad(name, bg))
 		case lineHunk:
 			label := "⋯"
 			if l.text != "" {
@@ -351,16 +451,19 @@ func renderDiff(pd parsedDiff, filename string, width int, st styles, clash []gi
 			content = append(content, pad(hs.Render(" "+ansi.Truncate(label, codeWidth-2, "…")), bg))
 		case lineAdd:
 			gutter = append(gutter, num(0, muted)+" "+num(l.new, st.add)+" "+sep)
-			content = append(content, pad(st.add.Background(p.addBg).Render("+ ")+h.line(text, p.addBg, p.addBgHi, tabShift(l.text, l.hiStart), tabShift(l.text, l.hiEnd)), p.addBg))
+			content = append(content, pad(st.add.Background(p.addBg).Render("+ ")+h.line(text, p.addBg, addHi, start, end), p.addBg))
 		case lineDel:
 			gutter = append(gutter, num(l.old, st.del)+" "+num(0, muted)+" "+sep)
-			content = append(content, pad(st.del.Background(p.delBg).Render("- ")+h.line(text, p.delBg, p.delBgHi, tabShift(l.text, l.hiStart), tabShift(l.text, l.hiEnd)), p.delBg))
+			content = append(content, pad(st.del.Background(p.delBg).Render("- ")+h.line(text, p.delBg, delHi, start, end), p.delBg))
 		case lineNote:
 			gutter = append(gutter, strings.Repeat(" ", nw*2+2)+sep)
 			content = append(content, pad(st.faint.Italic(true).Render("  "+l.text), nil))
 		default:
 			gutter = append(gutter, num(l.old, muted)+" "+num(l.new, muted)+" "+sep)
-			content = append(content, pad("  "+h.line(text, nil, nil, 0, 0), nil))
+			if !found {
+				start, end = 0, 0
+			}
+			content = append(content, pad("  "+h.line(text, nil, p.searchBg, start, end), nil))
 		}
 	}
 	return content, gutter

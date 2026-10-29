@@ -66,8 +66,8 @@ func TestActionsPalette(t *testing.T) {
 
 	// Moving down then running picks the second action.
 	press(m, "esc", "ctrl+k", "down", "enter")
-	if !m.gitCmd.active {
-		t.Errorf("second action (run git) didn't run")
+	if m.wtView == nil {
+		t.Errorf("second action (review every change) didn't run")
 	}
 }
 

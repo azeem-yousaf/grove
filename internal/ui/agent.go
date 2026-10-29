@@ -44,6 +44,7 @@ type session struct {
 	lastReply strings.Builder
 
 	checkpoint string          // tree of the worktree before the agent's first turn
+	turnTree   string          // tree of the worktree before its latest turn (v shows the change since)
 	touched    map[string]bool // repo-relative files the agent changed
 	allow      []string        // permission rules the user approved
 	pending    []pendingAction // approvals and suggested commands, oldest first
@@ -91,6 +92,7 @@ type (
 		planner    bool // for the planner rather than path's worktree agent
 		ev         agent.Event
 		checkpoint string
+		turnTree   string // taken before a later turn, for "since the last turn"
 		err        error
 		closed     bool
 	}
@@ -262,6 +264,8 @@ func (m *Model) newSession(path, name string, k agent.Kind) *session {
 }
 
 func (m *Model) showChat(s *session) tea.Cmd {
+	draft := m.chatDraft
+	m.chatDraft = ""
 	m.chatPath, m.chatPlanner = s.path, s.planner
 	m.focus = focusChat
 	s.seen = true
@@ -271,7 +275,8 @@ func (m *Model) showChat(s *session) tea.Cmd {
 	if s.planner {
 		m.chatInput.Placeholder = "describe what to build, or name a Jira issue or epic…"
 	}
-	m.chatInput.SetValue("")
+	m.chatInput.SetValue(draft)
+	m.chatInput.MoveToEnd()
 	return tea.Batch(m.chatInput.Focus(), m.warm(s))
 }
 
@@ -588,7 +593,8 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	run := m.runAgent
 	go func() {
 		defer close(ch)
-		if needCheckpoint {
+		switch {
+		case needCheckpoint:
 			tree, err := git.Checkpoint(ctx, path)
 			if err == nil {
 				// Pinned so gc keeps it for undo after grove restarts. Undo
@@ -596,6 +602,12 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				_ = git.KeepCheckpoint(ctx, path, path, tree)
 			}
 			ch <- agentMsg{path: path, planner: planner, checkpoint: tree, err: err}
+		case !planner:
+			// Cheap: it starts from the real index, so only what changed
+			// is hashed. Without it, v can only show all the changes.
+			if tree, err := git.Checkpoint(ctx, path); err == nil {
+				ch <- agentMsg{path: path, turnTree: tree}
+			}
 		}
 		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, ev: ev} })
 	}()
@@ -652,11 +664,15 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 		return nil
 	}
 	next := listen(s.events)
+	if msg.turnTree != "" {
+		s.turnTree = msg.turnTree
+		return next
+	}
 	if msg.checkpoint != "" || msg.err != nil {
 		if msg.err != nil {
 			s.entries = append(s.entries, chatEntry{roleNote, "Couldn't take a checkpoint, so undo won't be available: " + msg.err.Error()})
 		}
-		s.checkpoint = msg.checkpoint
+		s.checkpoint, s.turnTree = msg.checkpoint, msg.checkpoint
 		return next
 	}
 	ev := msg.ev

@@ -121,7 +121,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "group-list", "watch", "overview-conflicts", "diff-conflicts", "actions", "actions-filtered", "ship", "commit"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "group-list", "watch", "overview-conflicts", "diff-conflicts", "actions", "actions-filtered", "ship", "commit", "worktree-view", "worktree-search", "revert"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -136,6 +136,18 @@ func TestRenderFitsScreen(t *testing.T) {
 				m = fakeModel(t, size[0], size[1])
 				press(m, "s")
 				m.Update(shipLoadedMsg{path: m.ship.path, up: git.Upstream{Name: "origin/" + strings.Repeat("long-branch/", 8), Remote: "origin", Ahead: 3, Behind: 2}})
+			case "worktree-view":
+				m = fakeModel(t, size[0], size[1])
+				press(m, "v")
+				long := strings.Repeat("deep/", 30) + "file.ts"
+				raw := reviewDiff + "diff --git a/" + long + " b/" + long + "\n--- a/" + long + "\n+++ b/" + long +
+					"\n@@ -1 +1 @@\n-" + strings.Repeat("x", 300) + "\n+y\n"
+				m.Update(wtDiffMsg{key: m.wtView.loading, raw: raw})
+			case "worktree-search":
+				press(m, "/")
+				typeText(m, strings.Repeat("hello ", 30))
+			case "revert":
+				press(m, "esc", "x")
 			case "commit":
 				press(m, "c")
 				m.commit.message.SetValue(strings.Repeat("A long commit message line. ", 20))
@@ -713,7 +725,7 @@ func TestDiffRendering(t *testing.T) {
 	if del.hiEnd == 0 || add.text[add.hiStart:add.hiEnd] != "10000" {
 		t.Errorf("word highlight = %q", add.text[add.hiStart:add.hiEnd])
 	}
-	content, gutter := renderDiff(pd, "x.go", 80, newStyles(true), nil)
+	content, gutter := renderDiff(pd, "x.go", 80, newStyles(true), nil, "")
 	if len(content) != len(gutter) {
 		t.Fatal("gutter and content out of step")
 	}

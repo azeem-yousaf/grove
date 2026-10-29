@@ -22,6 +22,7 @@ type palette struct {
 	hunkBg, panelBg    color.Color
 	conflict           color.Color // files and hunks that will conflict when merged
 	conflictBg         color.Color
+	searchBg           color.Color // text matching a diff search
 	chroma             string
 }
 
@@ -52,6 +53,7 @@ func newPalette(dark bool) palette {
 			panelBg:    c("#141821"),
 			conflict:   c("#FB7185"),
 			conflictBg: c("#33141D"),
+			searchBg:   c("#6B5212"),
 			chroma:     "catppuccin-mocha",
 		}
 	}
@@ -78,6 +80,7 @@ func newPalette(dark bool) palette {
 		panelBg:    c("#F6F8FB"),
 		conflict:   c("#BE123C"),
 		conflictBg: c("#FDE2E7"),
+		searchBg:   c("#FFE08A"),
 		chroma:     "github",
 	}
 }
