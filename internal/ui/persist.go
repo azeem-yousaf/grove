@@ -82,7 +82,8 @@ type savedPending struct {
 	Protected   bool     `json:"protected,omitempty"`
 	Destructive bool     `json:"destructive,omitempty"`
 	Refs        []string `json:"refs,omitempty"`
-	Left        bool     `json:"left,omitempty"` // the planner left it for the user
+	Left        bool     `json:"left,omitempty"`  // the planner left it for the user
+	Asked       int      `json:"asked,omitempty"` // planner turns that didn't answer it
 }
 
 var roleNames = map[chatRole]string{roleUser: "user", roleAgent: "agent", roleTool: "tool", roleNote: "note", roleError: "error", roleOutput: "output"}
@@ -129,7 +130,7 @@ func (s *session) saved() savedSession {
 	for _, p := range s.pending {
 		pol := p.policy
 		out.Pending = append(out.Pending, savedPending{Command: p.kind == pendingCommand, ID: p.id, Text: p.text, Tool: p.tool,
-			UserOnly: pol.userOnly, Reason: pol.reason, Protected: pol.protected, Destructive: pol.destructive, Refs: pol.refs, Left: p.left})
+			UserOnly: pol.userOnly, Reason: pol.reason, Protected: pol.protected, Destructive: pol.destructive, Refs: pol.refs, Left: p.left, Asked: p.asked})
 	}
 	return out
 }
@@ -170,7 +171,7 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 		if p.Command {
 			kind = pendingCommand
 		}
-		a := pendingAction{kind: kind, id: p.ID, text: p.Text, tool: p.Tool, left: p.Left,
+		a := pendingAction{kind: kind, id: p.ID, text: p.Text, tool: p.Tool, left: p.Left, asked: p.Asked,
 			policy: approvalPolicy{userOnly: p.UserOnly, reason: p.Reason, protected: p.Protected, destructive: p.Destructive, refs: p.Refs}}
 		if kind == pendingApproval && a.id == "" {
 			// Saved by an older grove.

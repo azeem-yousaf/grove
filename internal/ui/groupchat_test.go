@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -262,5 +263,33 @@ func TestGroupChatCopy(t *testing.T) {
 	got := selectedGroupText(lines[first : last+1])
 	if !strings.HasSuffix(got, "feature/a\nThe API returns orderId.\nUse it.") {
 		t.Errorf("selected text = %q", got)
+	}
+}
+
+func TestWakeLimitGoesToTheWatchingPlanner(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	p.Orchestrated = true
+	m.termFocused = false
+	m.cfg.Planner.MaxWakeups = 1
+	log, _ := m.groupLog(p, "g")
+	if err := log.Post(group.Message{From: "feature/a", Text: "Which port?"}); err != nil {
+		t.Fatal(err)
+	}
+	poll(t, m, fake)
+	poll(t, m, fake)
+	var asked bool
+	for _, r := range fake.reqs {
+		asked = asked || r.ReadOnly && strings.Contains(r.Message, "were woken 1 times in a row without settling it")
+	}
+	if !asked {
+		t.Fatalf("the planner should be asked to settle the chat: %d requests", len(fake.reqs))
+	}
+	if slices.ContainsFunc(m.alerts, func(a string) bool { return strings.Contains(a, "waits for you") }) {
+		t.Errorf("the user shouldn't be asked: %q", m.alerts)
+	}
+	// The planner's post lets grove wake them again.
+	pump(t, m, m.plannerPost(p.ID, "g", "", "Use 8080."))
+	if g := m.groups[log.Dir]; g.paused || g.wakeups != 0 {
+		t.Errorf("a planner post should reset wake-ups: %+v", g)
 	}
 }

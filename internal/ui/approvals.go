@@ -104,10 +104,8 @@ func (m *Model) answer(s *session, i int, approve bool, by, why string) tea.Cmd 
 				item += " (" + why + ")"
 			}
 			s.denied = append(s.denied, item)
-			// The planner turned it down: the user may want to know.
-			cmds = append(cmds,
-				m.notify("✦ The planner denied "+s.name+": "+firstLine(a.text), toastInfo),
-				m.alert("The planner denied "+s.name+"'s command: "+firstLine(a.text)))
+			// The planner is in charge; the user can see it in the chat.
+			cmds = append(cmds, m.notify("The planner denied "+s.name+": "+firstLine(a.text), toastInfo))
 		}
 	}
 	if m.watchedBy(s.path) && by != byPlanner {
@@ -249,27 +247,51 @@ func (m *Model) findApproval(branch, id, command string) (*session, int, *answer
 	return nil, -1, nil
 }
 
-// leaveUndecided hands the user what the planner was asked about in the
-// turn that just ended and didn't answer, so nothing waits on a planner
-// that has moved on, and carries on the agents it answered in part.
+// askAgain is how many planner turns may pass over an approval before
+// grove denies it for the planner.
+const askAgain = 2
+
+// leaveUndecided deals with what the planner was asked about in the turn
+// that just ended and didn't answer, so nothing waits on a planner that
+// has moved on. The planner is in charge of a plan it watches, so the user
+// never gets those: it is asked again, and after askAgain turns without an
+// answer the command is denied and the agent told to find another way.
+// Approvals of plans it doesn't watch any more go to the user.
 func (m *Model) leaveUndecided() tea.Cmd {
 	asked := m.orch.asked
 	m.orch.asked = nil
 	var cmds []tea.Cmd
-	var left []string
+	var left, denied []string
 	for _, s := range m.allSessions() {
 		changed := false
-		for i := range s.pending {
+		for i := 0; i < len(s.pending); i++ {
 			a := &s.pending[i]
-			if a.kind == pendingApproval && slices.Contains(asked, a.id) && !a.left {
-				a.left, changed = true, true
-				s.entries = append(s.entries, chatEntry{roleNote, "The planner left this for you: " + a.text})
-				left = append(left, s.name+": "+firstLine(a.text))
+			if a.kind != pendingApproval || !slices.Contains(asked, a.id) || a.left {
+				continue
 			}
+			if m.awaitsPlanner(s, *a) {
+				if a.asked++; a.asked < askAgain {
+					m.orch.reports = append(m.orch.reports, fmt.Sprintf("You didn't answer %s's `%s` (id %s). Nobody else will: approve or deny it now.", s.name, firstLine(a.text), a.id))
+					m.queueTurn(s)
+					continue
+				}
+				denied = append(denied, s.name+": "+firstLine(a.text))
+				cmds = append(cmds, m.answer(s, i, false, byPlanner, "the planner didn't approve it; do without it, or explain to the planner why it is needed"))
+				i--
+				changed = true
+				continue
+			}
+			a.left, changed = true, true
+			s.entries = append(s.entries, chatEntry{roleNote, "The planner left this for you: " + a.text})
+			left = append(left, s.name+": "+firstLine(a.text))
 		}
 		if changed {
 			cmds = append(cmds, m.resume(s))
 		}
+	}
+	if len(denied) > 0 {
+		m.plannerNote(roleNote, "Denied as you didn't answer: "+strings.Join(denied, "; "))
+		m.orch.reports = append(m.orch.reports, "You didn't answer, so grove denied: "+strings.Join(denied, "; ")+". Answer every approval you are asked about.")
 	}
 	if len(left) > 0 {
 		m.plannerNote(roleNote, "Left for the user: "+strings.Join(left, "; "))

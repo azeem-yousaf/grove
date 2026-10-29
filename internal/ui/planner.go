@@ -510,6 +510,9 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 		// grove commits the resolved merge and merges the plan again.
 		return tea.Batch(fix, m.savePlan(p), m.schedule())
 	}
+	if t.Status == plan.Finished && watched(p) {
+		m.progressed()
+	}
 	m.queueTurn(s)
 	return tea.Batch(m.finishIfSettled(p), m.savePlan(p), m.schedule(), m.orchestrate())
 }

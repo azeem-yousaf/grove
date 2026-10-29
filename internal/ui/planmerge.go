@@ -548,6 +548,7 @@ func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
 	res := msg.res
 	if res.OK() {
 		p.Merge.Tests = plan.TestsPassed
+		m.progressed()
 		m.plannerNote(roleOutput, testEntry(msg.command, true, string(res.Output)))
 		m.queueMerge(p, msg.report+" grove ran `"+msg.command+"` in that worktree and it passed. "+
 			"Check anything else the change needs, if you must, without changing files. "+reviewAsk)

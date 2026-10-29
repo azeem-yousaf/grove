@@ -131,6 +131,7 @@ type pendingAction struct {
 	tool   string         // the shell tool an approval is for: "Bash" or "PowerShell"
 	policy approvalPolicy // for approvals: whether only the user may answer, and why
 	left   bool           // the planner was asked and left it for the user
+	asked  int            // planner turns that were asked about it and didn't answer
 }
 
 type (
@@ -838,10 +839,20 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 		if needsYou[0].policy.reason == "" {
 			text = s.name + " needs you"
 		}
+	case len(s.pending) > 0 && !slices.ContainsFunc(s.pending, func(a pendingAction) bool { return !m.awaitsPlanner(s, a) }):
+		text, kind = s.name+" waits for the planner", toastInfo
 	case len(s.pending) > 0:
 		text, kind = s.name+" needs you", toastInfo
 	case s.running:
 		return tea.Batch(cmds...) // resumed with its answers: it isn't finished
+	}
+	// The planner is in charge of a watched plan: its agents' and its own
+	// turns are news for the user only when something needs them.
+	if len(needsYou) == 0 && (s.planner && m.orchestrating() || !s.planner && m.watchedBy(s.path)) {
+		if !viewing {
+			cmds = append(cmds, m.notify(text, kind))
+		}
+		return tea.Batch(cmds...)
 	}
 	if !viewing {
 		cmds = append(cmds, m.notify("✦ "+text, kind))

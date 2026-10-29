@@ -17,16 +17,19 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// The planner can watch a running plan for the user, as its orchestrator.
+// The planner can watch a running plan for the user, as its orchestrator:
+// it is then in charge, and the user only reviews the pull request at the
+// end.
 // Who watches is asked before planning (watchAsk, unless [planner] watcher
 // in the config answers it) and kept on the plan (plan.Orchestrated). For a
 // watched plan grove sends the planner what would otherwise wait for the
 // user: commands a task's agent was refused, a turn that ended with a
 // question, and group chat messages. The planner answers with a
-// grove-orchestrate block; grove carries out what it decided and leaves the
-// rest for the user. At most cfg.Planner.Decisions() such turns run in a
-// row before the user says something, so the planner and the agents can't
-// keep each other going forever.
+// grove-orchestrate block; grove carries out what it decided, asks again
+// about what it left out, and denies approvals it keeps leaving. At most
+// cfg.Planner.Decisions() such turns run in a row without the plan moving
+// forward or the user saying something, so the planner and the agents
+// can't keep each other going forever.
 
 // watchAsk asks who will watch the plan about to be made.
 type watchAsk struct {
@@ -128,7 +131,7 @@ func (m *Model) watchModal() string {
 	a, st := m.watchAsk, m.st
 	opts := []struct{ name, what string }{
 		{"Me", "everything waits for you"},
-		{"The planner", "approves safe commands, answers what it can and follows the group chats; the rest waits for you"},
+		{"The planner", "takes charge: approves commands (all but destructive git), answers questions, helps stuck agents, merges, tests and opens a pull request for you to review"},
 	}
 	width := max(min(m.width-12, 64), 20)
 	parts := []string{
@@ -199,6 +202,13 @@ func (m *Model) watchedTask(branch string) (*plan.Plan, *plan.Task, *session) {
 
 // userActed lets the planner go on deciding after the user said something.
 func (m *Model) userActed() {
+	m.orch.turns, m.orch.paused = 0, false
+}
+
+// progressed lets the planner go on deciding after a watched plan moved
+// forward (a task finished, the plan merged, its tests passed), so the
+// limit only stops a planner and agents that go round in circles.
+func (m *Model) progressed() {
 	m.orch.turns, m.orch.paused = 0, false
 }
 
@@ -374,7 +384,8 @@ func (m *Model) orchestrate() tea.Cmd {
 func (m *Model) orchPrompt(items []orchItem) (string, string) {
 	var b strings.Builder
 	var what []string
-	b.WriteString("[grove] You are watching these plans' agents for the user. Decide what you can; whatever you leave out waits for the user.\n")
+	b.WriteString("[grove] You are in charge of these plans for the user. The user only reviews the pull request at the end, so decide everything here yourself; " +
+		"nobody else will answer the agents.\n")
 	for _, id := range planIDs(items) {
 		p := m.planByID(id)
 		fmt.Fprintf(&b, "\n## Plan %q (id %s)\n", p.Title, p.ID)
@@ -392,7 +403,8 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 				what = append(what, fmt.Sprintf("%s wants to run %s", it.branch, plural(len(it.lines), "command")))
 			case orchQuestion:
 				_, t, _ := m.watchedTask(it.branch)
-				fmt.Fprintf(&b, "\n%s (task %q) finished its turn with this, and is waiting for an answer:\n\n%s\n", it.branch, t.Title, quoteText(it.lines[0]))
+				fmt.Fprintf(&b, "\n%s (task %q) finished its turn with this, and is waiting for an answer:\n\n%s\n"+
+					"Answer it yourself from the plan, the code and your judgment of what the user asked for.\n", it.branch, t.Title, quoteText(it.lines[0]))
 				what = append(what, it.branch+" asked a question")
 			case orchFinished:
 				_, t, _ := m.watchedTask(it.branch)
@@ -401,7 +413,9 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 				what = append(what, it.branch+" finished")
 			case orchFailed:
 				_, t, _ := m.watchedTask(it.branch)
-				fmt.Fprintf(&b, "\n%s (task %q) failed: %s\nReply to it to try again another way, or leave it for the user.\n", it.branch, t.Title, it.lines[0])
+				fmt.Fprintf(&b, "\n%s (task %q) failed: %s\nFind out why: read its chat's end in the tasks tool, its worktree and its diff, and run what you need there. "+
+					"Then fix what blocks it (run the commands it needs in its worktree, answer what it is unsure about) and reply to it with exactly what to do next, which starts it again. "+
+					"Mark it failed only if the task can't be done at all; the plan then goes on without it.\n", it.branch, t.Title, it.lines[0])
 				what = append(what, it.branch+" failed")
 			case orchSettled:
 				fmt.Fprintf(&b, "\nEvery task of this plan is finished or failed. Once you have checked the finished work and it is right, merge the plan "+
@@ -446,16 +460,18 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 }` + "\n```\n\n")
 	if len(m.controlTools(m.planner)) > 0 {
 		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark, post, merge, close) instead of the block, " +
-			"and you may run shell commands without asking, for example to read a task's diff or run its tests in its worktree. " +
+			"and you may run shell commands without asking, for example to read a task's diff, run its tests, install its dependencies or run git grove allows in its worktree. " +
 			"Don't change any files yourself; the task agents do the work.\n\n")
 	}
-	b.WriteString("Approve a command only when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for. " +
+	b.WriteString("Approve a command when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for; " +
 		"git the task needs (committing, merging feature branches, pushing a task's own branch) is fine too. " +
 		"Deny anything destructive and anything that reaches outside the plan's worktrees, saying what to do instead. " +
 		"Commands grove's policy keeps for the user (deleting branches or worktrees, force pushes, discarding work, protected branches) aren't listed and can't be approved by you. " +
 		"grove reports every decision that doesn't apply. " +
-		"Reply to a question only when the plan and the code answer it; leave questions about what the user wants for the user. " +
-		"Post in a group chat only to settle something the agents are stuck on or disagree about. " +
+		"Answer every question and every approval you are given; anything you leave out is asked again, and an approval you keep leaving is denied. " +
+		"When an agent is struggling (errors, failing builds or tests, missing tools or dependencies, going round in circles), take it on: look at its worktree, " +
+		"run the commands it needs there yourself, and tell it exactly what to do next. Don't edit files yourself; the agents do. " +
+		"Post in a group chat to settle anything the agents are stuck on or disagree about. " +
 		"Answer the user in the plan chat (group \"plan\"), not in your reply: they read the plan chat. Keep messages short.\n")
 	return b.String(), "Asked to decide: " + strings.Join(what, "; ")
 }
@@ -734,6 +750,9 @@ func (m *Model) plannerPost(planID, groupID, to, text string) tea.Cmd {
 		}
 		if !slices.ContainsFunc(p.ChatMembers(groupID), func(t *plan.Task) bool { return t.Branch == to }) {
 			to = ""
+		}
+		if g := m.groups[log.Dir]; g != nil {
+			g.wakeups, g.paused = 0, false
 		}
 		msg := group.Message{From: group.Planner, To: to, Text: text}
 		return func() tea.Msg {

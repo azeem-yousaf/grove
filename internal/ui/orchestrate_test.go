@@ -51,7 +51,7 @@ func TestPlannerDecidesRefusedCommands(t *testing.T) {
 	}
 }
 
-func TestPlannerAnswersQuestionsAndLeavesTheRest(t *testing.T) {
+func TestPlannerAnswersQuestionsAndIsAskedAgain(t *testing.T) {
 	m, p, fake := groupedPlan(t)
 	p.Orchestrated = true
 	// It answers the question but says nothing about the command.
@@ -68,19 +68,22 @@ func TestPlannerAnswersQuestionsAndLeavesTheRest(t *testing.T) {
 	m.planner.running = false
 	pump(t, m, m.orchestrate())
 
-	// b then finishes, and the planner checks its work.
-	if len(fake.reqs) != 3 || !strings.Contains(fake.reqs[0].Message, "JSON or XML?") || !strings.Contains(fake.reqs[0].Message, "make deploy") ||
-		!strings.Contains(fake.reqs[2].Message, "feature/b (task \"Work on feature/b\") says it is done") {
+	// The planner is asked again about the command; left twice, it is
+	// denied and a goes on. b finishes, and the planner checks its work.
+	if len(fake.reqs) < 3 || !strings.Contains(fake.reqs[0].Message, "JSON or XML?") || !strings.Contains(fake.reqs[0].Message, "make deploy") {
 		t.Fatalf("one planner turn should cover both, got %d requests", len(fake.reqs))
 	}
-	if fake.reqs[1].Dir != b.path || fake.reqs[1].Message != "From the planner, who is watching this plan for the user: Use JSON." {
-		t.Errorf("answer sent as %q to %s", fake.reqs[1].Message, fake.reqs[1].Dir)
+	has := func(dir, text string) bool {
+		return slices.ContainsFunc(fake.reqs, func(r agent.Request) bool { return r.Dir == dir && strings.Contains(r.Message, text) })
 	}
-	if len(a.pending) != 1 || !a.pending[0].left {
-		t.Error("a command the planner didn't decide stays for the user")
+	if !has(b.path, "From the planner, who is watching this plan for the user: Use JSON.") {
+		t.Error("the answer should go to b")
 	}
-	if out := strings.Join(m.chatBottom(a, 100), "\n"); !strings.Contains(out, "the planner left it for you") {
-		t.Errorf("approval card:\n%s", out)
+	if !has(m.planner.path, "You didn't answer feature/a's `make deploy`") || !has(a.path, "Denied: `make deploy`") || !has(m.planner.path, "feature/b (task \"Work on feature/b\") says it is done") {
+		t.Errorf("requests: %d", len(fake.reqs))
+	}
+	if len(a.pending) != 0 {
+		t.Errorf("nothing should be left for the user: %+v", a.pending)
 	}
 }
 

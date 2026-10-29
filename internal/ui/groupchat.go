@@ -30,7 +30,7 @@ type groupState struct {
 	msgs    []group.Message
 	unread  map[string]int // by member, from their read cursors
 	direct  map[string]int // the unread ones addressed to that member alone
-	wakeups int            // automatic wake-ups since the user last posted
+	wakeups int            // automatic wake-ups since the user or the planner last posted
 	paused  bool           // wake-ups stopped at the limit
 }
 
@@ -267,7 +267,16 @@ func (m *Model) wakeGroups() tea.Cmd {
 					continue
 				}
 				if g.wakeups >= m.cfg.Planner.Wakeups() {
-					if !g.paused {
+					switch {
+					case g.paused:
+					case watched(p):
+						// The planner is in charge: it settles what they
+						// are stuck on, and its post wakes them again.
+						g.paused = true
+						m.orch.queue = append(m.orch.queue, orchItem{kind: orchGroup, plan: p.ID, group: grp.ID, urgent: true, lines: []string{fmt.Sprintf(
+							"grove: the agents here were woken %d times in a row without settling it. Read the chat, decide what they are stuck on and post your decision; that lets grove wake them again.", g.wakeups)}})
+						cmds = append(cmds, m.orchestrate())
+					default:
 						g.paused = true
 						cmds = append(cmds,
 							m.notify(fmt.Sprintf("%s: paused waking agents after %d messages in a row; post in the chat (t) to go on", groupTitle(grp), g.wakeups), toastInfo),
@@ -457,7 +466,11 @@ func (m *Model) groupPane(w, h int) string {
 		lines = append(lines, m.groupMessageLines(gc, state.msgs, inner)...)
 	}
 	if state != nil && state.paused {
-		lines = append(lines, "", " "+st.warn.Render(ansi.Truncate(fmt.Sprintf("Paused: agents were woken %d times in a row. Post to let them go on.", state.wakeups), inner-2, "…")))
+		text := fmt.Sprintf("Paused: agents were woken %d times in a row. Post to let them go on.", state.wakeups)
+		if watched(p) {
+			text = fmt.Sprintf("Paused: agents were woken %d times in a row; the planner is settling it.", state.wakeups)
+		}
+		lines = append(lines, "", " "+st.warn.Render(ansi.Truncate(text, inner-2, "…")))
 	}
 
 	bottom := []string{st.faint.Render(strings.Repeat("─", inner))}

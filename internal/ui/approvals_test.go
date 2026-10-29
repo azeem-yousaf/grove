@@ -131,38 +131,34 @@ func TestPlannerCantApproveWhatOnlyTheUserMay(t *testing.T) {
 	}
 }
 
-func TestPlannerLeavesSomeForTheUser(t *testing.T) {
+func TestPlannerIsAskedAgainThenDenies(t *testing.T) {
 	m, p, fake := groupedPlan(t)
 	p.Orchestrated = true
 	m.termFocused = false
 	s := m.sessionFor(m.taskPath(p, "feature/a"))
+	// The planner answers two and leaves the third, twice.
 	fake.turns = [][]agent.Event{
 		plannerSays(`{"approve": [{"branch": "feature/a", "command": "npm test"}], "deny": [{"branch": "feature/a", "command": "rm -rf dist", "reason": "use npm run clean"}]}`),
+		plannerSays(`{}`),
 	}
 	s.running = true
 	pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone, Denied: []agent.Denial{
 		{Tool: "Bash", Detail: "npm test"}, {Tool: "Bash", Detail: "rm -rf dist"}, {Tool: "Bash", Detail: "make deploy"},
 	}}))
-	if len(fake.reqs) != 2 {
-		t.Fatalf("want the planner's turn and the agent resumed, got %d requests", len(fake.reqs))
+	if len(fake.reqs) < 3 || !fake.reqs[1].ReadOnly || !strings.Contains(fake.reqs[1].Message, "You didn't answer feature/a's `make deploy`") {
+		t.Fatalf("the planner should be asked again before the agent goes on: %d requests", len(fake.reqs))
 	}
-	resume := fake.reqs[1].Message
-	for _, want := range []string{"Approved: `npm test`", "Denied: `rm -rf dist` (use npm run clean)", "Still waiting for the user: `make deploy`"} {
+	resume := fake.reqs[2].Message
+	for _, want := range []string{"Approved: `npm test`", "Denied: `rm -rf dist` (use npm run clean)", "`make deploy` (the planner didn't approve it"} {
 		if !strings.Contains(resume, want) {
 			t.Errorf("resume is missing %q: %q", want, resume)
 		}
 	}
-	if len(s.pending) != 1 || !s.pending[0].left {
-		t.Fatalf("pending = %+v", s.pending)
+	if len(s.pending) != 0 {
+		t.Fatalf("nothing should be left for the user: %+v", s.pending)
 	}
-	if !slices.ContainsFunc(m.alerts, func(a string) bool { return strings.Contains(a, "the planner left for you") }) {
-		t.Errorf("alerts = %q", m.alerts)
-	}
-	if !slices.ContainsFunc(m.alerts, func(a string) bool { return strings.Contains(a, "The planner denied") }) {
-		t.Errorf("a denial should be told to the user: %q", m.alerts)
-	}
-	if out := strings.Join(m.chatBottom(s, 120), "\n"); !strings.Contains(out, "the planner left it for you") {
-		t.Errorf("approval card:\n%s", out)
+	if len(m.alerts) != 0 {
+		t.Errorf("the user shouldn't be alerted about the planner's decisions: %q", m.alerts)
 	}
 }
 
