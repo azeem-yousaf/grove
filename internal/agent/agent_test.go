@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,9 @@ func fakeClaude() {
 		json.Unmarshal(sc.Bytes(), &in)
 		switch {
 		case in.Type == "user":
+			if v, ok := os.LookupEnv("GROVE_TEST_ENV"); ok {
+				fmt.Fprintf(rec, "env GROVE_TEST_ENV=%s\n", v) // reports the process's environment
+			}
 			fmt.Fprintf(rec, "user %q\n", in.Message.Content)
 			if strings.HasSuffix(in.Message.Content, "wait") {
 				fmt.Println(`{"type":"system","subtype":"init","session_id":"s-123"}`)
@@ -341,6 +345,77 @@ func TestClaudeKeepsItsProcess(t *testing.T) {
 	last = last[:strings.IndexByte(last, '\n')]
 	if strings.Count(rec, "start ") != 2 || !strings.Contains(last, "--resume s-123") || !strings.HasSuffix(last, "Bash(npm test)") {
 		t.Errorf("approving should restart with --resume and the rule:\n%s", rec)
+	}
+}
+
+func TestHookArgs(t *testing.T) {
+	hook := []string{`C:\Program Files\grove\grove.exe`, "agent-hook", "--dir", "/s/grove/control", "--as", "/w/it's"}
+	args := claudeArgs(Request{Hook: hook, ReadOnly: true, Commands: true, Allow: []string{"Bash(ls)"}})
+	i := slices.Index(args, "--settings")
+	if i < 0 {
+		t.Fatalf("no --settings: %q", args)
+	}
+	var s struct {
+		Hooks struct {
+			PreToolUse []struct {
+				Matcher string
+				Hooks   []struct {
+					Type, Command string
+					Timeout       int
+				}
+			}
+		}
+	}
+	if err := json.Unmarshal([]byte(args[i+1]), &s); err != nil {
+		t.Fatalf("--settings isn't JSON: %v %s", err, args[i+1])
+	}
+	pre := s.Hooks.PreToolUse
+	if len(pre) != 1 || pre[0].Matcher != "Bash|PowerShell" || len(pre[0].Hooks) != 1 {
+		t.Fatalf("hook settings = %+v", s)
+	}
+	h := pre[0].Hooks[0]
+	want := `'C:\Program Files\grove\grove.exe' agent-hook --dir /s/grove/control --as '/w/it'\''s'`
+	if h.Type != "command" || h.Command != want || h.Timeout != 30 {
+		t.Errorf("hook = %+v, want command %s", h, want)
+	}
+	if j := strings.Join(args, " "); args[len(args)-1] != "Bash(ls)" || !strings.Contains(j, "--disallowedTools Edit") || !strings.Contains(j, " Bash PowerShell ") {
+		t.Errorf("the planner's modes should still apply with a hook: %s", j)
+	}
+	if slices.Contains(claudeArgs(Request{}), "--settings") {
+		t.Error("no hook should mean no --settings")
+	}
+}
+
+func TestEnvReachesAgents(t *testing.T) {
+	bin, dir := fakeAgent(t, "claude")
+	r := NewRunner()
+	defer r.Stop(dir)
+	ctx := context.Background()
+	req := Request{Kind: Claude, Bin: bin, Dir: dir, Message: "hi", Env: []string{"GROVE_TEST_ENV=one"}}
+	done := turn(t, r, ctx, req)
+	req.Session = done[len(done)-1].Session
+	turn(t, r, ctx, req)
+	if rec := record(t); strings.Count(rec, "start ") != 1 || !strings.Contains(rec, "env GROVE_TEST_ENV=one") {
+		t.Fatalf("Env should reach the kept process:\n%s", rec)
+	}
+	// Other values need a new process, which resumes the conversation.
+	req.Env = []string{"GROVE_TEST_ENV=two"}
+	turn(t, r, ctx, req)
+	rec := record(t)
+	if strings.Count(rec, "start ") != 2 || !strings.Contains(rec, "env GROVE_TEST_ENV=two") || !strings.Contains(rec[strings.LastIndex(rec, "start "):], "--resume s-123") {
+		t.Errorf("an Env change should restart with --resume:\n%s", rec)
+	}
+	// So does a new hook.
+	req.Hook = []string{"grove", "agent-hook"}
+	turn(t, r, ctx, req)
+	if rec := record(t); strings.Count(rec, "start ") != 3 || !strings.Contains(rec, "--settings") {
+		t.Errorf("a Hook change should restart:\n%s", rec)
+	}
+
+	bin, dir = fakeAgent(t, "codex")
+	turn(t, r, ctx, Request{Kind: Codex, Bin: bin, Dir: dir, Message: "hi", Env: []string{"GROVE_FAKE_RECORD=" + filepath.Join(dir, "env.txt")}})
+	if _, err := os.Stat(filepath.Join(dir, "env.txt")); err != nil {
+		t.Errorf("Env should reach codex: %v", err)
 	}
 }
 

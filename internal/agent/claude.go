@@ -54,6 +54,9 @@ func claudeArgs(req Request) []string {
 	if cfg := mcpConfig(req.Tools); cfg != "" {
 		args = append(args, "--mcp-config", cfg)
 	}
+	if s := hookSettings(req.Hook); s != "" {
+		args = append(args, "--settings", s)
+	}
 	if req.ReadOnly {
 		args = append(args, "--disallowedTools")
 		args = append(args, editTools...)
@@ -110,6 +113,47 @@ func mcpConfig(tools []ToolServer) string {
 	return string(b)
 }
 
+// hookTimeout is how many seconds Claude Code gives the hook before going
+// on without it.
+const hookTimeout = 30
+
+// hookSettings is the --settings JSON that runs hook before every shell
+// command, or "" for no hook. Claude Code adds it to the user's own
+// settings and hooks.
+func hookSettings(hook []string) string {
+	if len(hook) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(map[string]any{"hooks": map[string]any{
+		"PreToolUse": []any{map[string]any{
+			"matcher": strings.Join(shells, "|"),
+			"hooks": []any{map[string]any{
+				"type":    "command",
+				"command": shellCommand(hook),
+				"timeout": hookTimeout,
+			}},
+		}},
+	}})
+	return string(b)
+}
+
+// shellCommand quotes argv for the shell Claude Code runs hooks with: sh,
+// or Git Bash on Windows. Single quotes keep Windows backslashes and
+// spaces as they are. Words that need no quoting are left bare.
+func shellCommand(argv []string) string {
+	words := make([]string, len(argv))
+	for i, a := range argv {
+		if a != "" && strings.IndexFunc(a, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_./:=@,+", r))
+		}) < 0 {
+			words[i] = a
+			continue
+		}
+		words[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+	}
+	return strings.Join(words, " ")
+}
+
 // editTools change files; a read-only agent doesn't get them.
 var editTools = []string{"Edit", "MultiEdit", "Write", "NotebookEdit"}
 
@@ -164,6 +208,8 @@ type claudeProc struct {
 	commands   bool     // Commands it was started with
 	tools      string   // mcpConfig it was started with
 	readDirs   []string // ReadDirs it was started with
+	env        []string // Env it was started with
+	hook       []string // Hook it was started with
 
 	curMu sync.Mutex
 	cur   *claudeTurn // the turn in progress, if any
@@ -190,10 +236,13 @@ func startClaude(bin string, req Request) (*claudeProc, error) {
 		commands: req.Commands,
 		tools:    mcpConfig(req.Tools),
 		readDirs: slices.Clone(req.ReadDirs),
+		env:      slices.Clone(req.Env),
+		hook:     slices.Clone(req.Hook),
 		session:  req.Session,
 	}
 	p.cmd = exec.Command(bin, claudeArgs(req)...)
 	p.cmd.Dir = req.Dir
+	p.cmd.Env = environ(req.Env)
 	p.cmd.Stderr = &p.stderr
 	var err error
 	if p.stdin, err = p.cmd.StdinPipe(); err != nil {
@@ -236,7 +285,8 @@ func (p *claudeProc) read(out io.Reader) {
 }
 
 func (p *claudeProc) fits(bin string, req Request) bool {
-	return !p.ended() && p.bin == bin && p.model == req.Model && p.session == req.Session && slices.Equal(p.allow, req.Allow) && p.commands == req.Commands && p.tools == mcpConfig(req.Tools) && slices.Equal(p.readDirs, req.ReadDirs)
+	return !p.ended() && p.bin == bin && p.model == req.Model && p.session == req.Session && slices.Equal(p.allow, req.Allow) && p.commands == req.Commands && p.tools == mcpConfig(req.Tools) && slices.Equal(p.readDirs, req.ReadDirs) &&
+		slices.Equal(p.env, req.Env) && slices.Equal(p.hook, req.Hook)
 }
 
 func (p *claudeProc) ended() bool {
