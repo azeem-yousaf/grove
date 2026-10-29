@@ -61,6 +61,7 @@ func mergedPlan(t *testing.T) (*Model, *plan.Plan, *fakePRs) {
 	p.Orchestrated, p.Base, p.Status = true, "main", plan.Review
 	p.Merge = &plan.Merge{Branch: "plan/shop", Path: m.taskPath(p, "feature/c")}
 	m.ghPath = "gh"
+	m.cfg.Planner.PullRequests = nil // on, as by default
 	f := &fakePRs{open: map[string]string{}}
 	m.prHooks = f.hooks()
 	return m, p, f
@@ -79,7 +80,10 @@ func planChat(m *Model, p *plan.Plan) string {
 func TestMergedPlanGetsOnePullRequest(t *testing.T) {
 	m, p, f := mergedPlan(t)
 	m.cfg.Planner.Test = "go test ./..."
-	settle(t, m, m.publishPlan(p, "passed"), func() bool { return p.Merge.PR != "" })
+	// Wait for the post too: the URL is saved before it is posted.
+	settle(t, m, m.publishPlan(p, "passed"), func() bool {
+		return p.Merge.PR != "" && strings.Contains(planChat(m, p), "Opened a pull request")
+	})
 	if pushes, created := f.counts(); pushes != 1 || created != 1 {
 		t.Fatalf("pushes %d, created %d", pushes, created)
 	}

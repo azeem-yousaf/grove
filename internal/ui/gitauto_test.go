@@ -101,13 +101,24 @@ func TestGroveRunsRoutineGitForAgents(t *testing.T) {
 		t.Errorf("c = %s", c.Status)
 	}
 
-	// The same turn seen again runs nothing again.
-	n := len(f.requests())
-	if cmd := m.suggestedLines(s, []string{"git add -A", `git commit -m "Add c2"`}); cmd != nil {
+	// The same turn's end seen twice runs its lines once.
+	var ran int
+	m.auto.exec = func(context.Context, string, []string, []string) ([]byte, int, error) {
+		ran++
+		return nil, 0, nil
+	}
+	s.started = time.Now()
+	lines := []string{"git add -A", `git commit -m "Again"`}
+	first := m.suggestedLines(s, lines)
+	if first == nil {
+		t.Fatal("a new turn's lines should run")
+	}
+	if m.suggestedLines(s, lines) != nil {
 		t.Error("lines already handled for this turn ran again")
 	}
-	if len(f.requests()) != n {
-		t.Error("no new turn expected")
+	first()
+	if ran != 2 {
+		t.Errorf("git ran %d times, want 2", ran)
 	}
 }
 
