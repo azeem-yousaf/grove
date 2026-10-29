@@ -115,7 +115,7 @@ type State struct {
 	Deleted   int
 	Last      *Commit  // Recent[0]
 	Recent    []Commit // the newest few commits on HEAD, newest first
-	Truncated bool // too many untracked files; the list is partial
+	Truncated bool     // too many untracked files; the list is partial
 	Err       error
 }
 
