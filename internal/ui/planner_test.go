@@ -3,6 +3,7 @@ package ui
 import (
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,15 +28,32 @@ type driver struct {
 	t       *testing.T
 	m       *Model
 	results chan tea.Msg
+	running sync.WaitGroup
 }
 
+// drive returns a driver for m. Before the test's temporary folders are
+// deleted it waits a while for commands still running, such as a save
+// started by the last message: Windows can't delete a folder being written.
 func drive(t *testing.T, m *Model) *driver {
-	return &driver{t: t, m: m, results: make(chan tea.Msg, 256)}
+	d := &driver{t: t, m: m, results: make(chan tea.Msg, 256)}
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() { d.running.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second): // an agent listener may never return
+		}
+	})
+	return d
 }
 
 func (d *driver) start(c tea.Cmd) {
 	if c != nil {
-		go func() { d.results <- c() }()
+		d.running.Add(1)
+		go func() {
+			defer d.running.Done()
+			d.results <- c()
+		}()
 	}
 }
 
