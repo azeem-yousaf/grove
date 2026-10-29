@@ -207,6 +207,7 @@ func (m *Model) onPlannerReply(s *session, reply string) tea.Cmd {
 	} else {
 		cmds = append(cmds, m.notify("✦ The planner proposed a plan; press P to review it", toastInfo))
 	}
+	cmds = append(cmds, m.alert("The planner proposed a plan: "+p.Title))
 	return tea.Batch(cmds...)
 }
 
@@ -524,7 +525,7 @@ func (m *Model) finishIfSettled(p *plan.Plan) tea.Cmd {
 		text += fmt.Sprintf(", %d failed", failed)
 	}
 	m.plannerNote(roleNote, text+". Review each worktree, then press c on the one to merge into.")
-	return m.notify("✦ "+text, toastOK)
+	return tea.Batch(m.notify("✦ "+text, toastOK), m.alert(text))
 }
 
 func (m *Model) plannerNote(role chatRole, text string) {

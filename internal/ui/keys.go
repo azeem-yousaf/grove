@@ -9,7 +9,7 @@ type keyMap struct {
 	Remove, Git, New, Agent, Undo           key.Binding
 	Mode, Overlaps, Filter, Refresh         key.Binding
 	Overview, Merge, Planner, Group         key.Binding
-	Help, Quit, Back                        key.Binding
+	Help, Actions, Quit, Back               key.Binding
 }
 
 func defaultKeys() keyMap {
@@ -46,6 +46,7 @@ func defaultKeys() keyMap {
 		Filter:     b("/", "filter", "/"),
 		Refresh:    b("r", "refresh", "r"),
 		Help:       b("?", "help", "?"),
+		Actions:    b("ctrl+k", "actions", "ctrl+k"),
 		Quit:       b("q", "quit", "q", "ctrl+c"),
 		Back:       b("esc", "back", "esc"),
 	}
@@ -74,6 +75,7 @@ var helpSections = []helpSection{
 		{"n", "new worktree"},
 		{"d", "remove worktree"},
 		{":", "run a git command"},
+		{"ctrl+k", "search all actions"},
 	}},
 	{"View", [][2]string{
 		{"m", "branch / uncommitted"},

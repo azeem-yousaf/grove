@@ -236,7 +236,9 @@ func (m *Model) wakeGroups() tea.Cmd {
 				if g.wakeups >= m.cfg.Planner.Wakeups() {
 					if !g.paused {
 						g.paused = true
-						cmds = append(cmds, m.notify(fmt.Sprintf("%s: paused waking agents after %d messages in a row; post in the group chat (t) to go on", groupTitle(grp), g.wakeups), toastInfo))
+						cmds = append(cmds,
+							m.notify(fmt.Sprintf("%s: paused waking agents after %d messages in a row; post in the group chat (t) to go on", groupTitle(grp), g.wakeups), toastInfo),
+							m.alert(groupTitle(grp)+": the group chat waits for you"))
 					}
 					continue
 				}

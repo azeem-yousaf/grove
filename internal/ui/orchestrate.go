@@ -304,7 +304,9 @@ func (m *Model) orchestrate() tea.Cmd {
 			return nil
 		}
 		o.paused = true
-		return m.notify(fmt.Sprintf("✦ The planner paused after %d decisions in a row; say something to it (P) or an agent to let it go on", o.turns), toastInfo)
+		return tea.Batch(
+			m.notify(fmt.Sprintf("✦ The planner paused after %d decisions in a row; say something to it (P) or an agent to let it go on", o.turns), toastInfo),
+			m.alert(fmt.Sprintf("The planner paused after %d decisions in a row and waits for you", o.turns)))
 	}
 	if m.planner == nil {
 		dir := m.plannerDir()

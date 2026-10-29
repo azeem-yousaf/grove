@@ -106,6 +106,8 @@ func (m *Model) render() string {
 		return m.overlay(screen, m.reviewModal())
 	case m.showHelp:
 		return m.overlay(screen, m.helpModal())
+	case m.actions != nil:
+		return m.overlay(screen, m.actionsModal())
 	}
 	return screen
 }
@@ -193,8 +195,12 @@ func (m *Model) footer() string {
 		return spread(label+g.input.View(), hint, m.width)
 	}
 
-	var pairs [][2]string
+	// pinned hints always show, after as many of pairs as fit: the way to
+	// every other key matters most when the footer is too narrow for them.
+	var pairs, pinned [][2]string
+	everything := [][2]string{{"ctrl+k", "actions"}, {"?", "help"}}
 	r, ok := m.selected()
+	_, _, onFile := m.selectedFile()
 	switch {
 	case m.confirm != nil:
 		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
@@ -206,20 +212,31 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"esc", "close"}}
 	case m.showHelp:
 		pairs = [][2]string{{"esc", "close"}}
+	case m.actions != nil:
+		pairs = [][2]string{{"↑↓", "select"}, {"enter", "run"}, {"esc", "close"}}
 	case m.overview:
-		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"w", "close"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"w", "close"}, {"r", "refresh"}, {"q", "quit"}}
+		pinned = [][2]string{{"?", "help"}}
 	case m.focus == focusChat:
 		pairs = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"tab", "list"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
 	case m.focus == focusGroup:
 		pairs = [][2]string{{"enter", "post"}, {"@branch", "to one agent"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}}
+	case m.focus == focusDiff && onFile:
+		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", "hunk"}, {"[ ]", "file"}, {"enter", "open"}, {"tab", "list"}}
+		pinned = everything
 	case m.focus == focusDiff:
-		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", "hunk"}, {"[ ]", "file"}, {"enter", "open"}, {"tab", "list"}, {"?", "help"}}
+		// A worktree or group summary: nothing to open, no hunks.
+		pairs = [][2]string{{"↑↓", "scroll"}, {"[ ]", "prev / next"}, {"tab", "list"}}
+		pinned = everything
 	case m.focus == focusList && m.groupSelected():
-		pairs = [][2]string{{"enter", "fold"}, {"t", "group chat"}, {"[ ]", "prev / next"}, {"w", "overview"}, {"n", "new"}, {"P", "planner"}, {"o", "overlaps"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "fold"}, {"t", "group chat"}, {"[ ]", "prev / next"}, {"w", "overview"}, {"n", "new"}, {"P", "planner"}, {"o", "overlaps"}, {"/", "filter"}, {"q", "quit"}}
+		pinned = everything
 	case ok && r.kind == rowFile:
-		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"q", "quit"}}
+		pinned = everything
 	default:
-		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {"w", "overview"}, {":", "git"}, {"n", "new"}, {"c", "merge"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {"w", "overview"}, {":", "git"}, {"n", "new"}, {"c", "merge"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"q", "quit"}}
+		pinned = everything
 	}
 
 	right := ""
@@ -247,6 +264,14 @@ func (m *Model) footer() string {
 	}
 
 	room := m.width - lipgloss.Width(right) - 2
+	tail := ""
+	if len(pinned) > 0 {
+		tail = st.faint.Render("  ") + m.hints(pinned)
+		if lipgloss.Width(" "+tail) > room {
+			tail = ""
+			pairs = append(pinned, pairs...) // too narrow to keep them apart
+		}
+	}
 	left := " "
 	for i, p := range pairs {
 		item := m.hints([][2]string{p})
@@ -254,12 +279,15 @@ func (m *Model) footer() string {
 		if i > 0 {
 			sep = st.faint.Render("  ")
 		}
-		if lipgloss.Width(left+sep+item) > room {
+		if lipgloss.Width(left+sep+item+tail) > room {
 			break
 		}
 		left += sep + item
 	}
-	return spread(left, right, m.width)
+	if left == " " {
+		tail = strings.TrimPrefix(tail, st.faint.Render("  "))
+	}
+	return spread(left+tail, right, m.width)
 }
 
 func (m *Model) hints(pairs [][2]string) string {

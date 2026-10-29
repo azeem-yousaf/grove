@@ -82,6 +82,7 @@ func noAgents(m *Model) {
 	}
 	m.warmAgent = func(agent.Request) {}
 	m.stopAgent = func(string) {}
+	m.sendAlert = func(string, string) error { return nil }
 }
 
 func press(m *Model, keys ...string) {
@@ -104,6 +105,8 @@ func press(m *Model, keys ...string) {
 			msg = tea.KeyPressMsg{Code: tea.KeyRight}
 		case "shift+tab":
 			msg = tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
+		case "ctrl+k":
+			msg = tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl}
 		default:
 			r := []rune(k)[0]
 			msg = tea.KeyPressMsg{Code: r, Text: k}
@@ -115,12 +118,17 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "group-list", "watch", "overview-conflicts", "diff-conflicts"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "group-list", "watch", "overview-conflicts", "diff-conflicts", "actions", "actions-filtered"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
 			case "help":
 				press(m, "?")
+			case "actions":
+				m = fakeModel(t, size[0], size[1])
+				press(m, "ctrl+k")
+			case "actions-filtered":
+				typeText(m, "zzz")
 			case "remove":
 				m = fakeModel(t, size[0], size[1])
 				press(m, "d", "enter", "b")

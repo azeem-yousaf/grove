@@ -37,7 +37,24 @@ type Config struct {
 	Planner Planner `toml:"planner"`
 	// Conflicts configures predicting merge conflicts between worktrees.
 	Conflicts Conflicts `toml:"conflicts"`
+	// Notify configures telling the user about agents while grove's
+	// terminal isn't focused.
+	Notify Notify `toml:"notify"`
 }
+
+// Notify configures notifications sent while grove's terminal isn't
+// focused: an agent finished, needs the user or failed, a plan is ready or
+// done, or worktrees start to conflict.
+type Notify struct {
+	// Desktop shows a desktop notification. Unset means on.
+	Desktop *bool `toml:"desktop"`
+	// Bell also rings the terminal bell, which many terminals show by
+	// flashing the tab or the taskbar button.
+	Bell bool `toml:"bell"`
+}
+
+// DesktopOn is Desktop with the default applied.
+func (n Notify) DesktopOn() bool { return n.Desktop == nil || *n.Desktop }
 
 // Conflicts configures conflict prediction: test-merging worktrees that
 // change the same files to see whether they would really conflict.
@@ -348,6 +365,16 @@ watcher = ""
 [conflicts]
 # Set to false to turn it off, for example in very large repositories.
 predict = true
+
+# While grove's terminal isn't focused, tell you when an agent finishes,
+# needs you or fails, a plan is ready or done, or worktrees start to
+# conflict. Needs a terminal that reports focus (Windows Terminal, iTerm2,
+# WezTerm, kitty, Ghostty and most others).
+[notify]
+# A desktop notification (on Linux this needs notify-send).
+desktop = true
+# Also ring the terminal bell; many terminals flash the tab or taskbar.
+bell = false
 
 # Files open with their system default program (key: enter).
 # Override that per extension here. "default" means the system default.

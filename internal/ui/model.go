@@ -15,6 +15,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/notify"
 	"github.com/azeem-yousaf/grove/internal/open"
 	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/azeem-yousaf/grove/internal/store"
@@ -104,6 +105,10 @@ type Model struct {
 	animating   bool
 	termFocused bool
 
+	alerts       []string // queued for the next desktop notification (alert.go)
+	alertWaiting bool     // an alertFlushMsg is on its way
+	alertsBroken bool     // a notification failed, so grove stopped trying
+
 	lastClickRow int
 	lastClickAt  time.Time
 
@@ -144,6 +149,7 @@ type Model struct {
 	undo          *undoAsk
 	quitAsk       bool
 	conflicts     *conflictReview // the merge review, while open
+	actions       *actionMenu     // the action palette (ctrl+k), while open
 	overview      bool            // the overview of every worktree, in place of both panes
 	ovPath        string          // worktree under the overview's cursor
 	ovStart       int             // first and past-last rows of the overview table on screen
@@ -159,6 +165,7 @@ type Model struct {
 	saveAgent func(string) error
 	saveModel func(agent, model string) error
 	saveWatch func(string) error
+	sendAlert func(title, body string) error
 }
 
 type toastKind uint8
@@ -242,6 +249,7 @@ func New(ctx context.Context, o Options) *Model {
 		saveAgent:    defaultSaveAgent,
 		saveModel:    config.SaveModel,
 		saveWatch:    config.SaveWatcher,
+		sendAlert:    notify.Send,
 	}
 	if o.Repo.CommonDir != "" {
 		m.store = store.Open(o.Repo.CommonDir)
@@ -501,6 +509,12 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case mergeAbortMsg:
 		return m.onMergeAbort(msg)
 
+	case alertFlushMsg:
+		return m.flushAlerts()
+
+	case alertSentMsg:
+		return m.onAlertSent(msg)
+
 	case toastClearMsg:
 		if msg.id == m.toast.id {
 			m.toast = toast{}
@@ -557,6 +571,8 @@ func (m *Model) onPaste(msg tea.PasteMsg) tea.Cmd {
 	switch {
 	case m.quitAsk, m.conflicts != nil, m.confirm != nil, m.picker != nil, m.watchAsk != nil, m.undo != nil:
 		return nil
+	case m.actions != nil:
+		return m.actions.update(m, msg)
 	case m.review != nil:
 		if e := m.review.edit; e != nil {
 			return e.update(msg)
@@ -780,6 +796,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.onUndoKey(msg)
 	case m.review != nil:
 		return m.onReviewKey(msg)
+	case m.actions != nil:
+		return m.onActionsKey(msg)
 	case m.gitCmd.active:
 		return m.onGitPromptKey(msg)
 	case m.focus == focusChat:
@@ -788,9 +806,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.onGroupKey(msg)
 	}
 	if m.showHelp {
-		if key.Matches(msg, k.Help, k.Back, k.Quit) || msg.String() == "enter" {
-			m.showHelp = false
-		}
+		// Any key closes it, as it says; the key does nothing else.
+		m.showHelp = false
 		if msg.String() == "ctrl+c" {
 			return m.quitNow()
 		}
@@ -839,22 +856,16 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Help):
 		m.showHelp = true
 		return nil
+	case key.Matches(msg, k.Actions):
+		return m.openActions()
 	case key.Matches(msg, k.Refresh):
-		m.toastID++
-		return tea.Batch(m.startScan(), m.notify("Refreshing…", toastInfo))
+		return m.refreshNow()
 	case key.Matches(msg, k.Mode):
 		return m.toggleMode()
 	case key.Matches(msg, k.Overlaps):
 		return m.toggleOverlaps()
 	case key.Matches(msg, k.Filter):
-		if m.snap == nil {
-			return nil
-		}
-		m.filterActive = true
-		m.focus = focusList
-		m.filter.SetValue(m.filterQuery)
-		m.filter.CursorEnd()
-		return m.filter.Focus()
+		return m.startFilter()
 	case key.Matches(msg, k.SwitchPane):
 		if m.focus != focusList {
 			m.focus = focusList
@@ -894,20 +905,43 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Planner):
 		return m.openPlanner()
 	case key.Matches(msg, k.Group):
-		if r, ok := m.cursorRow(); ok {
-			if r.kind == rowGroup {
-				g := m.listGroups[r.grp]
-				return m.openGroup(g.plan, g.id)
-			}
-			return m.openGroupChat(m.snap.States[r.wt].Path)
-		}
-		return nil
+		return m.openSelectedGroup()
 	}
 
 	if m.focus == focusDiff {
 		return m.onDiffKey(msg)
 	}
 	return m.onListKey(msg)
+}
+
+func (m *Model) refreshNow() tea.Cmd {
+	m.toastID++
+	return tea.Batch(m.startScan(), m.notify("Refreshing…", toastInfo))
+}
+
+func (m *Model) startFilter() tea.Cmd {
+	if m.snap == nil {
+		return nil
+	}
+	m.filterActive = true
+	m.focus = focusList
+	m.filter.SetValue(m.filterQuery)
+	m.filter.CursorEnd()
+	return m.filter.Focus()
+}
+
+// openSelectedGroup opens the group chat of the selected group header, or
+// of the selected worktree's group.
+func (m *Model) openSelectedGroup() tea.Cmd {
+	r, ok := m.cursorRow()
+	if !ok {
+		return nil
+	}
+	if r.kind == rowGroup {
+		g := m.listGroups[r.grp]
+		return m.openGroup(g.plan, g.id)
+	}
+	return m.openGroupChat(m.snap.States[r.wt].Path)
 }
 
 func (m *Model) onListKey(msg tea.KeyPressMsg) tea.Cmd {
@@ -1167,7 +1201,7 @@ func (m *Model) copyPath() tea.Cmd {
 }
 
 func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
-	if m.confirm != nil || m.creating != nil || m.picker != nil || m.watchAsk != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil {
+	if m.confirm != nil || m.creating != nil || m.picker != nil || m.watchAsk != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil || m.actions != nil {
 		return nil
 	}
 	if m.showHelp {

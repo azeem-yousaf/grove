@@ -37,6 +37,11 @@ from.
   down when it isn't, and refreshes the moment you come back. Background scans
   never take git's index lock, so they can't get in the way of your own git
   commands.
+- **Desktop notifications** while you're in another window: an agent
+  finished, needs you or failed, a plan is ready or done, or two worktrees
+  start to conflict. See *Notifications*.
+- **Every action one search away**: `ctrl+k` lists what you can do with
+  the selection, with each action's key. Type to find one and press `enter`.
 - Light and dark themes chosen from your terminal's background, mouse
   support, a fuzzy file filter (`/`), and a layout that adapts down to 50×12.
 
@@ -155,7 +160,8 @@ use; tick *Remember my choice* (off by default) to stop it asking
   the same time. The worktree's dot in the list shows what its agent is
   doing (spinning while it works, amber `✦` when it needs you), files it
   changed get a `✦`, and a toast tells you when an agent in another
-  worktree finishes or needs you.
+  worktree finishes or needs you. While you're in another window, a
+  desktop notification does (see *Notifications*).
 - **An agent edits only its own worktree.** It runs in that folder, is told
   the paths of the other worktrees and to keep out of them, and:
   - with Claude Code, edits inside the folder are accepted, while shell
@@ -330,6 +336,24 @@ uncommitted changes is only removed after you tick *Discard uncommitted
 changes*, and git double-checks, so a stale screen can't lose work. Locked
 worktrees work the same way. The main worktree can't be removed.
 
+### Notifications
+
+While grove's terminal isn't focused, grove shows a desktop notification
+when an agent finishes, needs you (a command to approve) or fails, when the
+planner proposes a plan or a plan is done, when the planner or a group chat
+pauses to wait for you, and when two worktrees start to conflict.
+Notifications that come within two seconds of each other are combined into
+one. While the terminal is focused, the usual toasts are enough.
+
+- Windows shows a toast (through Windows PowerShell, so it is listed as
+  coming from PowerShell), macOS uses Notification Center, and Linux
+  `notify-send`.
+- It needs a terminal that tells programs when it gains and loses focus:
+  Windows Terminal, iTerm2, WezTerm, kitty, Ghostty and most others do.
+- `[notify] desktop = false` turns them off; `bell = true` also rings the
+  terminal bell, which many terminals show by flashing the tab or taskbar
+  button (and which works over SSH).
+
 ### Keys
 
 | Key | Action |
@@ -352,6 +376,7 @@ worktrees work the same way. The main worktree can't be removed.
 | `u` | undo everything the worktree's agent changed |
 | `d` | remove the worktree (asks first) |
 | `:` | run a git command in the selected worktree |
+| `ctrl+k` | find any action and run it |
 | `m` | toggle branch / uncommitted mode |
 | `o` | show only files changed in several worktrees |
 | `/` | filter files |
@@ -405,6 +430,10 @@ max_agents = 3       # task agents working at once; the rest wait
 max_wakeups = 6      # wake-ups in a row in a group chat before waiting for you
 max_decisions = 20   # turns in a row the planner takes for a plan it watches
 watcher = ""         # who watches a plan's agents: "you" or "planner"; "" = ask before each plan
+
+[notify]             # while grove's terminal isn't focused
+desktop = true       # desktop notifications
+bell = false         # also ring the terminal bell
 
 [open]               # per-extension override for `enter`
 ".log" = "notepad"

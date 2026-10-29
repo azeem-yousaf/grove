@@ -731,16 +731,18 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	} else {
 		cmds = append(cmds, m.onTaskTurn(s, ev))
 	}
-	if !viewing {
-		text, kind := "✦ "+s.name+": "+s.kind.Label()+" finished", toastOK
-		switch {
-		case ev.Err != nil:
-			text, kind = "✦ "+s.name+": "+ev.Err.Error(), toastErr
-		case len(s.pending) > 0:
-			text, kind = "✦ "+s.name+" needs you", toastInfo
-		}
-		cmds = append(cmds, m.notify(text, kind))
+	text, kind := s.name+": "+s.kind.Label()+" finished", toastOK
+	switch {
+	case ev.Err != nil:
+		text, kind = s.name+": "+ev.Err.Error(), toastErr
+	case len(s.pending) > 0:
+		text, kind = s.name+" needs you", toastInfo
 	}
+	if !viewing {
+		cmds = append(cmds, m.notify("✦ "+text, kind))
+	}
+	// Even the chat on screen goes unseen while the terminal isn't focused.
+	cmds = append(cmds, m.alert(text))
 	return tea.Batch(cmds...)
 }
 

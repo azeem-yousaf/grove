@@ -27,7 +27,10 @@ func (m *Model) onConflictsChanged(_, next []git.Prediction) tea.Cmd {
 	if m.snap == nil {
 		return nil
 	}
-	if m.conflictsTold == nil {
+	// What the first run finds was there before grove started, so it
+	// isn't news for the desktop.
+	first := m.conflictsTold == nil
+	if first {
 		m.conflictsTold = map[string][]string{}
 	}
 	states := m.snap.States
@@ -59,6 +62,9 @@ func (m *Model) onConflictsChanged(_, next []git.Prediction) tea.Cmd {
 			m.conflictsTold[key] = files
 			if !isSubset(files, told) {
 				cmds = append(cmds, m.tellConflict(side.self, side.other, pr.Files, side.isA))
+				if side.isA && !first {
+					cmds = append(cmds, m.alert(fmt.Sprintf("%s and %s will conflict in %s", a.Name(), b.Name(), plural(len(files), "file"))))
+				}
 			}
 		}
 	}
