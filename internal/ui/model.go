@@ -190,6 +190,8 @@ type Model struct {
 	saveWatch func(string) error
 	sendAlert func(title, body string) error
 	listPRs   func(ctx context.Context, dir string) (map[string]gh.PR, error)
+	classify  func(s *session, tool, command string) approvalPolicy                       // who may answer a refused command (approvalpolicy.go)
+	grant     func(s *session, tool, command string, pol approvalPolicy, by string) error // lets an approved command through the agent's hook
 }
 
 type toastKind uint8
@@ -280,6 +282,8 @@ func New(ctx context.Context, o Options) *Model {
 		sendAlert:    notify.Send,
 		ghPath:       gh.Path(),
 		listPRs:      gh.List,
+		classify:     stubPolicy,
+		grant:        noGrant,
 	}
 	if o.Repo.CommonDir != "" {
 		m.store = store.Open(o.Repo.CommonDir)

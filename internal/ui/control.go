@@ -2,8 +2,10 @@ package ui
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
@@ -88,7 +90,7 @@ func (m *Model) controlState() control.State {
 				ct.LastReply = tail(lastReply(s), 1500)
 				for _, a := range s.pending {
 					if a.kind == pendingApproval {
-						ct.Approvals = append(ct.Approvals, control.Approval{Tool: a.tool, Command: a.text})
+						ct.Approvals = append(ct.Approvals, control.Approval{ID: a.id, Tool: a.tool, Command: a.text, Reason: a.policy.reason, Planner: !a.policy.userOnly})
 					}
 				}
 			}
@@ -164,26 +166,58 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 	if len(msg.orders) == 0 {
 		return nil
 	}
+	if m.orch.orders == nil {
+		m.orch.orders = map[string]bool{}
+	}
 	var d decisions
+	var results []control.Result
 	for _, o := range msg.orders {
+		if o.ID != "" && m.orch.orders[o.ID] {
+			results = append(results, control.Result{Order: o.ID, Outcome: control.AlreadyApplied, Detail: "this order was carried out before"})
+			continue
+		}
+		if o.ID != "" {
+			m.orch.orders[o.ID] = true
+		}
 		switch o.Action {
 		case control.Message:
-			d.Reply = append(d.Reply, struct{ Branch, Message string }{o.Task, o.Text})
+			d.Reply = append(d.Reply, replyDecision{o.Task, o.Text, o.ID})
 		case control.Approve:
-			d.Approve = append(d.Approve, struct{ Branch, Command string }{o.Task, o.Text})
+			d.Approve = append(d.Approve, answerDecision{o.Item, o.Task, o.Text, "", o.ID})
 		case control.Deny:
-			d.Deny = append(d.Deny, struct{ Branch, Command, Reason string }{o.Task, o.Text, o.Note})
+			d.Deny = append(d.Deny, answerDecision{o.Item, o.Task, o.Text, o.Note, o.ID})
 		case control.Finish:
-			d.Mark = append(d.Mark, struct{ Branch, Status, Note string }{o.Task, "finished", o.Note})
+			d.Mark = append(d.Mark, markDecision{o.Task, "finished", o.Note, o.ID})
 		case control.Fail:
-			d.Mark = append(d.Mark, struct{ Branch, Status, Note string }{o.Task, "failed", o.Note})
+			d.Mark = append(d.Mark, markDecision{o.Task, "failed", o.Note, o.ID})
 		case control.Post:
-			d.Post = append(d.Post, struct{ Plan, Group, To, Message string }{o.Plan, o.Group, o.To, o.Text})
+			d.Post = append(d.Post, postDecision{o.Plan, o.Group, o.To, o.Text, o.ID})
 		case control.Merge:
-			d.Merge = append(d.Merge, struct{ Plan string }{o.Plan})
+			d.Merge = append(d.Merge, planDecision{o.Plan, "", o.ID})
 		case control.Close:
-			d.Close = append(d.Close, struct{ Plan, Note string }{o.Plan, o.Note})
+			d.Close = append(d.Close, planDecision{o.Plan, o.Note, o.ID})
+		default:
+			results = append(results, control.Result{Order: o.ID, Outcome: control.Failed, Detail: "grove doesn't know the action " + o.Action})
 		}
 	}
-	return m.decide(d)
+	cmd, outs := m.decide(d)
+	for _, o := range outs {
+		if o.order != "" {
+			results = append(results, control.Result{Order: o.order, Outcome: o.result, Detail: o.detail})
+		}
+	}
+	dir, ok := m.controlDir()
+	if !ok || len(results) == 0 {
+		return cmd
+	}
+	now := time.Now()
+	for i := range results {
+		results[i].Time = now
+	}
+	return tea.Batch(cmd, func() tea.Msg {
+		if err := control.Record(dir, results); err != nil {
+			return actionMsg{err: fmt.Errorf("couldn't tell the planner what came of its orders: %w", err)}
+		}
+		return nil
+	})
 }

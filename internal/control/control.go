@@ -2,13 +2,16 @@
 // the plan's tasks and agents are doing to state.json, and the planner's
 // tool server (`grove mcp-plan`) reads it and queues orders, such as a
 // message for a task's agent or an answer to its approval request, in
-// orders.jsonl, which grove takes and carries out. Both files live in
-// grove's store, so nothing has to stay running between the two programs.
+// orders.jsonl, which grove takes and carries out, recording what came of
+// each in results.jsonl for the tool to report. The files live in grove's
+// store, so nothing has to stay running between the two programs.
 package control
 
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -49,8 +52,11 @@ type Task struct {
 
 // Approval is a command a task's agent was refused and waits on.
 type Approval struct {
+	ID      string `json:"id"`   // stable for as long as it waits; answers name it
 	Tool    string `json:"tool"` // "Bash" or "PowerShell"
 	Command string `json:"command"`
+	Reason  string `json:"reason,omitempty"` // why only the user may answer it, or what it does
+	Planner bool   `json:"planner"`          // the planner may answer it; otherwise only the user
 }
 
 // Order actions.
@@ -67,15 +73,37 @@ const (
 
 // Order is something the planner asked grove to do.
 type Order struct {
+	ID     string    `json:"id"` // grove records the outcome under it in results.jsonl
 	Time   time.Time `json:"time"`
 	Action string    `json:"action"`
 	Task   string    `json:"task,omitempty"` // its branch
 	Plan   string    `json:"plan,omitempty"` // its ID, for orders about a whole plan
+	Item   string    `json:"item,omitempty"` // the approval's ID, for Approve and Deny
 	Group  string    `json:"group,omitempty"`
 	To     string    `json:"to,omitempty"`
 	Text   string    `json:"text,omitempty"`
 	Note   string    `json:"note,omitempty"`
 }
+
+// Outcomes of an order, or of a decision in a grove-orchestrate block.
+const (
+	Applied        = "applied"
+	AlreadyApplied = "already applied" // the same answer was given before; nothing changed
+	NotFound       = "not found"
+	NeedsUser      = "needs the user" // only the user may answer it; it waits for them
+	Failed         = "failed"
+)
+
+// Result is what came of an order.
+type Result struct {
+	Order   string    `json:"order"`
+	Time    time.Time `json:"time"`
+	Outcome string    `json:"outcome"`
+	Detail  string    `json:"detail,omitempty"`
+}
+
+// keepResults is how many results results.jsonl keeps.
+const keepResults = 200
 
 // Dir is the folder under grove's store.
 func Dir(storeDir string) string { return filepath.Join(storeDir, "control") }
@@ -119,8 +147,19 @@ func ReadState(dir string) (State, error) {
 
 func ordersFile(dir string) string { return filepath.Join(dir, "orders.jsonl") }
 
-// Queue appends an order for grove.
+// NewID makes a random order ID.
+func NewID() string {
+	b := make([]byte, 6)
+	rand.Read(b)
+	return "o-" + hex.EncodeToString(b)
+}
+
+// Queue appends an order for grove, giving it an ID and time when it has
+// none.
 func Queue(dir string, o Order) error {
+	if o.ID == "" {
+		o.ID = NewID()
+	}
 	if o.Time.IsZero() {
 		o.Time = time.Now()
 	}
@@ -175,6 +214,157 @@ func Take(dir string) ([]Order, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func resultsFile(dir string) string { return filepath.Join(dir, "results.jsonl") }
+
+// Record adds what came of orders to results.jsonl, keeping the latest
+// keepResults.
+func Record(dir string, rs []Result) error {
+	if len(rs) == 0 {
+		return nil
+	}
+	unlock, err := lock(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	all := append(readResults(dir), rs...)
+	if len(all) > keepResults {
+		all = all[len(all)-keepResults:]
+	}
+	var b bytes.Buffer
+	for _, r := range all {
+		if r.Time.IsZero() {
+			r.Time = time.Now()
+		}
+		line, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		b.Write(append(line, '\n'))
+	}
+	// Replaced whole, so a tool reading it never sees half a line.
+	tmp := filepath.Join(dir, ".results.tmp")
+	if err := os.WriteFile(tmp, b.Bytes(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, resultsFile(dir))
+}
+
+func readResults(dir string) []Result {
+	b, err := os.ReadFile(resultsFile(dir))
+	if err != nil {
+		return nil
+	}
+	var out []Result
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		var r Result
+		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Order != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// ResultOf finds what came of the order with ID id, once grove has carried
+// it out.
+func ResultOf(dir, id string) (Result, bool) {
+	rs := readResults(dir)
+	for i := len(rs) - 1; i >= 0; i-- {
+		if rs[i].Order == id {
+			return rs[i], true
+		}
+	}
+	return Result{}, false
+}
+
+// Activity is one answer to an approval request, as approvals.jsonl in
+// grove's store records it.
+type Activity struct {
+	Time    time.Time `json:"time"`
+	ID      string    `json:"id"` // the approval's
+	Plan    string    `json:"plan,omitempty"`
+	Task    string    `json:"task,omitempty"` // its branch
+	Command string    `json:"command"`
+	Verdict string    `json:"verdict"` // "approve" or "deny"
+	By      string    `json:"by"`      // "planner", "user" or "grove-policy"
+	Outcome string    `json:"outcome"`
+	Reason  string    `json:"reason,omitempty"`
+}
+
+// LogActivity appends to approvals.jsonl in grove's store.
+func LogActivity(storeDir string, as []Activity) error {
+	if len(as) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		return err
+	}
+	var b bytes.Buffer
+	for _, a := range as {
+		if a.Time.IsZero() {
+			a.Time = time.Now()
+		}
+		line, err := json.Marshal(a)
+		if err != nil {
+			return err
+		}
+		b.Write(append(line, '\n'))
+	}
+	f, err := os.OpenFile(filepath.Join(storeDir, "approvals.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(b.Bytes())
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// NormCommand is a command as answers compare it: runs of white space are
+// one space, typographic quotes are plain ones, and a backslash before a
+// quote or backtick is dropped, since it is easily lost or added when a
+// command is quoted back.
+func NormCommand(cmd string) string {
+	cmd = strings.NewReplacer("‘", "'", "’", "'", "“", `"`, "”", `"`,
+		"\\`", "`", `\"`, `"`, `\'`, "'").Replace(cmd)
+	return strings.Join(strings.Fields(cmd), " ")
+}
+
+// FindApproval finds the approval a task waits on by its ID, else by its
+// command.
+func (t Task) FindApproval(id, command string) (Approval, bool) {
+	for _, a := range t.Approvals {
+		if id != "" && a.ID == id {
+			return a, true
+		}
+	}
+	if id != "" {
+		return Approval{}, false
+	}
+	want := NormCommand(command)
+	for _, a := range t.Approvals {
+		if want != "" && NormCommand(a.Command) == want {
+			return a, true
+		}
+	}
+	return Approval{}, false
+}
+
+// FindApproval finds the task waiting on the approval with ID id.
+func (s State) FindApproval(id string) (Task, bool) {
+	for _, p := range s.Plans {
+		for _, t := range p.Tasks {
+			if _, ok := t.FindApproval(id, ""); ok {
+				return t, true
+			}
+		}
+	}
+	return Task{}, false
 }
 
 // FindPlan looks a plan up by its ID or title.

@@ -6,6 +6,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/azeem-yousaf/grove/internal/mcp"
 )
@@ -24,6 +25,8 @@ func Serve(in io.Reader, out io.Writer, dir, version string) error {
 func server(dir, version string) mcp.Server {
 	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	task := str("The task's branch, as the tasks tool lists it.")
+	id := str("The approval's id, as tasks shows it. Preferred over command.")
+	command := str("The command, as tasks shows it; used when there is no id.")
 	return mcp.Server{
 		Name:    "grove",
 		Version: version,
@@ -46,17 +49,18 @@ func server(dir, version string) mcp.Server {
 				},
 			},
 			{
-				Name:        "approve",
-				Description: "Let a task's agent run a command it is waiting on (see tasks). It may run that exact command from then on without asking.",
-				Schema:      mcp.Object(map[string]any{"task": task, "command": str("The command, exactly as tasks shows it.")}, "task", "command"),
+				Name: "approve",
+				Description: "Let a task's agent run a command it is waiting on (see tasks). It may run that exact command from then on without asking. " +
+					"Only commands tasks marks as yours to answer; the rest wait for the user. You get grove's answer: applied, already applied, not found or needs the user.",
+				Schema: mcp.Object(map[string]any{"task": task, "id": id, "command": command}),
 				Call: func(args json.RawMessage) (string, bool) {
 					return order(dir, Approve, args)
 				},
 			},
 			{
 				Name:        "deny",
-				Description: "Refuse a command a task's agent is waiting on. The reason is passed on to the agent.",
-				Schema:      mcp.Object(map[string]any{"task": task, "command": str("The command, exactly as tasks shows it."), "reason": str("Why, and what to do instead.")}, "task", "command"),
+				Description: "Refuse a command a task's agent is waiting on. The reason is passed on to the agent. You get grove's answer.",
+				Schema:      mcp.Object(map[string]any{"task": task, "id": id, "command": command, "reason": str("Why, and what to do instead.")}),
 				Call: func(args json.RawMessage) (string, bool) {
 					return order(dir, Deny, args)
 				},
@@ -139,7 +143,14 @@ func tasks(dir string) (string, bool) {
 				fmt.Fprintf(&b, "  Error: %s\n", t.Error)
 			}
 			for _, a := range t.Approvals {
-				fmt.Fprintf(&b, "  Waiting for approval (%s): %s\n", a.Tool, a.Command)
+				who := "yours to answer"
+				if !a.Planner {
+					who = "only the user may answer"
+				}
+				if a.Reason != "" {
+					who += ": " + a.Reason
+				}
+				fmt.Fprintf(&b, "  Waiting for approval, id %s (%s, %s): %s\n", a.ID, a.Tool, who, a.Command)
 			}
 			if t.LastReply != "" {
 				fmt.Fprintf(&b, "  Last reply:\n%s\n", indent(t.LastReply, "    "))
@@ -154,10 +165,14 @@ func indent(s, by string) string {
 	return by + strings.ReplaceAll(strings.TrimSpace(s), "\n", "\n"+by)
 }
 
+// Wait is how long approve, deny and message wait for grove to carry the
+// order out.
+var Wait = 5 * time.Second
+
 // order checks an order against the tasks grove last described and
 // queues it.
 func order(dir, action string, args json.RawMessage) (string, bool) {
-	var a struct{ Task, Text, Command, Reason, Status, Note string }
+	var a struct{ Task, ID, Text, Command, Reason, Status, Note string }
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "Invalid arguments: " + err.Error(), true
 	}
@@ -165,11 +180,16 @@ func order(dir, action string, args json.RawMessage) (string, bool) {
 	if err != nil {
 		return "Couldn't read the plans: " + err.Error(), true
 	}
+	if a.Task == "" && a.ID != "" {
+		if t, ok := st.FindApproval(a.ID); ok {
+			a.Task = t.Branch
+		}
+	}
 	t, ok := st.Find(a.Task)
 	if !ok {
 		return fmt.Sprintf("No running task has the branch %q; use the tasks tool to see them.", a.Task), true
 	}
-	o := Order{Action: action, Task: t.Branch}
+	o := Order{ID: NewID(), Action: action, Task: t.Branch}
 	done := ""
 	switch action {
 	case Message:
@@ -179,21 +199,21 @@ func order(dir, action string, args json.RawMessage) (string, bool) {
 		if t.Path == "" {
 			return t.Branch + " hasn't started yet: its worktree is still to be made.", true
 		}
-		o.Text, done = a.Text, "Sent. It reaches the agent as soon as it isn't working; you'll hear when its turn ends."
+		o.Text = a.Text
 	case Approve, Deny:
-		cmd := strings.TrimSpace(a.Command)
-		found := false
-		for _, ap := range t.Approvals {
-			found = found || ap.Command == cmd
+		if a.ID == "" && strings.TrimSpace(a.Command) == "" {
+			return "Say which command: give its id (or the command).", true
 		}
-		if !found {
-			return fmt.Sprintf("%s isn't waiting to run %q; use the tasks tool to see what it waits on.", t.Branch, cmd), true
+		// grove has the last word: the approval may have been answered
+		// since state.json was written, which grove reports as already
+		// applied.
+		ap, found := t.FindApproval(a.ID, a.Command)
+		if found {
+			o.Item, o.Text = ap.ID, ap.Command
+		} else {
+			o.Item, o.Text = a.ID, strings.TrimSpace(a.Command)
 		}
-		o.Text, o.Note = cmd, a.Reason
-		done = "Approved; the agent carries on once every command it waits on has an answer."
-		if action == Deny {
-			done = "Denied; the agent is told why once every command it waits on has an answer."
-		}
+		o.Note = a.Reason
 	case "mark":
 		switch a.Status {
 		case "finished":
@@ -208,7 +228,29 @@ func order(dir, action string, args json.RawMessage) (string, bool) {
 	if err := Queue(dir, o); err != nil {
 		return "Couldn't reach grove: " + err.Error(), true
 	}
-	return done, false
+	if done != "" {
+		return done, false
+	}
+	return awaitResult(dir, o.ID)
+}
+
+// awaitResult waits up to Wait for what came of an order and reports it.
+func awaitResult(dir, id string) (string, bool) {
+	deadline := time.Now().Add(Wait)
+	for {
+		if r, ok := ResultOf(dir, id); ok {
+			text := r.Outcome
+			if r.Detail != "" {
+				text += ": " + r.Detail
+			}
+			text = strings.ToUpper(text[:1]) + text[1:]
+			return text, r.Outcome != Applied && r.Outcome != AlreadyApplied
+		}
+		if time.Now().After(deadline) {
+			return fmt.Sprintf("Still pending: grove hasn't carried out order %s yet (it may be busy or closed). Check with tasks before relying on it.", id), false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // post checks a chat message against the plans grove last described and

@@ -2,9 +2,120 @@ package control
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+func TestNormCommand(t *testing.T) {
+	for _, c := range [][2]string{
+		{"echo \\`date\\`  &&\tmake", "echo `date` && make"},
+		{"git commit -m “Fix it”", `git commit -m "Fix it"`},
+		{`grep \"x\" a`, `grep "x" a`},
+	} {
+		if got, want := NormCommand(c[0]), NormCommand(c[1]); got != want {
+			t.Errorf("NormCommand(%q) = %q, want %q", c[0], got, want)
+		}
+	}
+}
+
+// TestAcknowledgements runs a stand-in for grove that carries out orders
+// the way the UI reports them, and checks what the tools answer.
+func TestAcknowledgements(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteState(dir, State{Plans: []Plan{{ID: "p1", Title: "Shop", Status: "running", Tasks: []Task{
+		{Branch: "feature/api", Status: "working", Path: "/src/api", Approvals: []Approval{
+			{ID: "ab12-1", Tool: "Bash", Command: "echo `date` && make", Planner: true},
+			{ID: "ab12-2", Tool: "Bash", Command: "git push origin main", Reason: "pushes protected branch main"},
+		}},
+	}}}}); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		done := map[string]bool{}
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+			orders, _ := Take(dir)
+			var rs []Result
+			for _, o := range orders {
+				r := Result{Order: o.ID, Outcome: Applied, Detail: "the agent was resumed with it"}
+				switch {
+				case o.Item == "ab12-2" && o.Action == Approve:
+					r.Outcome, r.Detail = NeedsUser, "pushes protected branch main"
+				case o.Item != "ab12-1" && o.Action != Message:
+					r.Outcome, r.Detail = NotFound, "nothing waits on that"
+				case done[o.Item+o.Action]:
+					r.Outcome, r.Detail = AlreadyApplied, "it was already approved by the planner"
+				}
+				done[o.Item+o.Action] = true
+				rs = append(rs, r)
+			}
+			Record(dir, rs)
+		}
+	}()
+
+	for _, c := range []struct {
+		tool   string
+		args   map[string]any
+		want   string
+		failed bool
+	}{
+		{"approve", map[string]any{"id": "ab12-1"}, "Applied: the agent was resumed with it", false},
+		// Matched by command, its backticks escaped and spaced differently.
+		{"approve", map[string]any{"task": "feature/api", "command": "echo \\`date\\`   && make"}, "Already applied", false},
+		{"approve", map[string]any{"task": "feature/api", "id": "ab12-2"}, "Needs the user: pushes protected branch main", true},
+		{"deny", map[string]any{"task": "feature/api", "id": "zz-9"}, "Not found", true},
+		{"message", map[string]any{"task": "feature/api", "text": "Go on."}, "Applied", false},
+	} {
+		got, failed := call(t, dir, c.tool, c.args)
+		if failed != c.failed || !strings.HasPrefix(got, c.want) {
+			t.Errorf("%s %v = %q (failed %v), want %q", c.tool, c.args, got, failed, c.want)
+		}
+	}
+	close(stop)
+	wg.Wait()
+	if rs := readResults(dir); len(rs) != 5 {
+		t.Errorf("results.jsonl holds %d results, want 5", len(rs))
+	}
+}
+
+func TestResultsAreTrimmed(t *testing.T) {
+	dir := t.TempDir()
+	for i := range keepResults + 10 {
+		if err := Record(dir, []Result{{Order: "o" + strconv.Itoa(i), Outcome: Applied}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(readResults(dir)); n != keepResults {
+		t.Errorf("kept %d results", n)
+	}
+}
+
+func TestLogActivity(t *testing.T) {
+	dir := t.TempDir()
+	if err := LogActivity(dir, []Activity{{ID: "ab12-1", Command: "npm test", Verdict: "approve", By: "planner", Outcome: Applied}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := LogActivity(dir, []Activity{{ID: "ab12-2", Command: "git push", Verdict: "approve", By: "grove-policy", Outcome: NeedsUser}}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "approvals.jsonl"))
+	if lines := strings.Split(strings.TrimSpace(string(b)), "\n"); err != nil || len(lines) != 2 || !strings.Contains(lines[1], `"by":"grove-policy"`) {
+		t.Errorf("approvals.jsonl = %q, %v", b, err)
+	}
+}
 
 func call(t *testing.T, dir, tool string, args map[string]any) (string, bool) {
 	t.Helper()
@@ -25,14 +136,16 @@ func TestTools(t *testing.T) {
 	}
 	if err := WriteState(dir, State{Plans: []Plan{{ID: "p1", Title: "Shop", Status: "running", Groups: []string{"checkout"}, Tasks: []Task{
 		{Branch: "feature/api", Title: "API", Status: "working", Path: "/src/api", Busy: true,
-			Approvals: []Approval{{Tool: "Bash", Command: "npm test"}}, LastReply: "Running the tests."},
+			Approvals: []Approval{{ID: "ab12-1", Tool: "Bash", Command: "npm test", Planner: true}, {ID: "ab12-2", Tool: "Bash", Command: "git push origin main", Reason: "pushes protected branch main"}},
+			LastReply: "Running the tests."},
 		{Branch: "feature/ui", Title: "UI", Status: "queued"},
 	}}}}); err != nil {
 		t.Fatal(err)
 	}
 
 	got, failed := call(t, dir, "tasks", nil)
-	for _, want := range []string{`Plan "Shop" (id p1, running)`, "Group chats: checkout", "- feature/api: API · working · agent working · worktree /src/api", "Waiting for approval (Bash): npm test", "    Running the tests.", "- feature/ui: UI · queued"} {
+	for _, want := range []string{`Plan "Shop" (id p1, running)`, "Group chats: checkout", "- feature/api: API · working · agent working · worktree /src/api", "Waiting for approval, id ab12-1 (Bash, yours to answer): npm test",
+		"Waiting for approval, id ab12-2 (Bash, only the user may answer: pushes protected branch main): git push origin main", "    Running the tests.", "- feature/ui: UI · queued"} {
 		if failed || !strings.Contains(got, want) {
 			t.Errorf("tasks is missing %q:\n%s", want, got)
 		}
@@ -46,7 +159,7 @@ func TestTools(t *testing.T) {
 		{"message", map[string]any{"task": "feature/nope", "text": "hi"}, "No running task"},
 		{"message", map[string]any{"task": "feature/ui", "text": "hi"}, "hasn't started yet"},
 		{"message", map[string]any{"task": "feature/api", "text": " "}, "empty"},
-		{"approve", map[string]any{"task": "feature/api", "command": "rm -rf /"}, "isn't waiting to run"},
+		{"approve", map[string]any{"task": "feature/api"}, "Say which command"},
 		{"mark", map[string]any{"task": "feature/api", "status": "great"}, "status must be"},
 		{"post", map[string]any{"text": "hi", "group": "nope"}, "has no group"},
 		{"post", map[string]any{"text": "hi", "to": "feature/nope"}, "has no task"},
@@ -61,18 +174,25 @@ func TestTools(t *testing.T) {
 		t.Fatalf("refused orders were queued: %v", orders)
 	}
 
+	// Nothing carries the orders out here, so the tools that wait say so.
+	defer func(w time.Duration) { Wait = w }(Wait)
+	Wait = 50 * time.Millisecond
 	for _, ok := range []struct {
 		tool string
 		args map[string]any
 	}{
 		{"message", map[string]any{"task": "Feature/API", "text": "Use v2."}},
-		{"deny", map[string]any{"task": "feature/api", "command": "npm test", "reason": "use make test"}},
+		{"deny", map[string]any{"task": "feature/api", "command": "npm  test", "reason": "use make test"}},
 		{"mark", map[string]any{"task": "feature/ui", "status": "failed", "note": "not needed"}},
 		{"post", map[string]any{"text": "Merged; try checkout."}},
 		{"post", map[string]any{"plan": "shop", "group": "checkout", "to": "feature/ui", "text": "Wait for the API."}},
 	} {
-		if got, failed := call(t, dir, ok.tool, ok.args); failed {
+		got, failed := call(t, dir, ok.tool, ok.args)
+		if failed {
 			t.Errorf("%s: %s", ok.tool, got)
+		}
+		if (ok.tool == "message" || ok.tool == "deny") && !strings.Contains(got, "Still pending") {
+			t.Errorf("%s without grove = %q", ok.tool, got)
 		}
 	}
 	orders, err := Take(dir)
@@ -81,7 +201,7 @@ func TestTools(t *testing.T) {
 	}
 	want := []Order{
 		{Action: Message, Task: "feature/api", Text: "Use v2."},
-		{Action: Deny, Task: "feature/api", Text: "npm test", Note: "use make test"},
+		{Action: Deny, Task: "feature/api", Item: "ab12-1", Text: "npm test", Note: "use make test"},
 		{Action: Fail, Task: "feature/ui", Note: "not needed"},
 		{Action: Post, Plan: "p1", Text: "Merged; try checkout."},
 		{Action: Post, Plan: "p1", Group: "checkout", To: "feature/ui", Text: "Wait for the API."},
@@ -90,10 +210,10 @@ func TestTools(t *testing.T) {
 		t.Fatalf("orders = %+v", orders)
 	}
 	for i, o := range orders {
-		if o.Time.IsZero() {
-			t.Errorf("order %d has no time", i)
+		if o.Time.IsZero() || o.ID == "" {
+			t.Errorf("order %d has no time or ID", i)
 		}
-		o.Time = want[i].Time
+		o.Time, o.ID = want[i].Time, ""
 		if o != want[i] {
 			t.Errorf("order %d = %+v, want %+v", i, o, want[i])
 		}

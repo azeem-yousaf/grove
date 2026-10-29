@@ -34,6 +34,8 @@ type savedSession struct {
 	Touched     []string       `json:"touched,omitempty"`
 	Allow       []string       `json:"allow,omitempty"`
 	Pending     []savedPending `json:"pending,omitempty"`
+	Approvals   int            `json:"approvals,omitempty"` // approvals so far, for their IDs
+	Answered    []answerRec    `json:"answered,omitempty"`
 	Notes       []string       `json:"notes,omitempty"` // news from grove not yet given to the agent
 	Cost        string         `json:"cost,omitempty"`
 	Failed      bool           `json:"failed,omitempty"`
@@ -48,8 +50,17 @@ type savedEntry struct {
 
 type savedPending struct {
 	Command bool   `json:"command,omitempty"` // a suggested command rather than an approval
+	ID      string `json:"id,omitempty"`
 	Text    string `json:"text"`
 	Tool    string `json:"tool,omitempty"`
+
+	// What grove's policy said about an approval.
+	UserOnly    bool     `json:"user_only,omitempty"`
+	Reason      string   `json:"reason,omitempty"`
+	Protected   bool     `json:"protected,omitempty"`
+	Destructive bool     `json:"destructive,omitempty"`
+	Refs        []string `json:"refs,omitempty"`
+	Left        bool     `json:"left,omitempty"` // the planner left it for the user
 }
 
 var roleNames = map[chatRole]string{roleUser: "user", roleAgent: "agent", roleTool: "tool", roleNote: "note", roleError: "error"}
@@ -71,7 +82,7 @@ func (s *session) saved() savedSession {
 	out := savedSession{
 		Version: 1, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
 		History: s.history, Checkpoint: s.checkpoint, TurnTree: s.turnTree, Allow: s.allow, Notes: s.notes, Cost: s.cost,
-		Failed: s.failed, Interrupted: s.running, Planner: s.planner,
+		Failed: s.failed, Interrupted: s.running, Planner: s.planner, Approvals: s.seq, Answered: s.answered,
 	}
 	for _, e := range s.entries {
 		out.Entries = append(out.Entries, savedEntry{roleNames[e.role], e.text})
@@ -81,7 +92,9 @@ func (s *session) saved() savedSession {
 	}
 	slices.Sort(out.Touched)
 	for _, p := range s.pending {
-		out.Pending = append(out.Pending, savedPending{Command: p.kind == pendingCommand, Text: p.text, Tool: p.tool})
+		pol := p.policy
+		out.Pending = append(out.Pending, savedPending{Command: p.kind == pendingCommand, ID: p.id, Text: p.text, Tool: p.tool,
+			UserOnly: pol.userOnly, Reason: pol.reason, Protected: pol.protected, Destructive: pol.destructive, Refs: pol.refs, Left: p.left})
 	}
 	return out
 }
@@ -92,7 +105,7 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 	s := &session{
 		kind: v.Kind, path: v.Path, name: v.Name, model: v.Model, id: v.ID,
 		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, cost: v.Cost,
-		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner,
+		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner, seq: v.Approvals, answered: v.Answered,
 	}
 	for _, e := range v.Entries {
 		role := roleNote
@@ -111,7 +124,13 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 		if p.Command {
 			kind = pendingCommand
 		}
-		s.pending = append(s.pending, pendingAction{kind: kind, text: p.Text, tool: p.Tool})
+		a := pendingAction{kind: kind, id: p.ID, text: p.Text, tool: p.Tool, left: p.Left,
+			policy: approvalPolicy{userOnly: p.UserOnly, reason: p.Reason, protected: p.Protected, destructive: p.Destructive, refs: p.Refs}}
+		if kind == pendingApproval && a.id == "" {
+			// Saved by an older grove.
+			a.id = s.nextApprovalID()
+		}
+		s.pending = append(s.pending, a)
 	}
 	if v.Interrupted {
 		s.entries = append(s.entries, chatEntry{roleNote, "grove was closed while the agent was working, so that turn was cut short."})
