@@ -404,7 +404,7 @@ func CommandPrefix(command string) (string, bool) {
 		return "", false
 	}
 	prog := strings.TrimSuffix(strings.ToLower(words[0]), ".exe")
-	if slices.Contains(noPrefix, prog) || strings.HasPrefix(prog, "python") {
+	if slices.Contains(noPrefix, prog) || strings.HasPrefix(prog, "python") || slices.Contains(noPrefixPair, prog+" "+strings.ToLower(words[1])) {
 		return "", false
 	}
 	return words[0] + " " + words[1], true
@@ -417,6 +417,14 @@ var noPrefix = []string{
 	"node", "npx", "pnpx", "bunx", "deno", "bun", "ruby", "perl", "php", "lua", "tsx", "ts-node",
 	"env", "sudo", "doas", "xargs", "eval", "exec", "command", "nohup", "time", "timeout", "nice", "watch",
 	"iex", "invoke-expression", "start-process", "call", "start", "source", ".",
+}
+
+// noPrefixPair are subcommands that run whatever code they are given, like
+// an interpreter.
+var noPrefixPair = []string{
+	"go run", "go generate", "go tool", "npm exec", "npm x", "pnpm dlx", "pnpm exec",
+	"yarn dlx", "yarn exec", "bun x", "cargo run", "dotnet run", "uv run", "pipx run",
+	"poetry run", "deno run",
 }
 
 // CommandParts splits a command line on &&, || and ; into its commands.

@@ -37,6 +37,12 @@ func TestClaudePrefixRule(t *testing.T) {
 		"go $(rm -rf x)":            "",
 		"go `rm`":                   "",
 		"PowerShell.exe -Command x": "",
+		"go run ./cmd/x":            "",
+		"go generate ./...":         "",
+		"npm exec jest":             "",
+		"cargo run --release":       "",
+		"uv run pytest":             "",
+		"Go.exe Run main.go":        "",
 	} {
 		r, _ := ClaudePrefixRule("Bash", c)
 		if r != want {
