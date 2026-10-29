@@ -104,6 +104,7 @@ func allActions(m *Model) []paletteAction {
 		{"Plan tasks with the planner", key(k.Planner), nil, (*Model).openPlanner},
 		{"Review the planner's plan", "", func(m *Model) bool { return m.draft() != nil }, (*Model).openReview},
 		{"Overview of every worktree", key(k.Overview), nil, (*Model).openOverview},
+		{"Token usage", key(k.Usage), nil, (*Model).openUsage},
 		{"Filter files", key(k.Filter), nil, (*Model).startFilter},
 		{"Show only overlaps or conflicts", key(k.Overlaps), nil, (*Model).toggleOverlaps},
 		{"Switch branch / uncommitted mode", key(k.Mode), nil, (*Model).toggleMode},

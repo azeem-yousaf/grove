@@ -64,7 +64,7 @@ func (m *Model) plannerDir() string {
 }
 
 func (m *Model) newPlanner(dir string, k agent.Kind) *session {
-	return &session{kind: k, path: dir, name: "planner", model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true, planner: true}
+	return &session{kind: k, path: dir, name: "planner", model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true, planner: true, uid: newUID(), created: time.Now()}
 }
 
 // openPlanner shows the planner, starting one if needed. Before the next
@@ -204,6 +204,7 @@ func (m *Model) onPlannerReply(s *session, reply string) tea.Cmd {
 		kept = append(kept, old)
 	}
 	m.plans = append([]*plan.Plan{p}, kept...)
+	cmds = append(cmds, m.assignDrafting(s, p))
 	s.entries = append(s.entries, chatEntry{roleNote, fmt.Sprintf("Proposed plan: %s · %s. Press ctrl+o to review and start it.", p.Title, plural(len(p.Tasks), "task"))})
 	cmds = append(cmds, m.savePlan(p))
 	if m.focus == focusChat && m.chatSession() == s {
