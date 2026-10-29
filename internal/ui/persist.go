@@ -14,6 +14,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/store"
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // savedSession is a worktree agent's session as stored on disk, so the
@@ -39,6 +40,24 @@ type savedSession struct {
 	Failed      bool           `json:"failed,omitempty"`
 	Interrupted bool           `json:"interrupted,omitempty"` // saved while the agent was working
 	Planner     bool           `json:"planner,omitempty"`
+
+	// Token usage (version 2). Version 1 sessions get a new UID on load.
+	UID      string       `json:"uid,omitempty"`
+	Created  time.Time    `json:"created,omitzero"`
+	Turns    int          `json:"turns,omitempty"`
+	Drafting []string     `json:"drafting,omitempty"` // the planner's turns with no plan yet
+	Running  *runningTurn `json:"running_turn,omitempty"`
+	// Claude's figures for the session ID above, so the first turn after a
+	// restart is still exact.
+	SessionTotal *usage.Tokens `json:"session_total,omitempty"`
+}
+
+// runningTurn is the turn a session was saved in the middle of, recorded as
+// cut short when it is loaded.
+type runningTurn struct {
+	ID     string        `json:"id"`
+	Attr   turnAttr      `json:"attr"`
+	Tokens *usage.Tokens `json:"tokens,omitempty"` // nil until the agent reported any
 }
 
 type savedEntry struct {
@@ -69,9 +88,21 @@ func (s *session) file() string {
 
 func (s *session) saved() savedSession {
 	out := savedSession{
-		Version: 1, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
+		Version: 2, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
 		History: s.history, Checkpoint: s.checkpoint, TurnTree: s.turnTree, Allow: s.allow, Notes: s.notes, Cost: s.cost,
 		Failed: s.failed, Interrupted: s.running, Planner: s.planner,
+		UID: s.uid, Created: s.created, Turns: s.turns, Drafting: s.drafting,
+	}
+	if !s.sessionTotal.IsZero() {
+		t := s.sessionTotal
+		out.SessionTotal = &t
+	}
+	if s.running && s.turnID != "" {
+		out.Running = &runningTurn{ID: s.turnID, Attr: s.turnAttr}
+		if s.liveSeen {
+			t := s.live
+			out.Running.Tokens = &t
+		}
 	}
 	for _, e := range s.entries {
 		out.Entries = append(out.Entries, savedEntry{roleNames[e.role], e.text})
@@ -93,6 +124,16 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 		kind: v.Kind, path: v.Path, name: v.Name, model: v.Model, id: v.ID,
 		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, cost: v.Cost,
 		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner,
+		uid: v.UID, created: v.Created, turns: v.Turns, drafting: v.Drafting,
+	}
+	if s.uid == "" {
+		s.uid = newUID() // saved before grove counted tokens
+	}
+	if v.SessionTotal != nil {
+		s.sessionTotal = *v.SessionTotal
+	}
+	if v.Interrupted {
+		s.cutShort = v.Running
 	}
 	for _, e := range v.Entries {
 		role := roleNote
@@ -177,6 +218,8 @@ func (m *Model) loadSessions() tea.Cmd {
 
 func (m *Model) onSessionsLoaded(msg sessionsLoadedMsg) tea.Cmd {
 	for _, s := range msg.sessions {
+		// A turn cut short is saved again without it, so it is recorded once.
+		cut := m.recordCutShort(s)
 		// One the user started while loading wins.
 		switch {
 		case s.planner && m.planner == nil:
@@ -186,7 +229,7 @@ func (m *Model) onSessionsLoaded(msg sessionsLoadedMsg) tea.Cmd {
 		default:
 			m.sessions[s.path] = s
 		}
-		if b, err := json.Marshal(s.saved()); err == nil {
+		if b, err := json.Marshal(s.saved()); err == nil && !cut {
 			m.savedJSON[s.file()] = b
 		}
 	}
@@ -273,8 +316,12 @@ func (m *Model) onPersisted(msg persistMsg) tea.Cmd {
 // forgetSession deletes a worktree's agent, its saved conversation and its
 // checkpoint, once the worktree itself is gone.
 func (m *Model) forgetSession(path string) tea.Cmd {
-	for p := range m.sessions {
+	var recorded []tea.Cmd
+	for p, s := range m.sessions {
 		if git.SamePath(p, path) {
+			// Its usage stays in the ledger; a turn still running is
+			// recorded now, since its end will never be seen.
+			recorded = append(recorded, m.abandonTurn(s))
 			delete(m.sessions, p)
 			delete(m.savedJSON, sessionFile(p))
 		}
@@ -287,12 +334,12 @@ func (m *Model) forgetSession(path string) tea.Cmd {
 	}
 	st, common := m.store, m.repo.CommonDir
 	if st == nil {
-		return nil
+		return tea.Batch(recorded...)
 	}
-	return func() tea.Msg {
+	return tea.Batch(append(recorded, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
 		defer cancel()
 		_ = git.DropCheckpoint(ctx, common, path)
 		return persistMsg{err: st.Remove(sessionFile(path))}
-	}
+	})...)
 }

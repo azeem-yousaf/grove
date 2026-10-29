@@ -121,8 +121,20 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "plan-chat", "group-list", "watch", "overview-conflicts", "diff-conflicts", "actions", "actions-filtered", "ship", "commit", "worktree-view", "worktree-search", "revert"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "plan-chat", "group-list", "watch", "overview-conflicts", "diff-conflicts", "actions", "actions-filtered", "ship", "commit", "worktree-view", "worktree-search", "revert", "usage-empty", "usage", "usage-many"} {
 			switch screen {
+			case "usage-empty":
+				m = fakeModel(t, size[0], size[1])
+				withLedger(t, m)
+				press(m, "T")
+			case "usage":
+				m = fakeModel(t, size[0], size[1])
+				fillUsage(t, m, false)
+				press(m, "T")
+			case "usage-many":
+				m = fakeModel(t, size[0], size[1])
+				fillUsage(t, m, true)
+				press(m, "T", "G")
 			case "diff":
 				press(m, "down", "tab")
 			case "help":

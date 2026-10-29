@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // Kind is a supported agent.
@@ -110,6 +112,8 @@ type Request struct {
 	// a grouped task's groupmates' worktrees (Claude). Codex's sandbox
 	// already lets it read anywhere.
 	ReadDirs []string
+
+	SessionTotal usage.Tokens // STUB (feature/usage-tokens)
 }
 
 // ToolServer is an MCP server run over stdio by the agent's CLI.
@@ -138,6 +142,7 @@ const (
 	EvText                     // Text: a complete message
 	EvTool                     // Tool, Detail, Path: the agent is doing something
 	EvDone                     // the turn ended: Denied, Cost, Err
+	EvUsage                    // STUB (feature/usage-tokens): Tokens so far this turn
 )
 
 // Event is something the agent did.
@@ -151,6 +156,11 @@ type Event struct {
 	Denied  []Denial
 	Cost    string // "$0.04" or "12.3k tokens"
 	Err     error
+
+	// STUB (feature/usage-tokens), dropped when that branch is merged.
+	Tokens       usage.Tokens
+	TokenStatus  usage.Status
+	SessionTotal usage.Tokens
 }
 
 // Denial is a tool call the agent wasn't allowed to make.

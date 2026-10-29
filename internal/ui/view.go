@@ -76,6 +76,8 @@ func (m *Model) render() string {
 	}
 	var body string
 	switch {
+	case m.usageView:
+		body = m.usagePane(m.width, paneH)
 	case m.overview && m.snap != nil:
 		body = m.overviewPane(m.width, paneH)
 	case m.narrow() && m.focus != focusList:
@@ -257,8 +259,11 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"enter", "commit"}, {"tab", "files / message"}, {"esc", "cancel"}}
 	case m.revert != nil:
 		pairs = [][2]string{{"enter", "put it back"}, {"esc", "keep it"}}
+	case m.usageView:
+		pairs = [][2]string{{"↑↓", "scroll"}, {"pgup/pgdn", "page"}, {"esc", "close"}, {"q", "quit"}}
+		pinned = [][2]string{{"?", "help"}}
 	case m.overview:
-		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"w", "close"}, {"r", "refresh"}, {"q", "quit"}}
+		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"T", "tokens"}, {"w", "close"}, {"r", "refresh"}, {"q", "quit"}}
 		pinned = [][2]string{{"?", "help"}}
 	case m.focus == focusChat:
 		pairs = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"tab", "list"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}

@@ -4,6 +4,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/open"
 	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/azeem-yousaf/grove/internal/store"
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 type focusArea uint8
@@ -179,6 +181,11 @@ type Model struct {
 	ovEnd          int
 	ovRowsY        int // screen row of the first table row
 	mergeSeq       int
+	usage          *usage.Ledger // token usage by turn (usage.go); nil without a store
+	usageErr       error         // why the ledger couldn't be opened or written
+	usageView      bool          // the token usage screen, in place of both panes
+	usageTop       int           // its first line on screen
+	usageLoaded    time.Time     // when the ledger was last reloaded for it
 
 	// Hooks for the agent, replaced in tests.
 	installed func() []agent.Kind
@@ -283,6 +290,7 @@ func New(ctx context.Context, o Options) *Model {
 	}
 	if o.Repo.CommonDir != "" {
 		m.store = store.Open(o.Repo.CommonDir)
+		m.usage, m.usageErr = usage.Open(filepath.Join(m.store.Dir(), "usage"))
 	}
 	switch o.Config.Theme {
 	case "light":
@@ -450,7 +458,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case clockMsg:
 		m.now = time.Time(msg)
-		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now)}
+		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick()}
 		if m.termFocused {
 			cmds = append(cmds, m.pollPRs(false))
 		}
@@ -905,7 +913,14 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	}
 
+	if m.usageView {
+		return m.onUsageKey(msg)
+	}
+
 	if m.overview {
+		if key.Matches(msg, k.Usage) {
+			return m.openUsage()
+		}
 		return m.onOverviewKey(msg)
 	}
 
@@ -1002,6 +1017,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.openChat()
 	case key.Matches(msg, k.Overview):
 		return m.openOverview()
+	case key.Matches(msg, k.Usage):
+		return m.openUsage()
 	case key.Matches(msg, k.Planner):
 		return m.openPlanner()
 	case key.Matches(msg, k.Group):
@@ -1335,6 +1352,9 @@ func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
 		m.showHelp = false
 		return nil
 	}
+	if m.usageView {
+		return nil
+	}
 	if m.overview {
 		return m.onOverviewClick(msg)
 	}
@@ -1385,6 +1405,15 @@ func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
 }
 
 func (m *Model) onWheel(msg tea.MouseWheelMsg) tea.Cmd {
+	if m.usageView {
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			m.usageTop = max(m.usageTop-3, 0)
+		case tea.MouseWheelDown:
+			m.usageTop += 3
+		}
+		return nil
+	}
 	if m.overview {
 		switch msg.Button {
 		case tea.MouseWheelUp:

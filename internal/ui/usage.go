@@ -1,0 +1,648 @@
+package ui
+
+import (
+	"cmp"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/azeem-yousaf/grove/internal/agent"
+	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/usage"
+)
+
+// Token usage: every turn an agent finishes becomes one record in the usage
+// ledger (m.usage), attributed to the plan, task and group it worked for.
+// The running turn's figure (session.live) is only shown, never stored,
+// except when grove closes mid-turn: then it is saved with the session and
+// recorded as cut short when the session is loaded again.
+
+// turnAttr is what a turn worked for.
+type turnAttr struct {
+	Plan      string `json:"plan,omitempty"`
+	PlanTitle string `json:"plan_title,omitempty"`
+	Task      string `json:"task,omitempty"`
+	Group     string `json:"group,omitempty"`
+}
+
+// usageReload is how often the usage screen rereads the ledger, which other
+// grove windows may have added to.
+const usageReload = 5 * time.Second
+
+// newUID is grove's id for a new agent.
+func newUID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// usageFailed reports a ledger error once, until a different one happens.
+func (m *Model) usageFailed(err error) tea.Cmd {
+	if err == nil {
+		return nil
+	}
+	if m.usageErr != nil && m.usageErr.Error() == err.Error() {
+		return nil
+	}
+	m.usageErr = err
+	return m.notify("Couldn't record token usage: "+err.Error(), toastErr)
+}
+
+// setSessionID notes the agent's own session; the session total it reported
+// belongs to the old one.
+func (s *session) setSessionID(id string) {
+	if id != s.id {
+		s.sessionTotal = usage.Tokens{}
+	}
+	s.id = id
+}
+
+// startTurn numbers s's new turn and notes what it is for.
+func (m *Model) startTurn(s *session) tea.Cmd {
+	s.turns++
+	s.turnID = fmt.Sprintf("%s/%d", s.uid, s.turns)
+	s.live, s.liveSeen = usage.Tokens{}, false
+	planID := ""
+	if s.planner {
+		planID = s.nextPlan
+		if planID == "" {
+			planID = m.watchingPlan()
+		}
+		s.nextPlan = ""
+	}
+	s.turnAttr = m.attrFor(s, planID)
+	return m.registerAgent(s)
+}
+
+// watchingPlan is the plan the planner is watching or merging, if any: the
+// newest.
+func (m *Model) watchingPlan() string {
+	for _, p := range m.plans {
+		if orchestrated(p) {
+			return p.ID
+		}
+	}
+	return ""
+}
+
+// attrFor is what s's turn works for right now. The planner's plan is
+// chosen when its turn starts (planID); a worktree agent's comes from its
+// task, or the plan its worktree is the merge of.
+func (m *Model) attrFor(s *session, planID string) turnAttr {
+	if s.planner {
+		a := turnAttr{Plan: planID}
+		if p := m.planByID(planID); p != nil {
+			a.PlanTitle = p.Title
+		}
+		return a
+	}
+	if p, t := m.taskFor(s.path); t != nil {
+		return turnAttr{Plan: p.ID, PlanTitle: p.Title, Task: t.ID, Group: t.Group}
+	}
+	if p := m.mergedInto(s.path); p != nil {
+		return turnAttr{Plan: p.ID, PlanTitle: p.Title}
+	}
+	return turnAttr{}
+}
+
+// branchOf is the branch s works on, as the latest scan shows it.
+func (m *Model) branchOf(s *session) string {
+	if s.planner {
+		return ""
+	}
+	if i := m.snapIndex(s.path); i >= 0 {
+		return m.snap.States[i].Name()
+	}
+	return s.name
+}
+
+// registerAgent tells the ledger about s on its first turn, and again when
+// its agent, model or branch changed.
+func (m *Model) registerAgent(s *session) tea.Cmd {
+	if m.usage == nil {
+		return nil
+	}
+	branch := m.branchOf(s)
+	key := string(s.kind) + "\x00" + s.model + "\x00" + branch
+	if key == s.agentKey {
+		return nil
+	}
+	created := s.created
+	if created.IsZero() {
+		created = time.Now()
+	}
+	err := m.usage.SetAgent(usage.AgentInfo{
+		ID: s.uid, Kind: string(s.kind), Model: s.model, Path: s.path, Branch: branch,
+		Planner: s.planner, Created: created,
+	})
+	if err != nil {
+		return m.usageFailed(err)
+	}
+	s.agentKey = key
+	return nil
+}
+
+// endTurn records s's turn as ev ended it, once.
+func (m *Model) endTurn(s *session, ev agent.Event) tea.Cmd {
+	id := s.turnID
+	attr := s.turnAttr
+	s.turnID, s.live, s.liveSeen = "", usage.Tokens{}, false
+	if id == "" {
+		return nil
+	}
+	if s.planner {
+		attr = m.attrFor(s, attr.Plan)
+		if attr.Plan == "" {
+			s.drafting = append(s.drafting, id)
+		}
+	} else {
+		attr = m.attrFor(s, "")
+	}
+	return m.record(usage.Turn{
+		ID: id, Agent: s.uid, Time: time.Now(), Tokens: ev.Tokens, Status: ev.TokenStatus, Failed: ev.Err != nil,
+		Plan: attr.Plan, PlanTitle: attr.PlanTitle, Task: attr.Task, Group: attr.Group,
+	})
+}
+
+func (m *Model) record(t usage.Turn) tea.Cmd {
+	if m.usage == nil {
+		return nil
+	}
+	_, err := m.usage.Add(t)
+	return m.usageFailed(err)
+}
+
+// abandonTurn records the turn of an agent that is going away mid-turn
+// (its worktree is being removed), whose end grove won't see.
+func (m *Model) abandonTurn(s *session) tea.Cmd {
+	if !s.running || s.turnID == "" {
+		return nil
+	}
+	status := usage.Unknown
+	if s.liveSeen {
+		status = usage.Partial
+	}
+	return m.endTurn(s, agent.Event{Kind: agent.EvDone, Tokens: s.live, TokenStatus: status})
+}
+
+// recordCutShort records the turn a loaded session was saved in the middle
+// of, reporting whether there was one. The ledger ignores a turn it already
+// has, so loading the same file twice records it once.
+func (m *Model) recordCutShort(s *session) bool {
+	c := s.cutShort
+	if c == nil {
+		return false
+	}
+	s.cutShort = nil
+	t := usage.Turn{
+		ID: c.ID, Agent: s.uid, Time: time.Now(), Status: usage.Unknown,
+		Plan: c.Attr.Plan, PlanTitle: c.Attr.PlanTitle, Task: c.Attr.Task, Group: c.Attr.Group,
+	}
+	if c.Tokens != nil {
+		t.Tokens, t.Status = *c.Tokens, usage.Partial
+	}
+	if s.planner && c.Attr.Plan == "" {
+		s.drafting = append(s.drafting, c.ID)
+	}
+	m.record(t)
+	return true
+}
+
+// assignDrafting gives the planner's turns without a plan since its previous
+// draft to p, the draft they led to. The ledger keeps a turn's first
+// assignment, so a draft that replaces another gets only the turns since.
+// The plan keeps its ID once started.
+func (m *Model) assignDrafting(s *session, p *plan.Plan) tea.Cmd {
+	turns := s.drafting
+	s.drafting = nil
+	if m.usage == nil || len(turns) == 0 {
+		return nil
+	}
+	return m.usageFailed(m.usage.Assign(usage.Assignment{Plan: p.ID, PlanTitle: p.Title, Turns: turns}))
+}
+
+// liveFor adds up the running turns of the agents keep picks.
+func (m *Model) liveFor(keep func(*session) bool) (usage.Tokens, bool) {
+	var t usage.Tokens
+	running := false
+	for _, s := range m.allSessions() {
+		if s.running && s.turnID != "" && keep(s) {
+			t, running = t.Add(s.live), true
+		}
+	}
+	return t, running
+}
+
+// sumOf is the ledger's figure, or nothing without a ledger.
+func (m *Model) sumOf(q func(*usage.Ledger) usage.Sum) usage.Sum {
+	if m.usage == nil {
+		return usage.Sum{}
+	}
+	return q(m.usage)
+}
+
+// notReported is a sum whose turns all came without figures.
+func notReported(s usage.Sum) bool { return s.Turns > 0 && s.Unknown == s.Turns }
+
+// usageText is a short figure: "48.1k tok", "≥48.1k tok" when some turns
+// were cut short, "usage n/a" when the agent reported nothing, and the
+// running turns as "+ 2.3k live". It is "" when there is nothing yet.
+func (m *Model) usageText(sum usage.Sum, live usage.Tokens, running bool) string {
+	st := m.st
+	if sum.Turns == 0 && !running {
+		return ""
+	}
+	var out string
+	switch {
+	case notReported(sum):
+		out = st.faint.Render("usage n/a")
+	case sum.Turns > 0 || !running:
+		n := usage.Compact(sum.Tokens.Total())
+		if !sum.Complete() {
+			n = "≥" + n
+		}
+		out = st.muted.Render(n + " tok")
+	}
+	if running {
+		l := st.accent.Render("+ " + usage.Compact(live.Total()) + " live")
+		if out == "" {
+			return l
+		}
+		return out + " " + l
+	}
+	return out
+}
+
+// agentUsage is s's tokens since it was created, for its chat header.
+func (m *Model) agentUsage(s *session) string {
+	sum := m.sumOf(func(l *usage.Ledger) usage.Sum { return l.Agent(s.uid) })
+	return m.usageText(sum, s.live, s.running && s.turnID != "")
+}
+
+// groupUsage is a plan group's tokens, for its summary.
+func (m *Model) groupUsage(p *plan.Plan, groupID string) string {
+	sum := m.sumOf(func(l *usage.Ledger) usage.Sum { return l.Group(p.ID, groupID) })
+	live, running := m.liveFor(func(s *session) bool {
+		return s.turnAttr.Plan == p.ID && s.turnAttr.Group == groupID
+	})
+	return m.usageText(sum, live, running)
+}
+
+// planUsage is a plan's tokens, the planner's share included.
+func (m *Model) planUsage(p *plan.Plan) string {
+	sum := m.sumOf(func(l *usage.Ledger) usage.Sum { return l.Plan(p.ID) })
+	live, running := m.liveFor(func(s *session) bool { return s.turnAttr.Plan == p.ID })
+	return m.usageText(sum, live, running)
+}
+
+// totalUsage is every agent's tokens.
+func (m *Model) totalUsage() string {
+	sum := m.sumOf(func(l *usage.Ledger) usage.Sum { return l.Total() })
+	live, running := m.liveFor(func(*session) bool { return true })
+	return m.usageText(sum, live, running)
+}
+
+// The usage screen (T).
+
+func (m *Model) openUsage() tea.Cmd {
+	m.usageView, m.usageTop = true, 0
+	return m.reloadUsage()
+}
+
+// reloadUsage rereads the ledger for the usage screen.
+func (m *Model) reloadUsage() tea.Cmd {
+	m.usageLoaded = m.now
+	if m.usage == nil {
+		return nil
+	}
+	return m.usageFailed(m.usage.Reload())
+}
+
+// usageTick rereads the ledger every usageReload while the screen is open.
+func (m *Model) usageTick() tea.Cmd {
+	if !m.usageView || m.now.Sub(m.usageLoaded) < usageReload {
+		return nil
+	}
+	return m.reloadUsage()
+}
+
+func (m *Model) onUsageKey(msg tea.KeyPressMsg) tea.Cmd {
+	_, _, paneH := m.layout()
+	page := max(paneH-6, 1)
+	switch msg.String() {
+	case "ctrl+c":
+		return m.quitNow()
+	case "q":
+		return m.quit()
+	case "esc", "T":
+		m.usageView = false
+	case "up", "k":
+		m.usageTop--
+	case "down", "j":
+		m.usageTop++
+	case "pgup", "ctrl+u":
+		m.usageTop -= page
+	case "pgdown", "ctrl+d", "space":
+		m.usageTop += page
+	case "home", "g":
+		m.usageTop = 0
+	case "end", "G":
+		m.usageTop = 1 << 30
+	case "?":
+		m.showHelp = true
+	}
+	m.usageTop = max(m.usageTop, 0) // usagePane clamps the end
+	return nil
+}
+
+// usageRow is one line of the usage table.
+type usageRow struct {
+	label   string // styled, indented
+	sum     usage.Sum
+	live    usage.Tokens
+	running bool
+	strong  bool // a total, in bold
+	heading bool // a section title, without figures
+}
+
+// usageCol is one figure column of the usage table.
+type usageCol struct {
+	title string
+	width int
+	cell  func(r usageRow) string
+}
+
+func (m *Model) usageCols(width int) []usageCol {
+	st := m.st
+	dash := st.faint.Render("–")
+	num := func(r usageRow, n int64) string {
+		if r.sum.Turns == 0 || notReported(r.sum) {
+			return dash
+		}
+		return st.text.Render(usage.Compact(n))
+	}
+	input := usageCol{"INPUT", 8, func(r usageRow) string { return num(r, r.sum.Tokens.Input) }}
+	cached := usageCol{"CACHED", 8, func(r usageRow) string {
+		if r.sum.Turns > 0 && !notReported(r.sum) && !r.sum.Tokens.HasCache {
+			return st.faint.Render("—")
+		}
+		return num(r, r.sum.Tokens.CacheRead)
+	}}
+	output := usageCol{"OUTPUT", 8, func(r usageRow) string { return num(r, r.sum.Tokens.Output) }}
+	total := usageCol{"TOTAL", 9, func(r usageRow) string {
+		switch {
+		case r.sum.Turns == 0:
+			return dash
+		case notReported(r.sum):
+			return st.faint.Render("n/a")
+		}
+		n := usage.Compact(r.sum.Tokens.Total())
+		if !r.sum.Complete() {
+			n = "≥" + n
+		}
+		if r.strong {
+			return st.bold.Render(n)
+		}
+		return st.text.Render(n)
+	}}
+	turns := usageCol{"TURNS", 6, func(r usageRow) string {
+		if r.sum.Turns == 0 {
+			return dash
+		}
+		return st.muted.Render(fmt.Sprint(r.sum.Turns))
+	}}
+	live := usageCol{"LIVE", 9, func(r usageRow) string {
+		if !r.running {
+			return ""
+		}
+		return st.accent.Render("+" + usage.Compact(r.live.Total()))
+	}}
+	// Most useful first; the table keeps as many as leave the label room.
+	order := []usageCol{total, live, output, turns, input, cached}
+	used := 20
+	var keep []usageCol
+	for _, c := range order {
+		if used+c.width+1 > width {
+			continue
+		}
+		keep = append(keep, c)
+		used += c.width + 1
+	}
+	// Shown in reading order.
+	var out []usageCol
+	for _, title := range []string{"INPUT", "CACHED", "OUTPUT", "TOTAL", "TURNS", "LIVE"} {
+		for _, c := range keep {
+			if c.title == title {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
+// usageRows lays out the usage table: everything, each plan with its
+// groups, tasks and planner, the planner's turns without a plan, and the
+// agents by total.
+func (m *Model) usageRows() []usageRow {
+	st := m.st
+	l := m.usage
+	q := func(f func(*usage.Ledger) usage.Sum) usage.Sum { return m.sumOf(f) }
+	row := func(label string, sum usage.Sum, keep func(*session) bool) usageRow {
+		live, running := m.liveFor(keep)
+		return usageRow{label: label, sum: sum, live: live, running: running}
+	}
+	var rows []usageRow
+	total := row(st.bold.Render("All agents"), q(func(l *usage.Ledger) usage.Sum { return l.Total() }), func(*session) bool { return true })
+	total.strong = true
+	rows = append(rows, total, usageRow{})
+
+	// Plans newest first: those in the ledger, then any whose only usage
+	// is still running.
+	type planRef struct{ id, title string }
+	var plans []planRef
+	seen := map[string]bool{}
+	if l != nil {
+		ps := l.Plans()
+		slices.SortStableFunc(ps, func(a, b usage.PlanSum) int { return b.Last.Compare(a.Last) })
+		for _, ps := range ps {
+			plans = append(plans, planRef{ps.ID, ps.Title})
+			seen[ps.ID] = true
+		}
+	}
+	for _, p := range m.plans {
+		if seen[p.ID] {
+			continue
+		}
+		if _, running := m.liveFor(func(s *session) bool { return s.turnAttr.Plan == p.ID }); running {
+			plans = append([]planRef{{p.ID, p.Title}}, plans...)
+		}
+	}
+	if len(plans) > 0 {
+		rows = append(rows, usageRow{label: st.muted.Render("Plans"), heading: true})
+	}
+	for _, pr := range plans {
+		id := pr.id
+		p := m.planByID(id)
+		title := pr.title
+		status := ""
+		if p != nil {
+			title = p.Title
+			switch p.Status {
+			case plan.Done:
+				status = st.add.Render(" ✓ done")
+			case plan.Review:
+				status = st.warn.Render(" in review")
+			case plan.Draft:
+				status = st.faint.Render(" draft")
+			}
+		} else {
+			status = st.faint.Render(" gone")
+		}
+		r := row(" "+st.bold.Render("▸ "+title)+status, q(func(l *usage.Ledger) usage.Sum { return l.Plan(id) }),
+			func(s *session) bool { return s.turnAttr.Plan == id })
+		r.strong = true
+		rows = append(rows, r)
+		if p != nil {
+			task := func(indent string, t plan.Task) usageRow {
+				tid := t.ID
+				return row(indent+st.text.Render(t.Branch), q(func(l *usage.Ledger) usage.Sum { return l.Task(id, tid) }),
+					func(s *session) bool { return s.turnAttr.Plan == id && s.turnAttr.Task == tid })
+			}
+			for _, g := range p.Groups {
+				gid := g.ID
+				rows = append(rows, row("   "+st.warn.Render(groupIcon(g)+" "+g.Name), q(func(l *usage.Ledger) usage.Sum { return l.Group(id, gid) }),
+					func(s *session) bool { return s.turnAttr.Plan == id && s.turnAttr.Group == gid }))
+				for _, t := range p.Members(gid) {
+					rows = append(rows, task("      ", *t))
+				}
+			}
+			for _, t := range p.Tasks {
+				if t.Group == "" {
+					rows = append(rows, task("   ", t))
+				}
+			}
+		}
+		rows = append(rows, row("   "+st.accent.Render("✦ planner"), q(func(l *usage.Ledger) usage.Sum { return l.PlannerIn(id) }),
+			func(s *session) bool { return s.planner && s.turnAttr.Plan == id }))
+	}
+	unassigned := row(" "+st.accent.Render("✦ planner")+st.muted.Render(", no plan yet"), q(func(l *usage.Ledger) usage.Sum { return l.PlannerIn("") }),
+		func(s *session) bool { return s.planner && s.turnAttr.Plan == "" })
+	if unassigned.sum.Turns > 0 || unassigned.running {
+		rows = append(rows, unassigned)
+	}
+
+	// Agents by total, with the running ones not yet in the ledger.
+	var agents []usageRow
+	inLedger := map[string]bool{}
+	label := func(info usage.AgentInfo) string {
+		name := info.Name()
+		if info.Planner {
+			name = "✦ planner"
+		}
+		out := " " + st.text.Render(name)
+		if info.Kind != "" {
+			out += st.faint.Render(" · " + info.Kind)
+		}
+		if !info.Planner && m.removed(info.Path) {
+			out += st.faint.Render(" (removed)")
+		}
+		return out
+	}
+	if l != nil {
+		as := l.Agents()
+		slices.SortStableFunc(as, func(a, b usage.AgentSum) int {
+			return cmp.Compare(b.Sum.Tokens.Total(), a.Sum.Tokens.Total())
+		})
+		for _, a := range as {
+			uid := a.ID
+			inLedger[uid] = true
+			agents = append(agents, row(label(a.AgentInfo), a.Sum, func(s *session) bool { return s.uid == uid }))
+		}
+	}
+	for _, s := range m.allSessions() {
+		if s.running && s.turnID != "" && !inLedger[s.uid] {
+			uid := s.uid
+			agents = append(agents, row(label(usage.AgentInfo{ID: uid, Kind: string(s.kind), Branch: m.branchOf(s), Path: s.path, Planner: s.planner}),
+				usage.Sum{}, func(s *session) bool { return s.uid == uid }))
+		}
+	}
+	if len(agents) > 0 {
+		rows = append(rows, usageRow{}, usageRow{label: st.muted.Render("Top agents"), heading: true})
+		rows = append(rows, agents...)
+	}
+	return rows
+}
+
+// removed reports whether the worktree at path is gone: not in the latest
+// scan and without an agent.
+func (m *Model) removed(path string) bool {
+	if path == "" || m.snap == nil {
+		return false
+	}
+	return m.snapIndex(path) < 0 && m.sessionFor(path) == nil
+}
+
+// usagePane shows the token usage table in place of both panes.
+func (m *Model) usagePane(w, h int) string {
+	st := m.st
+	inner := w - 2
+	ih := h - 2
+	cols := m.usageCols(inner - 1)
+	labelW := inner - 1
+	for _, c := range cols {
+		labelW -= c.width + 1
+	}
+	line := func(r usageRow) string {
+		out := " " + fitCell(r.label, labelW, 'l')
+		if r.label == "" || r.heading {
+			return out
+		}
+		for _, c := range cols {
+			out += " " + fitCell(c.cell(r), c.width, 'r')
+		}
+		return out
+	}
+	header := " " + strings.Repeat(" ", labelW)
+	for _, c := range cols {
+		header += " " + fitCell(st.faint.Render(c.title), c.width, 'r')
+	}
+
+	var body []string
+	if m.usage == nil {
+		why := "grove has nowhere to keep it: this repository has no git folder"
+		if m.usageErr != nil {
+			why = m.usageErr.Error()
+		}
+		body = append(body, "", " "+st.muted.Render("Token usage isn't being recorded: ")+st.text.Render(why))
+		return m.panel("Token usage", "", "", body, w, h, true)
+	}
+	rows := m.usageRows()
+	legend := []string{"", " " + st.accent.Render("+ live") + st.faint.Render(" turns still running, not counted yet · ") +
+		st.text.Render("≥") + st.faint.Render(" includes turns cut short · ") +
+		st.text.Render("n/a") + st.faint.Render(" not reported · ") +
+		st.text.Render("—") + st.faint.Render(" no cache figure")}
+	if len(rows) <= 3 && rows[0].sum.Turns == 0 && !rows[0].running {
+		legend = append([]string{"", " " + st.muted.Render("No agent has finished a turn yet.")}, legend...)
+	}
+	var lines []string
+	for _, r := range rows {
+		lines = append(lines, line(r))
+	}
+	lines = append(lines, legend...)
+
+	fixed := []string{header}
+	room := max(ih-len(fixed), 1)
+	m.usageTop = min(m.usageTop, max(len(lines)-room, 0))
+	end := min(m.usageTop+room, len(lines))
+	body = append(fixed, lines[m.usageTop:end]...)
+	foot := ""
+	if len(lines) > room {
+		foot = fmt.Sprintf("%d–%d of %d", m.usageTop+1, end, len(lines))
+	}
+	info := st.muted.Render("since grove started counting")
+	return m.panel("Token usage", info, foot, body, w, h, true)
+}
