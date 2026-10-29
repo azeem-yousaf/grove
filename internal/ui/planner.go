@@ -153,6 +153,7 @@ func (m *Model) plannerContext() string {
 	b.WriteString("\n## Writing the plan\n\nWhen you are ready, write the whole plan as one fenced code block whose language is grove-plan, containing JSON:\n\n")
 	b.WriteString("```grove-plan\n" + `{
   "title": "Guest checkout",
+  "test": "npm test",
   "groups": [{"id": "checkout", "name": "Checkout flow", "icon": "🛒"}],
   "tasks": [
     {"id": "api", "title": "Guest checkout API", "branch": "feature/guest-checkout-api", "group": "checkout", "brief": "..."},
@@ -160,6 +161,8 @@ func (m *Model) plannerContext() string {
     {"id": "docs", "title": "Document guest checkout", "branch": "docs/guest-checkout", "brief": "..."}
   ]
 }` + "\n```\n\n")
+	b.WriteString("\"test\" is the command that builds and tests the whole repository once the tasks are merged, run from its root, " +
+		"as the repository's own scripts or CI run it; leave it out if you can't tell. ")
 	b.WriteString("Leave \"group\" out for isolated tasks. A group's \"icon\" is optional: one emoji shown next to its name. Outside the block, say in a sentence or two how you split the work. " +
 		"The user reviews and edits the plan in grove before anything is created; if they ask for changes, write the whole plan again.\n")
 	return b.String()

@@ -47,6 +47,9 @@ type Plan struct {
 	Source  string `json:"source,omitempty"` // where it came from, e.g. "jira:SHOP-12"
 	Base    string `json:"base,omitempty"`   // branch new worktrees start from
 	Agent   string `json:"agent,omitempty"`  // "claude" or "codex", chosen when the plan starts
+	// Test is the command that builds and tests the merged plan, as the
+	// planner proposed it; [planner] test in the config wins over it.
+	Test string `json:"test,omitempty"`
 	// Orchestrated plans are watched by the planner, which approves their
 	// agents' commands, answers their questions and follows their group
 	// chats; otherwise all of that waits for the user.
@@ -67,7 +70,16 @@ type Merge struct {
 	// Fixing is the branch of a task whose agent is resolving a conflict
 	// with the work merged so far; the merge goes on once it is done.
 	Fixing string `json:"fixing,omitempty"`
+	// Tests is how the test command went on the latest merge: TestsPassed,
+	// TestsFailed, or "" before they ran or without a test command.
+	Tests string `json:"tests,omitempty"`
 }
+
+// Merge.Tests values.
+const (
+	TestsPassed = "passed"
+	TestsFailed = "failed"
+)
 
 // Group is a set of tasks whose agents share a group chat and may read
 // each other's worktrees. Tasks outside every group are isolated.
@@ -183,6 +195,7 @@ const Fence = "grove-plan"
 // Plan: the planner proposes, grove fills in IDs, status and times.
 type proposal struct {
 	Title  string `json:"title"`
+	Test   string `json:"test"`
 	Groups []struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -216,6 +229,7 @@ func FromReply(reply, request string, now time.Time) (*Plan, error) {
 	p := &Plan{
 		ID:      NewID(now),
 		Title:   strings.TrimSpace(pr.Title),
+		Test:    strings.TrimSpace(pr.Test),
 		Request: request,
 		Status:  Draft,
 		Created: now,

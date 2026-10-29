@@ -84,6 +84,14 @@ type Planner struct {
 	// their questions and follow their group chats. Empty means ask before
 	// each plan.
 	Watcher string `toml:"watcher"`
+	// Test is the command grove runs in a plan's worktree after the planner
+	// merges the plan, such as "go test ./..." or "npm test", through sh
+	// (cmd.exe on Windows). Empty means the planner's own suggestion for
+	// the plan, if any.
+	Test string `toml:"test"`
+	// TestMinutes is how long the test command may run before it is
+	// stopped. 0 or less means the default, 20.
+	TestMinutes int `toml:"test_minutes"`
 }
 
 // Watchers are the values Planner.Watcher may take.
@@ -106,6 +114,14 @@ func (p Planner) Decisions() int {
 		return 20
 	}
 	return p.MaxDecisions
+}
+
+// TestTimeout is TestMinutes with the default applied.
+func (p Planner) TestTimeout() time.Duration {
+	if p.TestMinutes <= 0 {
+		return 20 * time.Minute
+	}
+	return time.Duration(p.TestMinutes) * time.Minute
 }
 
 // Slots is MaxAgents with the default applied.
@@ -358,6 +374,13 @@ max_decisions = 20
 # to have the planner approve their commands, answer their questions and
 # follow their group chats. Empty = ask before each plan.
 watcher = ""
+# The command grove runs in a plan's worktree after the planner merges the
+# plan, e.g. "go test ./..." or "npm test" (through sh, or cmd.exe on
+# Windows). Failures go back to the tasks' agents before you are asked.
+# Empty = the planner's suggestion for each plan, if it made one.
+test = ""
+# Minutes the test command may run before it is stopped.
+test_minutes = 20
 
 # Files changed in more than one worktree are test-merged in git's object
 # store (nothing on disk changes) to show which would really conflict.

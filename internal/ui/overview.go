@@ -232,6 +232,10 @@ func (m *Model) attentionItems() []attention {
 			}
 		}
 		switch {
+		case p.Status == plan.Review && p.Merge != nil && m.testingPlan[p.ID]:
+			later = append(later, attention{st.accent.Render("●"), fmt.Sprintf("%s is merged into %s; grove is running its tests", p.Title, p.Merge.Branch), p.Merge.Path})
+		case p.Status == plan.Review && p.Merge != nil && p.Merge.Tests == plan.TestsFailed:
+			later = append(later, attention{st.warn.Render("●"), fmt.Sprintf("%s: the merged tests failed; the planner is getting them fixed", p.Title), p.Merge.Path})
 		case p.Status == plan.Review && p.Merge != nil:
 			urgent = append(urgent, attention{st.accent.Bold(true).Render("✦"), fmt.Sprintf("%s is merged into %s and waits for your feedback in its plan chat (t)", p.Title, p.Merge.Branch), p.Merge.Path})
 		case p.Status == plan.Done && p.Merge != nil:

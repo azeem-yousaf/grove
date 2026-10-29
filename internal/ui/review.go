@@ -272,7 +272,19 @@ func (m *Model) reviewModal() string {
 	if r.p.Orchestrated {
 		watch = st.muted.Render("Watched by ") + st.accent.Render("the planner") + st.faint.Render(": it approves safe commands, answers what it can, follows group chats")
 	}
-	lines := []string{head, trunc(sub, inner), trunc(watch, inner), ""}
+	lines := []string{head, trunc(sub, inner), trunc(watch, inner)}
+	if r.p.Orchestrated {
+		test := st.muted.Render("Tests after merging: ") + st.faint.Render("none set; the planner works them out ([planner] test in the config)")
+		if c := m.testCommand(r.p); c != "" {
+			from := " (proposed by the planner)"
+			if strings.TrimSpace(m.cfg.Planner.Test) != "" {
+				from = " (from the config)"
+			}
+			test = st.muted.Render("Tests after merging: ") + st.text.Render(c) + st.faint.Render(from)
+		}
+		lines = append(lines, trunc(test, inner))
+	}
+	lines = append(lines, "")
 
 	var keys [][2]string
 	switch {

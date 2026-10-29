@@ -68,6 +68,12 @@ func (m *Model) controlState() control.State {
 		cp := control.Plan{ID: p.ID, Title: p.Title, Status: string(p.Status)}
 		if mg := p.Merge; mg != nil {
 			cp.Merge = "branch " + mg.Branch + " in " + mg.Path
+			switch {
+			case m.testingPlan[p.ID]:
+				cp.Merge += "; grove is running the tests"
+			case mg.Tests != "":
+				cp.Merge += "; the tests " + mg.Tests
+			}
 			if mg.Fixing != "" {
 				cp.Merge += "; " + mg.Fixing + " is resolving a conflict with it"
 			}

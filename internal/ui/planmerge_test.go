@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -168,5 +169,74 @@ func TestMergeWaitsForEveryTask(t *testing.T) {
 	}
 	if ask := f.requests()[0].Message; !strings.Contains(ask, "grove couldn't merge the plan: some tasks are still working") {
 		t.Errorf("planner request:\n%s", ask)
+	}
+}
+
+func TestFailingTestsGoBackToTheAgents(t *testing.T) {
+	m, p, _ := groupedPlan(t)
+	p.Orchestrated, p.Base = true, "main"
+	m.cfg.Planner.Test = "grep -q blue c.txt"
+	if runtime.GOOS == "windows" {
+		m.cfg.Planner.Test = "findstr blue c.txt"
+	}
+	// Only c merges; a and b failed.
+	for i := range p.Tasks {
+		p.Tasks[i].Status = plan.Failed
+		if p.Tasks[i].Branch == "feature/c" {
+			p.Tasks[i].Status = plan.Finished
+		}
+	}
+	cPath := m.taskPath(p, "feature/c")
+	f := &scripted{reply: func(req agent.Request) string {
+		switch {
+		case req.ReadOnly && strings.Contains(req.Message, "is finished or failed"):
+			return "```grove-orchestrate\n{\"merge\": [{\"plan\": \"p1\"}]}\n```"
+		case req.ReadOnly && strings.Contains(req.Message, "failed with exit code"):
+			return "```grove-orchestrate\n{\"reply\": [{\"branch\": \"feature/c\", \"message\": \"The tests want c.txt to say blue.\"}]}\n```"
+		case req.ReadOnly && strings.Contains(req.Message, "and it passed"):
+			return "```grove-orchestrate\n{\"post\": [{\"plan\": \"p1\", \"message\": \"Merged and tested; have a look.\"}]}\n```"
+		case req.Dir == cPath && strings.Contains(req.Message, "say blue"):
+			os.WriteFile(filepath.Join(cPath, "c.txt"), []byte("blue\n"), 0o644)
+			return "Done: c.txt says blue."
+		}
+		return ""
+	}}
+	m.runAgent = f.run
+	planLog, _ := m.groupLog(p, plan.ChatID)
+	chat := func() string {
+		msgs, _ := planLog.All()
+		var out []string
+		for _, msg := range msgs {
+			out = append(out, msg.From+": "+msg.Text)
+		}
+		return strings.Join(out, "\n")
+	}
+
+	m.finishIfSettled(p)
+	settle(t, m, m.orchestrate(), func() bool {
+		return strings.Contains(chat(), "Merged and tested") && !m.planner.running
+	})
+	if p.Status != plan.Review || p.Merge.Tests != plan.TestsPassed {
+		t.Fatalf("plan = %s, tests %q", p.Status, p.Merge.Tests)
+	}
+	got := chat()
+	for _, want := range []string{"Running the tests: `" + m.cfg.Planner.Test + "`", "failed with exit code 1. The planner is getting the tasks' agents to fix it", "The tests passed."} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan chat is missing %q:\n%s", want, got)
+		}
+	}
+	// The planner heard about the failure with what to do, not the user.
+	var failure string
+	for _, r := range f.requests() {
+		if r.ReadOnly && strings.Contains(r.Message, "failed with exit code") {
+			failure = r.Message
+			break
+		}
+	}
+	if !strings.Contains(failure, "Don't ask the user yet") || !strings.Contains(failure, "Left out, as they failed: feature/a, feature/b") {
+		t.Errorf("planner request about the failure:\n%s", failure)
+	}
+	if got := gitOut(t, p.Merge.Path, "show", "HEAD:c.txt"); got != "blue" {
+		t.Errorf("merged c.txt = %q", got)
 	}
 }

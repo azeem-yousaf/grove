@@ -251,7 +251,8 @@ func (m *Model) queueGroups() {
 			}
 			it := orchItem{kind: orchGroup, plan: p.ID, group: grp.ID}
 			for _, msg := range g.msgs[seen:] {
-				if msg.From == group.Planner {
+				// The planner hears about merges and tests directly.
+				if msg.From == group.Planner || grp.ID == plan.ChatID && msg.From == group.Grove {
 					continue
 				}
 				to := ""
@@ -262,8 +263,6 @@ func (m *Model) queueGroups() {
 				switch {
 				case grp.ID == plan.ChatID && msg.From == group.User:
 					it.urgent = true
-				case grp.ID == plan.ChatID && msg.From == group.Grove:
-					// grove's own news comes to the planner some other way.
 				default:
 					it.urgent = it.urgent || msg.To == "" && msg.From != group.User
 				}

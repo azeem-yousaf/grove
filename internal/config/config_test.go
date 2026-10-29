@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -66,5 +67,14 @@ func TestModelFor(t *testing.T) {
 	ai := AI{Model: "old", CodexModel: "gpt"}
 	if ai.ModelFor("claude") != "old" || ai.ModelFor("codex") != "gpt" {
 		t.Errorf("fallback = %q, %q", ai.ModelFor("claude"), ai.ModelFor("codex"))
+	}
+}
+
+func TestTestTimeout(t *testing.T) {
+	if got := (Planner{}).TestTimeout(); got != 20*time.Minute {
+		t.Errorf("default = %v", got)
+	}
+	if got := (Planner{TestMinutes: 5}).TestTimeout(); got != 5*time.Minute {
+		t.Errorf("5 = %v", got)
 	}
 }

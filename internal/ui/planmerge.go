@@ -14,6 +14,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/shell"
 )
 
 // The watching planner merges a plan for the user once its tasks are
@@ -39,6 +40,13 @@ type planMergedMsg struct {
 	createdNow     bool
 	copyErr        error
 	committedTasks []string // tasks whose uncommitted work was committed first
+}
+
+// testsDoneMsg is how the test command went in a plan's worktree.
+type testsDoneMsg struct {
+	plan, command string
+	report        string // what was merged, for the planner
+	res           shell.Result
 }
 
 // fixStartedMsg is the plan's branch merged into a conflicting task's
@@ -99,6 +107,18 @@ func (m *Model) findPlan(name string) *plan.Plan {
 	return nil
 }
 
+// reviewAsk tells the planner what to do with a merged plan whose tests
+// passed, or that it tests itself.
+const reviewAsk = "Then post a short summary for the user in the plan chat: what was built, how to try it, and anything that needs their attention, " +
+	"and wait for their feedback there. When they ask for changes, reply to the agents of the tasks that own that part, which reopens them, " +
+	"and merge again once they are finished; when the user is happy, close the plan."
+
+// testFixAsk tells the planner what to do when a merged plan's tests fail.
+const testFixAsk = "Don't ask the user yet. Work out which task's work causes each failure: read the output, the merged code and the tasks' diffs, " +
+	"and run the tests yourself in the worktree if that helps, without changing files. Reply to those tasks' agents with what fails and how to see it; " +
+	"once they are finished, merge again, and grove tests again. Tell the user in the plan chat only if the agents can't fix it, " +
+	"or the failure isn't caused by the plan's work (for example it fails on the base branch too, or the test command is wrong)."
+
 // mergeBlocker says why p can't be merged now, or "".
 func (m *Model) mergeBlocker(p *plan.Plan) string {
 	switch {
@@ -106,6 +126,8 @@ func (m *Model) mergeBlocker(p *plan.Plan) string {
 		return "it isn't running"
 	case m.mergingPlan[p.ID]:
 		return "grove is merging it already"
+	case m.testingPlan[p.ID]:
+		return "grove is running its tests; you'll hear how they went"
 	case p.Merge != nil && p.Merge.Fixing != "":
 		return p.Merge.Fixing + "'s agent is still resolving a conflict; grove merges again once it is done"
 	case !p.Settled():
@@ -331,13 +353,14 @@ func (m *Model) onPlanMerged(msg planMergedMsg) tea.Cmd {
 		if len(msg.had) > 0 {
 			ask += " Already merged before: " + strings.Join(msg.had, ", ") + "."
 		}
-		m.queueMerge(p, ask+" Check the result in that worktree: build it and run the tests, without changing files. "+
-			"Then post a short summary for the user in the plan chat: what was built, how to try it, and anything that needs their attention, "+
-			"and wait for their feedback there. When they ask for changes, reply to the agents of the tasks that own that part, which reopens them, "+
-			"and merge again once they are finished; when the user is happy, close the plan.")
-		title := p.Title + " is merged into " + msg.branch + " and waits for your feedback"
-		cmds = append(cmds, m.grovePost(p, text+" Try it there, then tell the planner here what to change."),
-			m.notify("✦ "+title+" (t in its worktree)", toastOK), m.alert(title))
+		p.Merge.Tests = ""
+		if test := m.testCommand(p); test != "" {
+			cmds = append(cmds, m.grovePost(p, text+" Running the tests: `"+test+"`."), m.runPlanTests(p, test, ask))
+			break
+		}
+		m.queueMerge(p, ask+" No test command is set ([planner] test in grove's config, or \"test\" in the plan): "+
+			"work out how this repository is built and tested, and run that in the worktree, without changing files. "+reviewAsk)
+		cmds = append(cmds, m.grovePost(p, text+" Try it there, then tell the planner here what to change."), m.waitForFeedback(p))
 	}
 	return tea.Batch(append(cmds, m.orchestrate())...)
 }
@@ -476,4 +499,74 @@ func (m *Model) queueSettled(p *plan.Plan) {
 		return
 	}
 	m.orch.queue = append(m.orch.queue, orchItem{kind: orchSettled, plan: p.ID, urgent: true})
+}
+
+// testCommand is the command that tests p's merge: the config's, else the
+// one the planner proposed with the plan.
+func (m *Model) testCommand(p *plan.Plan) string {
+	if t := strings.TrimSpace(m.cfg.Planner.Test); t != "" {
+		return t
+	}
+	return strings.TrimSpace(p.Test)
+}
+
+// runPlanTests runs the test command in p's worktree.
+func (m *Model) runPlanTests(p *plan.Plan, command, report string) tea.Cmd {
+	m.testingPlan[p.ID] = true
+	m.plannerNote(roleNote, "Testing "+p.Title+": "+command)
+	dir, id, timeout := p.Merge.Path, p.ID, m.cfg.Planner.TestTimeout()
+	run := func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, timeout)
+		defer cancel()
+		return testsDoneMsg{plan: id, command: command, report: report, res: shell.Run(ctx, dir, command, 8000)}
+	}
+	return tea.Batch(run, m.startAnimating())
+}
+
+func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
+	delete(m.testingPlan, msg.plan)
+	p := m.planByID(msg.plan)
+	if p == nil || p.Merge == nil {
+		return nil
+	}
+	res := msg.res
+	if res.OK() {
+		p.Merge.Tests = plan.TestsPassed
+		m.plannerNote(roleNote, "The tests passed.")
+		m.queueMerge(p, msg.report+" grove ran `"+msg.command+"` in that worktree and it passed. "+
+			"Check anything else the change needs, if you must, without changing files. "+reviewAsk)
+		return tea.Batch(m.savePlan(p), m.grovePost(p, "The tests passed. Try it there, then tell the planner here what to change."),
+			m.waitForFeedback(p), m.orchestrate())
+	}
+	p.Merge.Tests = plan.TestsFailed
+	var why string
+	switch {
+	case res.TimedOut:
+		why = fmt.Sprintf("ran longer than %s and was stopped", m.cfg.Planner.TestTimeout())
+	case res.Err != nil:
+		why = "couldn't run: " + res.Err.Error()
+	default:
+		why = fmt.Sprintf("failed with exit code %d", res.ExitCode)
+	}
+	output := strings.TrimSpace(strings.ToValidUTF8(string(res.Output), "?"))
+	if output == "" {
+		output = "(no output)"
+	}
+	m.plannerNote(roleNote, "The tests "+why+".")
+	m.queueMerge(p, fmt.Sprintf("%s grove ran `%s` in that worktree and it %s. The end of its output:\n\n```\n%s\n```\n\n%s",
+		msg.report, msg.command, why, output, testFixAsk))
+	lines := strings.Split(output, "\n")
+	if len(lines) > 15 {
+		lines = append([]string{"…"}, lines[len(lines)-15:]...)
+	}
+	post := fmt.Sprintf("The tests (`%s`) %s. The planner is getting the tasks' agents to fix it before asking you.\n\n```\n%s\n```",
+		msg.command, why, strings.Join(lines, "\n"))
+	return tea.Batch(m.savePlan(p), m.grovePost(p, post),
+		m.notify(p.Title+": the merged tests failed; the planner is sending the failures to the agents", toastInfo), m.orchestrate())
+}
+
+// waitForFeedback tells the user a merged plan is ready for them.
+func (m *Model) waitForFeedback(p *plan.Plan) tea.Cmd {
+	title := p.Title + " is merged into " + p.Merge.Branch + " and waits for your feedback"
+	return tea.Batch(m.notify("✦ "+title+" (t in its worktree)", toastOK), m.alert(title))
 }

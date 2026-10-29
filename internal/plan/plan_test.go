@@ -107,3 +107,10 @@ func TestSaveLoadList(t *testing.T) {
 		t.Errorf("deleted plan still loads: %v", err)
 	}
 }
+
+func TestFromReplyReadsTheTestCommand(t *testing.T) {
+	p, err := FromReply("```grove-plan\n{\"title\": \"Shop\", \"test\": \" npm test \", \"tasks\": [{\"title\": \"A\", \"branch\": \"feature/a\", \"brief\": \"b\"}]}\n```", "req", time.Now())
+	if err != nil || p.Test != "npm test" {
+		t.Fatalf("test = %q, %v", p.Test, err)
+	}
+}

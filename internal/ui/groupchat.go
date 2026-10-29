@@ -430,7 +430,16 @@ func (m *Model) groupPane(w, h int) string {
 	}
 	lines = append(lines, " "+st.muted.Render("Members: ")+strings.Join(who, st.faint.Render(" · ")))
 	if mg := p.Merge; gc.group == plan.ChatID && mg != nil {
-		lines = append(lines, " "+ansi.Truncate(st.muted.Render("Merged into: ")+st.text.Render(mg.Branch)+st.faint.Render(" · "+mg.Path), inner-1, "…"))
+		tests := ""
+		switch {
+		case m.testingPlan[p.ID]:
+			tests = st.accent.Render(" · testing…")
+		case mg.Tests == plan.TestsPassed:
+			tests = st.add.Render(" · tests passed")
+		case mg.Tests == plan.TestsFailed:
+			tests = st.del.Render(" · tests failed")
+		}
+		lines = append(lines, " "+ansi.Truncate(st.muted.Render("Merged into: ")+st.text.Render(mg.Branch)+tests+st.faint.Render(" · "+mg.Path), inner-1, "…"))
 	}
 	switch {
 	case (state == nil || len(state.msgs) == 0) && gc.group == plan.ChatID:

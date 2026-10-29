@@ -252,9 +252,19 @@ Before you plan, grove asks who will watch the plan's agents while it runs:
   (`plan/guest-checkout`, from the plan's base), so your own branches stay
   untouched. If a branch conflicts with the work merged so far, grove merges
   the plan's branch into that task's worktree, asks its agent to resolve
-  the conflict, commits the merge when it is done and merges again. The
-  planner then checks the result, posts a summary in the plan chat and
-  waits for your feedback there: when you ask for changes it reopens the
+  the conflict, commits the merge when it is done and merges again.
+
+  Then grove runs the plan's test command in the merged worktree: `[planner]
+  test` from the config (for example `go test ./...` or `npm test`, run
+  through `sh`, or `cmd.exe` on Windows), else the command the planner
+  proposed with the plan; the plan review shows which. If the tests fail,
+  you aren't asked yet: grove posts the end of the output in the plan chat,
+  and the planner works out which tasks cause the failures and sends them
+  back to those agents, merging and testing again once they are done. It
+  only turns to you if the agents can't fix it. With no test command, the
+  planner works out how to test the result itself. Once the tests pass, the
+  planner posts a summary in the plan chat and waits for your feedback
+  there: when you ask for changes it reopens the
   tasks that own them and merges again once they are done; when you are
   happy it closes the plan, and you ship the plan's branch from its
   worktree (`s`).
@@ -529,6 +539,8 @@ max_agents = 3       # task agents working at once; the rest wait
 max_wakeups = 6      # wake-ups in a row in a group chat before waiting for you
 max_decisions = 20   # turns in a row the planner takes for a plan it watches
 watcher = ""         # who watches a plan's agents: "you" or "planner"; "" = ask before each plan
+test = ""            # run in a merged plan's worktree, e.g. "go test ./..."; "" = the planner's suggestion
+test_minutes = 20    # how long that may run before it is stopped
 
 [notify]             # while grove's terminal isn't focused
 desktop = true       # desktop notifications
