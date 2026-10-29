@@ -265,8 +265,12 @@ func (m *Model) footer() string {
 	case ok && r.kind == rowFile:
 		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"q", "quit"}}
 		pinned = everything
+	case m.snap != nil && len(m.snap.States) == 1:
+		// Nothing to merge or remove yet: point at making more.
+		pairs = [][2]string{{"n", "new worktree"}, {"P", "planner"}, {"a", "agent"}, {"s", "ship"}, {":", "git"}, {"e", "editor"}, {"f", "folder"}, {"m", "mode"}, {"q", "quit"}}
+		pinned = everything
 	default:
-		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {"w", "overview"}, {":", "git"}, {"n", "new"}, {"c", "merge"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {"s", "ship"}, {"w", "overview"}, {":", "git"}, {"n", "new"}, {"c", "merge"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"q", "quit"}}
 		pinned = everything
 	}
 
@@ -812,12 +816,15 @@ func (m *Model) summaryLines(wt, width int) []string {
 	out = append(out, "", "  "+m.hints(acts))
 
 	if len(m.snap.States) == 1 {
+		out = append(out, "", "  "+st.bold.Render("Work on several features side by side"))
+		intro := "Each worktree is its own folder and branch, so switching between features never needs stashing, " +
+			"and each can have its own agent working on it while you review the others. grove shows what every " +
+			"worktree changed and warns when two touch the same file."
+		for _, l := range strings.Split(ansi.Wrap(intro, max(width-4, 10), ""), "\n") {
+			out = append(out, "  "+st.muted.Render(l))
+		}
 		out = append(out, "",
-			"  "+st.bold.Render("Work on a second feature side by side"),
-			"  "+st.muted.Render("Each worktree is its own folder and branch, so nothing needs stashing."),
-			"",
-			"    "+m.hints([][2]string{{"n", "create a worktree"}}),
-		)
+			"    "+m.hints([][2]string{{"n", "create a worktree"}, {"P", "plan a feature with the planner"}}))
 	}
 	return out
 }

@@ -237,6 +237,11 @@ func (m *Model) listLines(width int) []listLine {
 		}
 	}
 	closeBox()
+	if m.firstRun() {
+		for _, l := range m.getStartedLines(width) {
+			lines = append(lines, listLine{row: -1, text: l})
+		}
+	}
 	if len(m.rows) == 0 {
 		msg := "No worktrees"
 		if m.filtering() {
@@ -252,6 +257,31 @@ func (m *Model) listLines(width int) []listLine {
 		lines = append(lines, listLine{row: -1, text: ""}, listLine{row: -1, text: center(st.muted.Render(msg), width)})
 	}
 	return lines
+}
+
+// firstRun reports whether the repository has just the one worktree and no
+// plans, which is how grove looks to someone trying it for the first time.
+func (m *Model) firstRun() bool {
+	return m.snap != nil && len(m.snap.States) == 1 && len(m.plans) == 0 && !m.filtering()
+}
+
+// getStartedLines are the first steps shown under the only worktree.
+func (m *Model) getStartedLines(width int) []string {
+	st := m.st
+	out := []string{"", "  " + st.bold.Render("Get started")}
+	room := max(width-9, 10)
+	for _, step := range [][3]string{
+		{"n", "New worktree", "a branch in its own folder next to this one, so features never need stashing"},
+		{"P", "Plan a feature", "the planner splits it into tasks, each with its own worktree and agent"},
+		{"a", "Agent", "Claude Code or Codex, working in this worktree"},
+		{"?", "Every key", "or ctrl+k to search every action"},
+	} {
+		out = append(out, "  "+st.key.Render(fmt.Sprintf("%-3s", step[0]))+" "+st.text.Render(step[1]))
+		for _, l := range strings.Split(ansi.Wrap(step[2], room, ""), "\n") {
+			out = append(out, "      "+st.muted.Render(l))
+		}
+	}
+	return out
 }
 
 // treeNote is the hint under an expanded worktree with nothing to list.

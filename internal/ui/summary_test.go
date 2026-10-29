@@ -78,3 +78,30 @@ func TestWorktreeSummary(t *testing.T) {
 		t.Errorf("commit in the base marked ahead:\n%s", out)
 	}
 }
+
+func TestFirstRun(t *testing.T) {
+	m := fakeModel(t, 120, 30)
+	if strings.Contains(plain(m), "Get started") {
+		t.Error("Get started shown with three worktrees")
+	}
+	snap := *m.snap
+	snap.States = snap.States[:1]
+	snap.Overlaps = nil
+	m.Update(scanMsg{seq: m.scanSeq, snap: &snap})
+	out := plain(m)
+	for _, want := range []string{"Get started", "New worktree", "Plan a feature", "Every key"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("first run is missing %q:\n%s", want, out)
+		}
+	}
+	lines := strings.Split(out, "\n")
+	foot := lines[len(lines)-1]
+	if !strings.Contains(foot, "n new worktree") || strings.Contains(foot, "merge") || strings.Contains(foot, "remove") {
+		t.Errorf("first-run footer: %q", foot)
+	}
+	// The steps are text, not rows: the cursor stays on the worktree.
+	press(m, "down", "down")
+	if r, ok := m.selected(); !ok || r.kind != rowTree {
+		t.Errorf("cursor left the worktree: %+v", r)
+	}
+}

@@ -90,6 +90,9 @@ grove --base develop      # compare against a different branch
 grove --plain             # print a text summary instead of the UI
 ```
 
+In a repository with just one worktree, grove lists the first steps under
+it: a new worktree (`n`), a plan (`P`), an agent (`a`) and the keys (`?`).
+
 To start a feature, press `n` and type a branch name:
 
 ```
