@@ -240,7 +240,7 @@ type Runner struct {
 	// Replay limits the history a Codex turn sends; zero means DefaultReplay.
 	Replay Replay
 
-	mu    sync.Mutex
+	mu     sync.Mutex
 	procs  map[string]*claudeProc   // by Request.Dir
 	totals map[string]*usage.Tokens // each Claude session's SessionTotal by session id; nil once unknown
 }
