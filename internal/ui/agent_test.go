@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -565,6 +566,21 @@ func TestChatMarkdown(t *testing.T) {
 	if got := render("**Note** this", 40); got != "Note this" {
 		t.Errorf("bold start = %q", got)
 	}
+	// Italics, but not snake_case or a lone star; links keep a web
+	// address and drop a file path.
+	if got := render("*really* _sure_ my_var_name a * b", 80); got != "really sure my_var_name a * b" {
+		t.Errorf("italics = %q", got)
+	}
+	if got := render("see [the docs](https://x.dev/d) and [login.go](internal/login.go:12)", 80); got != "see the docs (https://x.dev/d) and login.go" {
+		t.Errorf("links = %q", got)
+	}
+	// Quotes keep their bar on every line; task items get a box.
+	if got := render("> a quote that wraps here", 16); got != "│ a quote that\n│ wraps here" {
+		t.Errorf("quote = %q", got)
+	}
+	if got := render("- [ ] todo\n- [x] done", 40); got != "○ todo\n✓ done" {
+		t.Errorf("tasks = %q", got)
+	}
 }
 
 func TestChatTable(t *testing.T) {
@@ -606,9 +622,25 @@ func TestChatTable(t *testing.T) {
 		t.Errorf("narrow table should wrap the cell within its column:\n%s", joined)
 	}
 
+	// A wrapped row is followed by a rule, so rows are told apart.
+	if !slices.Contains(narrow, "─────┼─"+strings.Repeat("─", 15)+"─┼─"+strings.Repeat("─", 5)) {
+		t.Errorf("narrow table should rule between rows:\n%s", strings.Join(narrow, "\n"))
+	}
+
 	// Too narrow for columns: header: value lines.
 	if joined := strings.Join(render(12), "\n"); !strings.Contains(joined, "File: a.go") || !strings.Contains(joined, "Lines: 7") {
 		t.Errorf("tiny table should list header: value:\n%s", joined)
+	}
+
+	// Paths break after a /, and a table that would split a word is
+	// listed instead.
+	paths := "| File | Lines |\n|---|---|\n| internal/auth/login_test.go | 40 |"
+	var lines []string
+	for _, l := range renderChatText(paths, 20, st, st.text) {
+		lines = append(lines, strings.TrimRight(ansi.Strip(l), " "))
+	}
+	if got := strings.Join(lines, "\n"); got != "File: internal/\n  auth/login_test.go\nLines: 40" {
+		t.Errorf("table that won't fit =\n%s", got)
 	}
 }
 

@@ -1067,12 +1067,12 @@ func (m *Model) chatBottom(s *session, width int) []string {
 		}
 	}
 	m.chatInput.SetWidth(max(width-4, 10))
-	hint := [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"ctrl+z", "undo all"}, {"/model", "model"}}
+	hint := [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"tab", "list"}, {"ctrl+z", "undo all"}, {"/model", "model"}}
 	switch {
 	case s.running:
 		hint = [][2]string{{"ctrl+x", "stop"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"/model", "model"}}
 	case s.planner:
-		hint = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+o", "review plan"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"/model", "model"}}
+		hint = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+o", "review plan"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"tab", "list"}, {"/model", "model"}}
 	}
 	out := []string{rule}
 	for i, l := range strings.Split(m.chatInput.View(), "\n") {

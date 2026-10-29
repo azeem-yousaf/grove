@@ -177,10 +177,16 @@ use; tick *Remember my choice* (off by default) to stop it asking
   Code uses whatever `/model` is set to in Claude Code itself. Your choice
   applies from the next message and is remembered for new chats
   (`[ai] claude_model` / `codex_model` in the config).
-- **Typing and copying.** The message box grows as you type or paste and
-  keeps pasted line breaks; `enter` sends, `shift+enter` (or `ctrl+j`)
-  starts a new line. `ctrl+y` copies the agent's last reply as it wrote it,
-  and dragging over the conversation copies those lines as plain text.
+- **Typing and copying.** The message box grows as you type or paste
+  (`ctrl+v`, or your terminal's own paste) and keeps pasted line breaks;
+  `enter` sends, `shift+enter` (or `ctrl+j`) starts a new line. `ctrl+y`
+  copies the agent's last reply as it wrote it, and dragging over the
+  conversation copies those lines as plain text.
+- **Replies are formatted.** Markdown in replies shows as styled text
+  without its marks: bold, italics, code, links, headings, quotes, bullets
+  and task boxes. Tables are laid out in columns that fit the pane; when
+  one is too wide even with its cells wrapped, each row is listed as
+  `Header: value` lines instead.
 - `ctrl+x` stops a working agent. Quitting while agents work asks first.
 - **Conversations are kept.** Each agent's conversation, the commands you
   allowed and its undo checkpoint are saved in the repository's `.git/grove`

@@ -209,7 +209,7 @@ func (m *Model) footer() string {
 	case m.overview:
 		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"w", "close"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
 	case m.focus == focusChat:
-		pairs = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"tab", "list"}, {"ctrl+y", "copy reply"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
+		pairs = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"tab", "list"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
 	case m.focus == focusGroup:
 		pairs = [][2]string{{"enter", "post"}, {"@branch", "to one agent"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}}
 	case m.focus == focusDiff:
