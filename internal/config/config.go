@@ -307,6 +307,13 @@ max_agents = 3
 # other before it waits for you to post in the group chat.
 max_wakeups = 6
 
+# Files changed in more than one worktree are test-merged in git's object
+# store (nothing on disk changes) to show which would really conflict.
+# Needs git 2.38 or later.
+[conflicts]
+# Set to false to turn it off, for example in very large repositories.
+predict = true
+
 # Files open with their system default program (key: enter).
 # Override that per extension here. "default" means the system default.
 [open]
