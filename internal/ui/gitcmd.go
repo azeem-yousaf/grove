@@ -32,6 +32,14 @@ type gitDoneMsg struct {
 	code    int
 	err     error
 	then    func() tea.Cmd // runs afterwards, whatever the outcome
+	after   func(ok bool) tea.Cmd
+}
+
+// termStep is one command of a sequence run with the terminal handed over.
+type termStep struct {
+	prog    string // "" means git
+	args    []string
+	display string
 }
 
 func newGitPrompt() gitPrompt {
@@ -119,19 +127,25 @@ func (m *Model) runInTerminal(name, dir, prog string, args []string, display str
 
 // runInTerminalThen is runInTerminal followed by then, if not nil.
 func (m *Model) runInTerminalThen(name, dir, prog string, args []string, display string, then func() tea.Cmd) tea.Cmd {
+	return m.runSteps(name, dir, display, []termStep{{prog, args, display}}, then, nil)
+}
+
+// runSteps runs steps one after another with the terminal handed over,
+// stopping at the first that fails. display names the whole sequence in
+// the toast afterwards. then runs whatever the outcome; after is told
+// whether every step succeeded.
+func (m *Model) runSteps(name, dir, display string, steps []termStep, then func() tea.Cmd, after func(ok bool) tea.Cmd) tea.Cmd {
 	run := &gitRun{
 		dir:   dir,
-		prog:  prog,
-		args:  args,
+		steps: steps,
 		title: m.st.pillAccent.Render("grove") + " " + m.st.bold.Render(name) + m.st.faint.Render("  "+dir),
-		cmd:   m.st.accent.Render("$ ") + m.st.text.Render(display),
 		st:    m.st,
 	}
 	return tea.Exec(run, func(err error) tea.Msg {
 		if err == nil {
 			err = run.err
 		}
-		return gitDoneMsg{name: name, display: display, code: run.code, err: err, then: then}
+		return gitDoneMsg{name: name, display: display, code: run.code, err: err, then: then, after: after}
 	})
 }
 
@@ -150,6 +164,9 @@ func (m *Model) onGitDone(msg gitDoneMsg) tea.Cmd {
 	if msg.then != nil {
 		cmds = append(cmds, msg.then())
 	}
+	if msg.after != nil {
+		cmds = append(cmds, msg.after(msg.err == nil && msg.code == 0))
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -164,12 +181,12 @@ func shellCommand(line string) (prog string, args []string) {
 	return "sh", []string{"-c", line}
 }
 
-// gitRun is a tea.ExecCommand: it frames a command's output and pauses at
-// the end. prog defaults to git.
+// gitRun is a tea.ExecCommand: it frames the output of its steps, stops at
+// the first that fails, and pauses at the end.
 type gitRun struct {
-	dir, prog, title, cmd string
-	args                  []string
-	st                    styles
+	dir, title string
+	steps      []termStep
+	st         styles
 
 	stdin          io.Reader
 	stdout, stderr io.Writer
@@ -187,16 +204,24 @@ func (g *gitRun) SetStderr(w io.Writer) { g.stderr = w }
 func (g *gitRun) Run() error {
 	out := g.stdout
 	lipgloss.Fprintln(out, "\n"+g.title)
-	lipgloss.Fprintln(out, g.cmd+"\n")
 
-	prog := g.prog
-	if prog == "" {
-		prog = "git"
+	var err error
+	for i, s := range g.steps {
+		if i > 0 {
+			lipgloss.Fprintln(out)
+		}
+		lipgloss.Fprintln(out, g.st.accent.Render("$ ")+g.st.text.Render(s.display)+"\n")
+		prog := s.prog
+		if prog == "" {
+			prog = "git"
+		}
+		c := exec.Command(prog, s.args...)
+		c.Dir = g.dir
+		c.Stdin, c.Stdout, c.Stderr = g.stdin, out, g.stderr
+		if err = c.Run(); err != nil {
+			break
+		}
 	}
-	c := exec.Command(prog, g.args...)
-	c.Dir = g.dir
-	c.Stdin, c.Stdout, c.Stderr = g.stdin, out, g.stderr
-	err := c.Run()
 
 	var exit *exec.ExitError
 	status := g.st.add.Render("✓ done")

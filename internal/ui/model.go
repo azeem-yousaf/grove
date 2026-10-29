@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
+	"github.com/azeem-yousaf/grove/internal/gh"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/notify"
 	"github.com/azeem-yousaf/grove/internal/open"
@@ -148,11 +149,19 @@ type Model struct {
 	orch          orchestrator
 	undo          *undoAsk
 	quitAsk       bool
-	conflicts     *conflictReview // the merge review, while open
-	actions       *actionMenu     // the action palette (ctrl+k), while open
-	overview      bool            // the overview of every worktree, in place of both panes
-	ovPath        string          // worktree under the overview's cursor
-	ovStart       int             // first and past-last rows of the overview table on screen
+	conflicts     *conflictReview  // the merge review, while open
+	actions       *actionMenu      // the action palette (ctrl+k), while open
+	ship          *shipMenu        // the Ship menu (s), while open
+	commit        *commitDialog    // the commit dialog, while open
+	ghPath        string           // the GitHub CLI, "" when not installed
+	prs           map[string]gh.PR // pull requests by branch
+	prErr         error            // why the last PR poll failed
+	prOff         bool             // polling stopped after a failure
+	prPolling     bool
+	lastPRPoll    time.Time
+	overview      bool   // the overview of every worktree, in place of both panes
+	ovPath        string // worktree under the overview's cursor
+	ovStart       int    // first and past-last rows of the overview table on screen
 	ovEnd         int
 	ovRowsY       int // screen row of the first table row
 	mergeSeq      int
@@ -166,6 +175,7 @@ type Model struct {
 	saveModel func(agent, model string) error
 	saveWatch func(string) error
 	sendAlert func(title, body string) error
+	listPRs   func(ctx context.Context, dir string) (map[string]gh.PR, error)
 }
 
 type toastKind uint8
@@ -250,6 +260,8 @@ func New(ctx context.Context, o Options) *Model {
 		saveModel:    config.SaveModel,
 		saveWatch:    config.SaveWatcher,
 		sendAlert:    notify.Send,
+		ghPath:       gh.Path(),
+		listPRs:      gh.List,
 	}
 	if o.Repo.CommonDir != "" {
 		m.store = store.Open(o.Repo.CommonDir)
@@ -406,6 +418,9 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case clockMsg:
 		m.now = time.Time(msg)
 		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now)}
+		if m.termFocused {
+			cmds = append(cmds, m.pollPRs(false))
+		}
 		if m.baseReady && !m.scanning && m.now.Sub(m.lastScan) >= m.refreshInterval() {
 			cmds = append(cmds, m.startScan())
 		}
@@ -509,6 +524,12 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case mergeAbortMsg:
 		return m.onMergeAbort(msg)
 
+	case shipLoadedMsg:
+		return m.onShipLoaded(msg)
+
+	case prsMsg:
+		return m.onPRs(msg)
+
 	case alertFlushMsg:
 		return m.flushAlerts()
 
@@ -573,6 +594,13 @@ func (m *Model) onPaste(msg tea.PasteMsg) tea.Cmd {
 		return nil
 	case m.actions != nil:
 		return m.actions.update(m, msg)
+	case m.ship != nil:
+		return nil
+	case m.commit != nil:
+		if !m.commit.onFiles {
+			m.commit.message, cmd = m.commit.message.Update(msg)
+		}
+		return cmd
 	case m.review != nil:
 		if e := m.review.edit; e != nil {
 			return e.update(msg)
@@ -798,6 +826,10 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.onReviewKey(msg)
 	case m.actions != nil:
 		return m.onActionsKey(msg)
+	case m.ship != nil:
+		return m.onShipKey(msg)
+	case m.commit != nil:
+		return m.onCommitKey(msg)
 	case m.gitCmd.active:
 		return m.onGitPromptKey(msg)
 	case m.focus == focusChat:
@@ -858,6 +890,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case key.Matches(msg, k.Actions):
 		return m.openActions()
+	case key.Matches(msg, k.Ship):
+		return m.openShip()
 	case key.Matches(msg, k.Refresh):
 		return m.refreshNow()
 	case key.Matches(msg, k.Mode):
@@ -1201,7 +1235,7 @@ func (m *Model) copyPath() tea.Cmd {
 }
 
 func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
-	if m.confirm != nil || m.creating != nil || m.picker != nil || m.watchAsk != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil || m.actions != nil {
+	if m.confirm != nil || m.creating != nil || m.picker != nil || m.watchAsk != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil || m.actions != nil || m.ship != nil || m.commit != nil {
 		return nil
 	}
 	if m.showHelp {

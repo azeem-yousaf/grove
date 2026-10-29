@@ -79,6 +79,7 @@ func allActions(m *Model) []paletteAction {
 		{"Open the worktree in " + m.editorName(), key(k.Editor), onWorktree, (*Model).openEditor},
 		{"Show in folder", key(k.Reveal), onWorktree, (*Model).reveal},
 		{"Copy the path", key(k.Copy), onWorktree, (*Model).copyPath},
+		{"Commit, push, pull request or update from base", key(k.Ship), onWorktree, (*Model).openShip},
 		{"Merge other branches into this worktree", key(k.Merge), onWorktree, (*Model).openConflictReview},
 		{"Undo the agent's changes", key(k.Undo), func(m *Model) bool { return m.selectedSession() != nil },
 			func(m *Model) tea.Cmd { return m.askUndo(m.selectedSession()) }},

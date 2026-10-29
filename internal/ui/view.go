@@ -109,6 +109,10 @@ func (m *Model) render() string {
 		return m.overlay(screen, m.helpModal())
 	case m.actions != nil:
 		return m.overlay(screen, m.actionsModal())
+	case m.ship != nil:
+		return m.overlay(screen, m.shipModal())
+	case m.commit != nil:
+		return m.overlay(screen, m.commitModal())
 	}
 	return screen
 }
@@ -237,6 +241,10 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"esc", "close"}}
 	case m.actions != nil:
 		pairs = [][2]string{{"↑↓", "select"}, {"enter", "run"}, {"esc", "close"}}
+	case m.ship != nil:
+		pairs = [][2]string{{"c p r m b", "choose"}, {"esc", "close"}}
+	case m.commit != nil:
+		pairs = [][2]string{{"enter", "commit"}, {"tab", "files / message"}, {"esc", "cancel"}}
 	case m.overview:
 		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"w", "close"}, {"r", "refresh"}, {"q", "quit"}}
 		pinned = [][2]string{{"?", "help"}}
@@ -720,7 +728,7 @@ func (m *Model) summaryLines(wt, width int) []string {
 	if s.Base != "" && s.Branch != s.Base {
 		ab := st.accent.Render(fmt.Sprintf("↑ %d ahead", s.Ahead)) + st.faint.Render("   ") + st.warn.Render(fmt.Sprintf("↓ %d behind", s.Behind))
 		if s.Behind > 0 {
-			ab += st.faint.Render("  · rebase to catch up")
+			ab += st.faint.Render("  · s to catch up")
 		}
 		out = append(out, label("Commits")+ab)
 	}
@@ -746,6 +754,9 @@ func (m *Model) summaryLines(wt, width int) []string {
 		if m.snap.Mode == git.ModeBranch && uncommitted > 0 {
 			out = append(out, label("")+st.warn.Render(fmt.Sprintf("● %d not committed yet", uncommitted)))
 		}
+	}
+	if pr, ok := m.prs[s.Branch]; ok && s.Branch != "" {
+		out = append(out, label("Pull request")+prStyle(st, pr).Render(pr.Label())+st.faint.Render("  "+pr.URL))
 	}
 	out = append(out, m.taskLines(s, width)...)
 	out = append(out, m.agentLines(s, width)...)

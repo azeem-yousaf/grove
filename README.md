@@ -316,6 +316,42 @@ overlaps and last commit, and a list of what needs attention. `enter`
 jumps to the worktree in the list, `a` opens its agent and `c` merges into
 it.
 
+### Finishing a feature
+
+Select a worktree and press `s` to ship it. The menu shows where it stands
+and what you can do:
+
+```
+ Ship feature/auth
+
+ c  Commit                2 files not committed yet
+ p  Push                  2 commits not pushed yet
+ r  Pull request          create one with gh
+ m  Merge origin/main in  1 commit behind
+ b  Rebase onto origin/main  1 commit behind · rewrites this branch's commits
+```
+
+- **Commit** opens a dialog with the message and every file with work not
+  committed yet, all ticked (`tab` to the files, `space` unticks one, `a`
+  ticks or unticks all). The message starts as the last commit message the
+  worktree's agent suggested, else its plan task's title. Only the ticked
+  files are committed; anything else you staged stays staged. During a
+  merge the whole merge is committed, with git's merge message.
+- **Push** pushes the branch, setting its upstream the first time.
+- **Pull request** opens the branch's pull request in the browser, or runs
+  `gh pr create` against the base branch if there is none. It needs the
+  [GitHub CLI](https://cli.github.com), signed in.
+- **Merge** and **Rebase** bring in the base branch, fetching it first when
+  it is a remote branch such as `origin/main`. Work not committed yet is
+  stashed and put back (`--autostash`). If a merge stops on conflicts,
+  press `c` on the worktree to resolve them; a rebase that stops is
+  finished with `: rebase --continue` or `: rebase --abort`.
+
+Each runs in the terminal like the `:` prompt, so hooks, commit signing,
+credential prompts and `gh`'s questions work as usual. A worktree's pull
+request (`#12 open`, `draft`, `merged`, `closed`) shows in the list and in
+its summary, refreshed every minute while `gh` works.
+
 ### Merging worktrees
 
 Select the worktree to merge into and press `c`. grove checks every other
@@ -376,6 +412,7 @@ one. While the terminal is focused, the usual toasts are enough.
 | `P` | the planner: turn requirements into tasks and worktrees |
 | `t` | the group chat of a group, or of a grouped task's worktree |
 | `w` | overview of every worktree |
+| `s` | ship: commit, push, pull request, update from the base branch |
 | `c` | merge other worktrees' branches into this one |
 | `u` | undo everything the worktree's agent changed |
 | `d` | remove the worktree (asks first) |

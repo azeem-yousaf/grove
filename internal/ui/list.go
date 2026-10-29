@@ -350,6 +350,9 @@ func (m *Model) treeLines(wt, width int, selected bool) (string, string) {
 		}
 		meta = append(meta, ab)
 	}
+	if pr, ok := m.prs[s.Branch]; ok && s.Branch != "" {
+		meta = append(meta, prStyle(st, pr).Render(pr.Label()))
+	}
 	if s.Last != nil {
 		meta = append(meta, st.faint.Render(ago(m.now, s.Last.When)))
 	}

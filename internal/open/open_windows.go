@@ -41,6 +41,19 @@ func Reveal(path string) error {
 	return cmd.Process.Release()
 }
 
+// URL opens a web address in the default browser.
+func URL(url string) error {
+	v, err := windows.UTF16PtrFromString("open")
+	if err != nil {
+		return err
+	}
+	u, err := windows.UTF16PtrFromString(url)
+	if err != nil {
+		return err
+	}
+	return windows.ShellExecute(0, v, u, nil, nil, windows.SW_SHOWNORMAL)
+}
+
 func shellExecute(verb, path string) error {
 	v, err := windows.UTF16PtrFromString(verb)
 	if err != nil {

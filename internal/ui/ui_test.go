@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
+	"github.com/azeem-yousaf/grove/internal/gh"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
@@ -83,6 +84,8 @@ func noAgents(m *Model) {
 	m.warmAgent = func(agent.Request) {}
 	m.stopAgent = func(string) {}
 	m.sendAlert = func(string, string) error { return nil }
+	m.ghPath = ""
+	m.listPRs = func(context.Context, string) (map[string]gh.PR, error) { return nil, nil }
 }
 
 func press(m *Model, keys ...string) {
@@ -118,7 +121,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "group-list", "watch", "overview-conflicts", "diff-conflicts", "actions", "actions-filtered"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "group-list", "watch", "overview-conflicts", "diff-conflicts", "actions", "actions-filtered", "ship", "commit"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -129,6 +132,13 @@ func TestRenderFitsScreen(t *testing.T) {
 				press(m, "ctrl+k")
 			case "actions-filtered":
 				typeText(m, "zzz")
+			case "ship":
+				m = fakeModel(t, size[0], size[1])
+				press(m, "s")
+				m.Update(shipLoadedMsg{path: m.ship.path, up: git.Upstream{Name: "origin/" + strings.Repeat("long-branch/", 8), Remote: "origin", Ahead: 3, Behind: 2}})
+			case "commit":
+				press(m, "c")
+				m.commit.message.SetValue(strings.Repeat("A long commit message line. ", 20))
 			case "remove":
 				m = fakeModel(t, size[0], size[1])
 				press(m, "d", "enter", "b")
@@ -657,9 +667,9 @@ func TestGitRun(t *testing.T) {
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	run := func(args ...string) (*gitRun, string) {
+	runSteps := func(steps ...termStep) (*gitRun, string) {
 		var out strings.Builder
-		g := &gitRun{dir: dir, args: args, st: newStyles(true)}
+		g := &gitRun{dir: dir, steps: steps, st: newStyles(true)}
 		g.SetStdin(strings.NewReader("\n"))
 		g.SetStdout(&out)
 		g.SetStderr(&out)
@@ -668,12 +678,24 @@ func TestGitRun(t *testing.T) {
 		}
 		return g, ansi.Strip(out.String())
 	}
+	run := func(args ...string) (*gitRun, string) {
+		return runSteps(termStep{args: args, display: "git " + strings.Join(args, " ")})
+	}
 	g, out := run("status", "--short", "--branch")
 	if g.code != 0 || !strings.Contains(out, "##") || !strings.Contains(out, "press enter") {
 		t.Errorf("status: code %d, output:\n%s", g.code, out)
 	}
 	if g, out := run("not-a-command"); g.code == 0 || !strings.Contains(out, "exit") {
 		t.Errorf("bad command: code %d, output:\n%s", g.code, out)
+	}
+	// Steps stop at the first failure.
+	g, out = runSteps(
+		termStep{args: []string{"status", "--short"}, display: "git status --short"},
+		termStep{args: []string{"not-a-command"}, display: "git not-a-command"},
+		termStep{args: []string{"log"}, display: "git log"},
+	)
+	if g.code == 0 || !strings.Contains(out, "$ git status --short") || !strings.Contains(out, "$ git not-a-command") || strings.Contains(out, "$ git log") {
+		t.Errorf("steps: code %d, output:\n%s", g.code, out)
 	}
 }
 
