@@ -463,21 +463,26 @@ func (m *Model) gitRules(s *session) string {
 // plannerGitRules tell the planner how git is handled, for its briefing.
 func plannerGitRules() string {
 	return "- Task agents run routine git on their own branches themselves (commit, branch, merges between feature branches, pushing their own branch), " +
-		"and grove approves and runs that for them automatically, Codex agents' too. So approval requests you see are for other commands, " +
-		"or for things you may answer. Protected branches (main, master, the default branch and the configured ones) and destructive git operations " +
-		"always go to the user: grove won't let you approve those, so leave them for the user.\n"
+		"and grove approves and runs that for them automatically, Codex agents' too. Every other approval request is yours to answer: " +
+		"approve what the task needs (including git that grove couldn't check on its own, once you've read it and it is safe), deny the rest with what to do instead. " +
+		"Only destructive git (deleting branches, worktrees or the repository, force pushes, discarding work) and changes to protected branches " +
+		"(main, master, the default branch and the configured ones) are the user's; grove won't let you approve those. " +
+		"The work reaches the base branch through the plan's pull request, so no agent needs to touch a protected branch.\n"
 }
 
 // policyOf is a gitpolicy decision as an approval's policy: only the user
-// may answer anything gitpolicy doesn't allow outright, or that changes a
-// protected branch or could lose work.
+// may answer what changes a protected branch, could lose work, or could get
+// around the git guard. Anything
+// else gitpolicy doesn't allow outright (an unusual command, one it can't
+// read) is the watching planner's to judge, so a plan it is in charge of
+// never waits for the user over routine git.
 func policyOf(d gitpolicy.Decision) approvalPolicy {
 	reason := d.Reason
 	if unguardable(d.Protected, d.Destructive, d.Refs) {
 		reason = strings.TrimPrefix(reason+"; "+cantGuard, "; ")
 	}
 	return approvalPolicy{
-		userOnly:    d.Verdict == gitpolicy.User || d.Protected || d.Destructive,
+		userOnly:    d.Verdict == gitpolicy.User && (d.Protected || d.Destructive || d.Bypass),
 		reason:      reason,
 		protected:   d.Protected,
 		destructive: d.Destructive,

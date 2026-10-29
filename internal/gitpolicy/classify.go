@@ -41,6 +41,9 @@ func (c *classifier) run(line string) Decision {
 
 func user(reason string) Decision { return Decision{Verdict: User, Reason: reason} }
 
+// bypass is user for a command that could get around grove's git guard.
+func bypass(reason string) Decision { return Decision{Verdict: User, Reason: reason, Bypass: true} }
+
 // add folds one command's decision into the line's: any User wins, and the
 // first User's reason is the one shown.
 func (c *classifier) add(d Decision) {
@@ -50,6 +53,7 @@ func (c *classifier) add(d Decision) {
 	o := &c.out
 	o.Protected = o.Protected || d.Protected
 	o.Destructive = o.Destructive || d.Destructive
+	o.Bypass = o.Bypass || d.Bypass
 	for _, r := range d.Refs {
 		if !slices.Contains(o.Refs, r) {
 			o.Refs = append(o.Refs, r)
@@ -195,7 +199,7 @@ func (c *classifier) command(cmd *command, pipe []*command) Decision {
 	}
 	for _, r := range cmd.redirs {
 		if strings.Contains(r.op, ">") && !strings.HasSuffix(r.op, "&") && (hasDotGit(r.target.text) || hasDotGit(r.target.raw)) {
-			return user("writes into .git directly")
+			return bypass("writes into .git directly")
 		}
 	}
 	if cmd.complex != "" && commandMentionsGit(cmd) {
@@ -325,7 +329,7 @@ func (c *classifier) command(cmd *command, pipe []*command) Decision {
 		"import-module", "ipmo", "add-type":
 		c.taint = "changes the shell with " + name
 		if commandMentionsGit(cmd) {
-			return user("redefines git with " + name)
+			return bypass("redefines git with " + name)
 		}
 	}
 	if interpreters[name] {
@@ -340,7 +344,7 @@ func (c *classifier) command(cmd *command, pipe []*command) Decision {
 	if !readers[name] {
 		for _, w := range words[1:] {
 			if hasDotGit(w.text) {
-				return user("changes .git directly")
+				return bypass("changes .git directly")
 			}
 		}
 	}

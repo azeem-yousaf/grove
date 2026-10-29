@@ -22,7 +22,7 @@ func (c *classifier) git(cmd *command, words []word, env []string) Decision {
 	}
 	for _, name := range env {
 		if !safeEnv(name) {
-			return user("sets " + name + " for git")
+			return bypass("sets " + name + " for git")
 		}
 	}
 	if c.taint != "" {
@@ -55,9 +55,9 @@ func (c *classifier) git(cmd *command, words []word, env []string) Decision {
 			i++
 			g.dir = resolve(g.dir, words[i].text)
 		case "-c", "--config-env":
-			return user("git " + opt + " changes git's config for one command")
+			return bypass("git " + opt + " changes git's config for one command")
 		case "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--bare", "--list-cmds", "--attr-source":
-			return user("git " + opt + " points git somewhere else")
+			return bypass("git " + opt + " points git somewhere else")
 		case "-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--literal-pathspecs", "--glob-pathspecs",
 			"--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks", "--no-lazy-fetch", "--no-advice":
 			if hasValue {
@@ -99,7 +99,7 @@ func (c *classifier) git(cmd *command, words []word, env []string) Decision {
 		}
 		if len(a) > 7 && strings.HasPrefix("--no-verify", a) {
 			// Skips hooks: the user's own, and the guard's pre-push.
-			return user("git " + g.sub + " --no-verify skips hooks")
+			return bypass("git " + g.sub + " --no-verify skips hooks")
 		}
 	}
 	return rule(g)
@@ -146,10 +146,10 @@ func destructive(reason string, refs ...string) Decision {
 // the git guard must be active there.
 func (g *gitRun) write(reason string, refs ...string) Decision {
 	if g.root == "" {
-		return Decision{Verdict: User, Reason: "changes a repository outside your worktree", Refs: refs}
+		return Decision{Verdict: User, Reason: "changes a repository outside your worktree", Bypass: true, Refs: refs}
 	}
 	if !g.c.sc.Guarded {
-		return Decision{Verdict: User, Reason: "git guard not active in this worktree", Refs: refs}
+		return Decision{Verdict: User, Reason: "git guard not active in this worktree", Bypass: true, Refs: refs}
 	}
 	return Decision{Verdict: Allow, Reason: reason, Refs: refs}
 }
@@ -398,7 +398,7 @@ func ruleCommit(g *gitRun) Decision {
 		return allowRead()
 	}
 	if o.has("-n") {
-		return user("git commit -n skips hooks")
+		return bypass("git commit -n skips hooks")
 	}
 	if o.has("-p", "--patch", "--interactive") {
 		return user("interactive git commit")

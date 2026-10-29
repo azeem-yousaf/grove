@@ -599,3 +599,21 @@ func TestDecisionRefs(t *testing.T) {
 		t.Errorf("got %+v", d)
 	}
 }
+
+func TestBypassIsMarked(t *testing.T) {
+	wt := t.TempDir()
+	sc := Scope{Worktree: wt, Protected: []string{"main"}, Guarded: true}
+	lk := fakeLookup{branches: map[string]string{wt: "feature/x"}}
+	for cmd, want := range map[string]bool{
+		"git -c core.hooksPath=/dev/null commit -m x": true,
+		"git commit --no-verify -m x":                 true,
+		"GIT_DIR=/other git commit -m x":              true,
+		"git status && git commit -n -m x":            true,
+		"git frobnicate":                              false,
+		"git commit -m x":                             false,
+	} {
+		if d := Classify(cmd, Bash, sc, lk); d.Bypass != want {
+			t.Errorf("%s: %+v, want Bypass %v", cmd, d, want)
+		}
+	}
+}

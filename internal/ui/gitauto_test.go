@@ -357,3 +357,21 @@ func TestGitBriefings(t *testing.T) {
 		t.Errorf("planner briefing:\n%s", ctx)
 	}
 }
+
+func TestPlannerMayApproveAllButDestructive(t *testing.T) {
+	for _, c := range []struct {
+		d        gitpolicy.Decision
+		userOnly bool
+	}{
+		{gitpolicy.Decision{Verdict: gitpolicy.User, Reason: "unknown git command"}, false},
+		{gitpolicy.Decision{Verdict: gitpolicy.User, Reason: "renames pushed branch x"}, false},
+		{gitpolicy.Decision{Verdict: gitpolicy.User, Destructive: true}, true},
+		{gitpolicy.Decision{Verdict: gitpolicy.User, Protected: true}, true},
+		{gitpolicy.Decision{Verdict: gitpolicy.User, Bypass: true}, true},
+		{gitpolicy.Decision{Verdict: gitpolicy.Allow}, false},
+	} {
+		if got := policyOf(c.d).userOnly; got != c.userOnly {
+			t.Errorf("%+v: userOnly %v, want %v", c.d, got, c.userOnly)
+		}
+	}
+}

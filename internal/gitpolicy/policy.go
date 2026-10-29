@@ -64,6 +64,7 @@ type Decision struct {
 	Reason      string   // short and user-facing, e.g. "merges into protected branch master"
 	Protected   bool     // it would change a protected branch
 	Destructive bool     // it could lose work: discarded changes, deleted branches, force pushes
+	Bypass      bool     // it could get around grove's git guard: hooks skipped or replaced, git's config or .git changed directly, an unguarded worktree
 	Refs        []string // branches it would change
 }
 

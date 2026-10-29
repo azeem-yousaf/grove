@@ -450,8 +450,9 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 			"Don't change any files yourself; the task agents do the work.\n\n")
 	}
 	b.WriteString("Approve a command only when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for. " +
-		"Deny anything destructive, anything that reaches outside the worktree, and pushing or publishing. When unsure, leave it out so the user decides. " +
-		"Commands grove's policy keeps for the user (protected branches, anything destructive) aren't listed and can't be approved by you. " +
+		"git the task needs (committing, merging feature branches, pushing a task's own branch) is fine too. " +
+		"Deny anything destructive and anything that reaches outside the plan's worktrees, saying what to do instead. " +
+		"Commands grove's policy keeps for the user (deleting branches or worktrees, force pushes, discarding work, protected branches) aren't listed and can't be approved by you. " +
 		"grove reports every decision that doesn't apply. " +
 		"Reply to a question only when the plan and the code answer it; leave questions about what the user wants for the user. " +
 		"Post in a group chat only to settle something the agents are stuck on or disagree about. " +
