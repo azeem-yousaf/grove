@@ -13,6 +13,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/usage"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -414,6 +415,7 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 		st.asked = append(st.asked, it.ids...)
 	}
 	s.nextPlan = planIDs(items)[0]
+	s.nextKind = usage.KindDecide
 	st.reports = nil
 	cmd := m.send(s, text)
 	// The chat shows a line about it, not the whole request.
@@ -723,7 +725,7 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 				t.Status, t.Error, p.Status = plan.Working, "", plan.Running
 				cmds = append(cmds, m.savePlan(p))
 			}
-			cmds = append(cmds, m.tell(s, "From the planner, who is watching this plan for the user: "+strings.TrimSpace(r.Message)))
+			cmds = append(cmds, m.tellAs(s, replyKind(p), "From the planner, who is watching this plan for the user: "+strings.TrimSpace(r.Message)))
 		}
 		outs = append(outs, o)
 	}
@@ -793,11 +795,26 @@ func uniqueSessions[T any](items []T, of func(T) *session) []*session {
 // tell sends a task's agent a message from grove or the planner: now if
 // it is free, otherwise with its next turn.
 func (m *Model) tell(s *session, text string) tea.Cmd {
+	return m.tellAs(s, usage.KindWork, text)
+}
+
+// tellAs is tell for a turn of kind k; a message that waits for the next
+// turn leaves that turn's kind alone.
+func (m *Model) tellAs(s *session, k usage.Kind, text string) tea.Cmd {
 	if s.running {
 		s.notes = append(s.notes, text)
 		return nil
 	}
-	return m.send(s, text)
+	return m.sendAs(s, k, text)
+}
+
+// replyKind is the kind of a planner's reply to a task of p: fixing, after
+// p's merged work failed its tests, else work.
+func replyKind(p *plan.Plan) usage.Kind {
+	if p.Merge != nil && p.Merge.Tests == plan.TestsFailed {
+		return usage.KindFix
+	}
+	return usage.KindWork
 }
 
 // plannerPost posts the planner's message in a watched plan's chat. Every

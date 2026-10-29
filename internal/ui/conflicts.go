@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/usage"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -430,7 +431,7 @@ func (m *Model) askAgentToResolve(c *conflictReview) tea.Cmd {
 		if s == nil {
 			s = m.newSession(path, name, kind)
 		}
-		return tea.Batch(m.showChat(s), m.send(s, prompt))
+		return tea.Batch(m.showChat(s), m.sendAs(s, usage.KindFix, prompt))
 	})
 }
 

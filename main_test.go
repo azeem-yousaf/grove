@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/store"
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // TestPlainConflicts runs --plain on a repository where feature/x and
@@ -94,6 +96,33 @@ func TestPlainConflicts(t *testing.T) {
 	// Turned off in the config: no section.
 	if out := captureStdout(t, func() error { return printPlain(ctx, repo, "main", git.ModeBranch, false) }); strings.Contains(out, "\nConflicts\n") {
 		t.Errorf("prediction turned off but printed:\n%s", out)
+	}
+}
+
+func TestPrintUsageByKind(t *testing.T) {
+	common := t.TempDir()
+	l, err := usage.Open(filepath.Join(store.Open(common).Dir(), "usage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, turn := range []usage.Turn{
+		{ID: "a/1", Agent: "a", Tokens: usage.Tokens{Input: 750}, Status: usage.Exact, Kind: usage.KindWork},
+		{ID: "a/2", Agent: "a", Tokens: usage.Tokens{Input: 250}, Status: usage.Exact, Kind: usage.KindWake},
+		{ID: "a/3", Agent: "a", Status: usage.Unknown, Kind: usage.KindDecide},
+	} {
+		if _, err := l.Add(turn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := captureStdout(t, func() error { return printUsage(&git.Repo{CommonDir: common}) })
+	_, section, ok := strings.Cut(out, "\nBy kind\n")
+	if !ok {
+		t.Fatalf("no By kind section:\n%s", out)
+	}
+	for _, want := range []string{`(?m)^  work +≈75% +.* 750 +1$`, `(?m)^  wake +≈25% `, `(?m)^  decide +\? +.* \? +1  1 turn not reported$`} {
+		if !regexp.MustCompile(want).MatchString(section) {
+			t.Errorf("missing %s in:\n%s", want, section)
+		}
 	}
 }
 

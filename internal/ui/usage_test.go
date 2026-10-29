@@ -6,10 +6,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/azeem-yousaf/grove/internal/agent"
+	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/azeem-yousaf/grove/internal/usage"
 	"github.com/charmbracelet/x/ansi"
@@ -443,12 +445,12 @@ func fillUsage(t *testing.T, m *Model, many bool) {
 	for _, a := range agents {
 		l.SetAgent(a)
 	}
-	add := func(id, ag string, tok usage.Tokens, st usage.Status, task, grp string) {
-		l.Add(usage.Turn{ID: id, Agent: ag, Tokens: tok, Status: st, Plan: p.ID, PlanTitle: p.Title, Task: task, Group: grp})
+	add := func(id, ag string, tok usage.Tokens, st usage.Status, task, grp string, k usage.Kind) {
+		l.Add(usage.Turn{ID: id, Agent: ag, Tokens: tok, Status: st, Plan: p.ID, PlanTitle: p.Title, Task: task, Group: grp, Kind: k})
 	}
-	add("auth/1", "auth", usage.Tokens{Input: 1_234_567, CacheRead: 1_000_000, Output: 45_678, HasCache: true}, usage.Exact, "a", "g")
-	add("cart/1", "cart", usage.Tokens{Input: 9_876, Output: 543}, usage.Exact, "c", "g")
-	add("plnr/1", "plnr", usage.Tokens{Input: 5_000, Output: 600, HasCache: true}, usage.Partial, "", "")
+	add("auth/1", "auth", usage.Tokens{Input: 1_234_567, CacheRead: 1_000_000, Output: 45_678, HasCache: true}, usage.Exact, "a", "g", usage.KindWork)
+	add("cart/1", "cart", usage.Tokens{Input: 9_876, Output: 543}, usage.Exact, "c", "g", usage.KindWake)
+	add("plnr/1", "plnr", usage.Tokens{Input: 5_000, Output: 600, HasCache: true}, usage.Partial, "", "", usage.KindDecide)
 	l.Add(usage.Turn{ID: "plnr/2", Agent: "plnr", Status: usage.Unknown})
 	l.Add(usage.Turn{ID: "gone/1", Agent: "gone", Tokens: usage.Tokens{Input: 99_999_999, Output: 1}, Status: usage.Exact})
 	if many {
@@ -475,5 +477,112 @@ func TestUsageWithoutLedger(t *testing.T) {
 	press(m, "T")
 	if out := plain(m); !strings.Contains(out, "isn't being recorded") {
 		t.Errorf("usage screen without a ledger:\n%s", out)
+	}
+}
+
+// kindsOf lists the kinds of agent uid's turns in the ledger in dir, in
+// the order they were written.
+func kindsOf(t *testing.T, dir, uid string) []usage.Kind {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []usage.Kind
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var r struct{ Turn *usage.Turn }
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatal(err)
+		}
+		if r.Turn != nil && r.Turn.Agent == uid {
+			out = append(out, r.Turn.Kind)
+		}
+	}
+	return out
+}
+
+func TestUsageKindOfUserMessages(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	dir := withLedger(t, m)
+	fake := &fakeAgent{turns: [][]agent.Event{{done(10, 1, usage.Exact)}, {done(20, 2, usage.Exact)}}}
+	s := agentSession(m, "/src/shop-auth", "feature/auth", fake)
+	pump(t, m, m.send(s, "go"))
+	s.approved = []string{"npm test"}
+	pump(t, m, m.resume(s))
+	if got := kindsOf(t, dir, s.uid); !slices.Equal(got, []usage.Kind{usage.KindWork, usage.KindResume}) {
+		t.Errorf("kinds = %v, want work then resume", got)
+	}
+	if s.nextKind != "" {
+		t.Errorf("nextKind left set: %q", s.nextKind)
+	}
+
+	// The planner talking with the user is planning.
+	m.planner = m.newPlanner(filepath.FromSlash("/src/shop"), agent.Claude)
+	pump(t, m, m.send(m.planner, "count tokens"))
+	if got := kindsOf(t, dir, m.planner.uid); !slices.Equal(got, []usage.Kind{usage.KindPlan}) {
+		t.Errorf("planner kinds = %v, want plan", got)
+	}
+
+	// A turn cut short keeps its kind.
+	s.nextKind = usage.KindFix
+	m.startTurn(s)
+	s.running = true
+	r := restore(s.saved(), true, false)
+	m.recordCutShort(r)
+	if len(r.unrecorded) != 1 || r.unrecorded[0].Kind != usage.KindFix {
+		t.Errorf("cut short turn = %+v, want kind fix", r.unrecorded)
+	}
+}
+
+func TestUsageKindOfOrchestrationAndResume(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	dir := withLedger(t, m)
+	p.Orchestrated = true
+	m.classify = func(*session, string, string) approvalPolicy { return approvalPolicy{} }
+	fake.turns = [][]agent.Event{plannerSays(`{"approve": [{"branch": "feature/a", "command": "npm test"}]}`)}
+	s := m.sessionFor(m.taskPath(p, "feature/a"))
+	s.running = true
+	pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone, Denied: []agent.Denial{{Tool: "Bash", Detail: "npm test"}}}))
+	if got := kindsOf(t, dir, s.uid); !slices.Equal(got, []usage.Kind{usage.KindResume}) {
+		t.Errorf("task kinds = %v, want resume", got)
+	}
+	crew := m.ownerPlanner(s.path)
+	got := kindsOf(t, dir, crew.uid)
+	if len(got) == 0 || slices.ContainsFunc(got, func(k usage.Kind) bool { return k != usage.KindDecide }) {
+		t.Errorf("planner kinds = %v, want only decide", got)
+	}
+}
+
+func TestUsageKindOfWakeUps(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	dir := withLedger(t, m)
+	log, _ := m.groupLog(p, "g")
+	if err := log.Post(group.Message{From: "feature/a", Text: "The API returns {orderId}."}); err != nil {
+		t.Fatal(err)
+	}
+	poll(t, m, fake)
+	b := m.sessionFor(m.taskPath(p, "feature/b"))
+	if got := kindsOf(t, dir, b.uid); !slices.Equal(got, []usage.Kind{usage.KindWake}) {
+		t.Errorf("woken agent's kinds = %v, want wake", got)
+	}
+}
+
+func TestUsageScreenByKind(t *testing.T) {
+	m := fakeModel(t, 160, 40)
+	withLedger(t, m)
+	l := m.usage
+	l.Add(usage.Turn{ID: "a/1", Agent: "a", Tokens: usage.Tokens{Input: 600}, Status: usage.Exact, Kind: usage.KindWork})
+	l.Add(usage.Turn{ID: "a/2", Agent: "a", Tokens: usage.Tokens{Input: 300}, Status: usage.Exact, Kind: usage.KindDecide})
+	l.Add(usage.Turn{ID: "a/3", Agent: "a", Tokens: usage.Tokens{Input: 100}, Status: usage.Exact})
+	l.Add(usage.Turn{ID: "a/4", Agent: "a", Status: usage.Unknown, Kind: usage.KindWake})
+	press(m, "T")
+	out := plain(m)
+	for _, want := range []string{"By kind", "work ≈60%", "decide ≈30%", "unknown ≈10%", "wake ?"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage screen lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "resume") {
+		t.Errorf("kinds without turns shown:\n%s", out)
 	}
 }

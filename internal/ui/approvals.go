@@ -11,6 +11,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // Approvals: a command a task's agent was refused becomes a pendingAction
@@ -190,7 +191,7 @@ func (m *Model) resume(s *session) tea.Cmd {
 	approved, denied, planner := s.approved, s.denied, s.byPlanner
 	s.approved, s.denied, s.byPlanner = nil, nil, false
 	if !planner && len(denied) == 0 && len(waiting) == 0 {
-		return m.send(s, "I approved `"+strings.Join(approved, "`, `")+"`. Run it now and carry on.")
+		return m.sendAs(s, usage.KindResume, "I approved `"+strings.Join(approved, "`, `")+"`. Run it now and carry on.")
 	}
 	var parts []string
 	if len(approved) > 0 {
@@ -202,7 +203,7 @@ func (m *Model) resume(s *session) tea.Cmd {
 	if len(waiting) > 0 {
 		parts = append(parts, "Still waiting for the user: `"+strings.Join(waiting, "`, `")+"`. Don't run it until you hear; get on with what you can.")
 	}
-	return m.send(s, strings.Join(parts, " ")+" Then carry on with your task.")
+	return m.sendAs(s, usage.KindResume, strings.Join(parts, " ")+" Then carry on with your task.")
 }
 
 // findApproval finds the approval an answer names: by ID among every

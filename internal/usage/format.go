@@ -53,6 +53,21 @@ func Amount(s Sum, n int64) string {
 	return Compact(n)
 }
 
+// Share writes part's tokens as a percentage of whole's: "62%", "≈62%" when
+// either sum is incomplete (both are lower bounds), "?" when part reported
+// nothing or whole has no tokens.
+func Share(part, whole Sum) string {
+	t := whole.Tokens.Total()
+	if Amount(part, 0) == "?" || t <= 0 {
+		return "?"
+	}
+	pct := strconv.FormatInt(int64(math.Round(float64(part.Tokens.Total())*100/float64(t))), 10) + "%"
+	if !part.Complete() || !whole.Complete() {
+		return "≈" + pct
+	}
+	return pct
+}
+
 // Cached writes the cache reads of a Sum, "-" when no provider reported any
 // cache figures.
 func Cached(s Sum) string {

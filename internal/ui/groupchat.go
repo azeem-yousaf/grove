@@ -12,6 +12,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/usage"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -287,6 +288,7 @@ func (m *Model) wakeGroups() tea.Cmd {
 				g.wakeups++
 				n := waiting[t.Branch]
 				g.unread[t.Branch], g.direct[t.Branch] = 0, 0 // until the next poll sees what it read
+				s.nextKind = usage.KindWake
 				cmds = append(cmds, m.send(s, fmt.Sprintf("You have %s in %s. Read them with %s, answer if they need it, and carry on with your task.",
 					plural(n, "new message"), chatName(grp), tool)))
 			}

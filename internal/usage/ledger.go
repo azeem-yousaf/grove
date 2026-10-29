@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -60,6 +61,30 @@ type Turn struct {
 	PlanTitle string    `json:"plan_title,omitempty"`
 	Task      string    `json:"task,omitempty"`
 	Group     string    `json:"group,omitempty"`
+	Kind      Kind      `json:"kind,omitempty"`
+}
+
+// Kind is why a turn happened. Lines written before kinds existed have none
+// and count as KindUnknown.
+type Kind string
+
+const (
+	KindWork    Kind = "work"   // a user's or plan's message to an agent
+	KindResume  Kind = "resume" // an agent carried on after approvals
+	KindWake    Kind = "wake"   // woken for group chat messages
+	KindDecide  Kind = "decide" // a planner's orchestration turn
+	KindPlan    Kind = "plan"   // the planner drafting from the user's request
+	KindFix     Kind = "fix"    // fixing merge conflicts or failed tests
+	KindUnknown Kind = "unknown"
+)
+
+// Kinds is every kind in the order they are shown.
+var Kinds = []Kind{KindWork, KindResume, KindWake, KindDecide, KindPlan, KindFix, KindUnknown}
+
+// KindSum is one kind's total.
+type KindSum struct {
+	Kind Kind
+	Sum  Sum
 }
 
 // Assignment gives turns recorded with no Plan to a plan later, such as the
@@ -172,7 +197,8 @@ type Ledger struct {
 	pending  map[string]Assignment // assignments naming turns not seen yet
 	total    Sum
 	byAgent  map[string]Sum
-	agentIn  map[string]map[string]Sum // agent → plan ("" for none) → turns
+	byKind   map[Kind]Sum
+	agentIn map[string]map[string]Sum // agent → plan ("" for none) → turns
 	plans    map[string]*planTotals
 	unplaced Sum
 }
@@ -195,6 +221,7 @@ func (l *Ledger) reset() {
 	l.pending = map[string]Assignment{}
 	l.total, l.unplaced = Sum{}, Sum{}
 	l.byAgent = map[string]Sum{}
+	l.byKind = map[Kind]Sum{}
 	l.agentIn = map[string]map[string]Sum{}
 	l.plans = map[string]*planTotals{}
 }
@@ -309,7 +336,12 @@ func (l *Ledger) applyTurn(t Turn) {
 	s := sumOf(t)
 	l.total = l.total.Add(s)
 	l.byAgent[t.Agent] = l.byAgent[t.Agent].Add(s)
-	in := l.agentIn[t.Agent]
+	k := t.Kind
+	if k == "" {
+		k = KindUnknown
+	}
+	l.byKind[k] = l.byKind[k].Add(s)
+	in :=l.agentIn[t.Agent]
 	if in == nil {
 		in = map[string]Sum{}
 		l.agentIn[t.Agent] = in
@@ -559,6 +591,27 @@ func (l *Ledger) Unassigned() Sum {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.unplaced
+}
+
+// ByKind lists every kind with turns, in the order of Kinds; a kind not in
+// Kinds (from a newer grove) comes after them, by name.
+func (l *Ledger) ByKind() []KindSum {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]KindSum, 0, len(l.byKind))
+	for _, k := range Kinds {
+		if s, ok := l.byKind[k]; ok {
+			out = append(out, KindSum{Kind: k, Sum: s})
+		}
+	}
+	var other []KindSum
+	for k, s := range l.byKind {
+		if !slices.Contains(Kinds, k) {
+			other = append(other, KindSum{Kind: k, Sum: s})
+		}
+	}
+	sort.Slice(other, func(i, j int) bool { return other[i].Kind < other[j].Kind })
+	return append(out, other...)
 }
 
 // Agents lists every agent with turns, the most tokens first, ties by name.

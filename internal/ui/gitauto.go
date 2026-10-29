@@ -21,6 +21,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/gitguard"
 	"github.com/azeem-yousaf/grove/internal/gitpolicy"
 	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // Git autonomy: agents commit and integrate their own work, and protected
@@ -663,7 +664,7 @@ func (m *Model) onAutoGit(msg autoGitMsg) tea.Cmd {
 		s.notes = append(s.notes, text)
 		return tea.Batch(cmds...)
 	}
-	return tea.Batch(append(cmds, m.send(s, text))...)
+	return tea.Batch(append(cmds, m.sendAs(s, usage.KindResume, text))...)
 }
 
 // gitBusy reports whether grove is running git for s's agent.
