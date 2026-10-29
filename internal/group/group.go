@@ -21,10 +21,14 @@ import (
 // User is the From of messages the user posts.
 const User = "you"
 
+// Grove is the From of messages grove itself posts, such as a warning that
+// a member's worktree now conflicts with another.
+const Grove = "grove"
+
 // Message is one post to a group.
 type Message struct {
 	Time time.Time `json:"time"`
-	From string    `json:"from"`         // a member's name, or User
+	From string    `json:"from"`         // a member's name, User or Grove
 	To   string    `json:"to,omitempty"` // one member, or "" for everyone
 	Text string    `json:"text"`
 }

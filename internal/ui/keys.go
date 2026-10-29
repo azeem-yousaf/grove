@@ -38,7 +38,7 @@ func defaultKeys() keyMap {
 		Agent:      b("a", "worktree agent", "a"),
 		Undo:       b("u", "undo agent changes", "u"),
 		Mode:       b("m", "branch / uncommitted", "m"),
-		Overlaps:   b("o", "overlaps only", "o"),
+		Overlaps:   b("o", "overlaps / conflicts only", "o"),
 		Overview:   b("w", "overview of every worktree", "w"),
 		Merge:      b("c", "merge branches into this worktree", "c"),
 		Planner:    b("P", "planner", "P"),
@@ -77,7 +77,7 @@ var helpSections = []helpSection{
 	}},
 	{"View", [][2]string{
 		{"m", "branch / uncommitted"},
-		{"o", "overlaps only"},
+		{"o", "overlaps / conflicts"},
 		{"w", "overview of worktrees"},
 		{"c", "merge branches here"},
 		{"/", "filter files"},

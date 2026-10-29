@@ -69,7 +69,15 @@ type Model struct {
 	filter       textinput.Model
 	filterActive bool
 	filterQuery  string
-	overlapsOnly bool
+	overlapView  overlapView
+
+	predictor      *git.Predictor
+	predictions    []git.Prediction // pairs of worktrees, indexing m.snap.States
+	predictSeq     int
+	predicting     bool
+	repredict      bool // another prediction was requested while one was running
+	predictChecked bool // the git version has been checked
+	predictOff     bool // git is too old to predict conflicts
 
 	diff        viewport.Model
 	diffCache   map[string]string
@@ -123,6 +131,7 @@ type Model struct {
 	groupChat     *groupChat             // the group chat pane
 	pollingGroups bool
 	lastGroupPoll time.Time
+	conflictsTold map[string][]string // files each task's agent was told conflict with another worktree (conflictnotify.go)
 	chatInput     textarea.Model
 	chatView      viewport.Model
 	chatFollow    bool // keep the chat scrolled to the newest line
@@ -218,6 +227,7 @@ func New(ctx context.Context, o Options) *Model {
 		creatingTask: map[string]bool{},
 		groups:       map[string]*groupState{},
 		groveBin:     groveExecutable(),
+		predictor:    git.NewPredictor(),
 		chatInput:    newChatInput(),
 		chatView:     newChatView(),
 		installed:    agent.Installed,
@@ -369,6 +379,9 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case scanMsg:
 		return m.onScan(msg)
+
+	case predictMsg:
+		return m.onPredict(msg)
 
 	case conflictCheckMsg:
 		return m.onConflictCheck(msg)
@@ -599,6 +612,7 @@ func (m *Model) onScan(msg scanMsg) tea.Cmd {
 		m.scanErr = msg.err
 	} else {
 		m.scanErr = nil
+		m.predictions = remapPredictions(m.predictions, m.snap, msg.snap)
 		m.snap = msg.snap
 		if m.repo.Here != "" {
 			m.hereIdx = m.snap.IndexOf(m.repo.Here)
@@ -614,7 +628,7 @@ func (m *Model) onScan(msg scanMsg) tea.Cmd {
 			}
 		}
 		m.rebuildRows()
-		cmds = append(cmds, m.selectionChanged(true), m.schedule())
+		cmds = append(cmds, m.selectionChanged(true), m.schedule(), m.startPredict())
 	}
 	if m.removing != nil && m.removing.queued {
 		cmds = append(cmds, m.runRemoval())
@@ -839,7 +853,7 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.focus = focusList
 		case m.filtering():
 			m.filter.SetValue("")
-			m.overlapsOnly = false
+			m.overlapView = overlapsOff
 			m.setFilter("")
 			return m.selectionChanged(false)
 		}
@@ -1012,9 +1026,21 @@ func (m *Model) toggleOverlaps() tea.Cmd {
 	if m.snap == nil {
 		return nil
 	}
-	m.overlapsOnly = !m.overlapsOnly
+	// off → overlaps → conflicts only → off, skipping conflicts when there
+	// are none.
+	switch m.overlapView {
+	case overlapsOff:
+		m.overlapView = overlapsShown
+	case overlapsShown:
+		m.overlapView = overlapsOff
+		if m.conflictCount() > 0 {
+			m.overlapView = conflictsShown
+		}
+	default:
+		m.overlapView = overlapsOff
+	}
 	m.rebuildRows()
-	if m.overlapsOnly && m.snap.OverlapCount() == 0 {
+	if m.overlapView == overlapsShown && m.snap.OverlapCount() == 0 {
 		return tea.Batch(m.notify("No files are changed in more than one worktree", toastInfo), m.selectionChanged(false))
 	}
 	return m.selectionChanged(false)

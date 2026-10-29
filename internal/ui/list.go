@@ -44,13 +44,17 @@ func (m *Model) selKey(r row) string {
 	return st.Path + "\x00" + st.Files[r.file].Path
 }
 
-// visibleFiles applies the filter and overlaps-only toggle to a worktree.
+// visibleFiles applies the filter and the overlaps or conflicts view to a
+// worktree.
 func (m *Model) visibleFiles(wt int) []int {
 	st := m.snap.States[wt]
 	q := strings.ToLower(m.filterQuery)
 	var out []int
 	for i, f := range st.Files {
-		if m.overlapsOnly && len(m.snap.Overlaps[f.Path]) < 2 {
+		switch {
+		case m.overlapView == overlapsShown && len(m.snap.Overlaps[f.Path]) < 2:
+			continue
+		case m.overlapView == conflictsShown && !m.willConflict(wt, f.Path):
 			continue
 		}
 		if q != "" && !fuzzy(strings.ToLower(f.Path), q) {
@@ -62,7 +66,7 @@ func (m *Model) visibleFiles(wt int) []int {
 }
 
 // filtering reports whether any filter is narrowing the list.
-func (m *Model) filtering() bool { return m.filterQuery != "" || m.overlapsOnly }
+func (m *Model) filtering() bool { return m.filterQuery != "" || m.overlapView != overlapsOff }
 
 // rebuildRows recomputes the selectable rows and restores the selection.
 func (m *Model) rebuildRows() {
@@ -152,8 +156,12 @@ func (m *Model) listLines(width int) []listLine {
 		msg := "No worktrees"
 		if m.filtering() {
 			msg = "No files match"
-			if m.overlapsOnly && m.filterQuery == "" {
+			switch {
+			case m.filterQuery != "":
+			case m.overlapView == overlapsShown:
 				msg = "No overlapping files"
+			case m.overlapView == conflictsShown:
+				msg = "No conflicting files"
 			}
 		}
 		lines = append(lines, listLine{row: -1, text: ""}, listLine{row: -1, text: center(st.muted.Render(msg), width)})
@@ -290,9 +298,14 @@ func (m *Model) fileLine(r row, width int, selected bool) string {
 	} else {
 		marks += " "
 	}
-	if len(m.snap.Overlaps[f.Path]) > 1 {
+	// ✗ will conflict when merged; ⚠ overlaps but merges cleanly, or the
+	// prediction isn't in yet.
+	switch {
+	case m.willConflict(r.wt, f.Path):
+		marks += " " + st.conflict.Render("✗")
+	case len(m.snap.Overlaps[f.Path]) > 1:
 		marks += " " + st.warn.Bold(true).Render("⚠")
-	} else {
+	default:
 		marks += "  "
 	}
 

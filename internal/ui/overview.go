@@ -20,14 +20,16 @@ type overviewStats struct {
 	ahead, behind                    int
 	uncommitted                      int // worktrees with work not committed yet
 	conflicted                       int // worktrees with unresolved merge conflicts
-	overlaps                         int // files changed in more than one worktree
+	overlaps                         int // files changed in more than one worktree, not predicted to conflict
+	conflicts                        int // files predicted to conflict when merged
 	working, waiting, failed, done   int // agents
 }
 
 func (m *Model) overviewStats() overviewStats {
 	var o overviewStats
 	o.worktrees = len(m.snap.States)
-	o.overlaps = m.snap.OverlapCount()
+	o.overlaps = m.cleanOverlapCount()
+	o.conflicts = m.conflictCount()
 	for _, s := range m.snap.States {
 		switch {
 		case s.Err != nil:
@@ -150,6 +152,9 @@ func (m *Model) attentionCounts(o overviewStats) []string {
 	if o.failed > 0 {
 		out = append(out, st.del.Render(fmt.Sprintf("✦ %s failed", plural(o.failed, "agent"))))
 	}
+	if o.conflicts > 0 {
+		out = append(out, st.conflict.Render(fmt.Sprintf("✗ %s", plural(o.conflicts, "conflict"))))
+	}
 	if o.overlaps > 0 {
 		out = append(out, st.warn.Render(fmt.Sprintf("⚠ %s", plural(o.overlaps, "overlap"))))
 	}
@@ -191,13 +196,27 @@ func (m *Model) attentionItems() []attention {
 			later = append(later, attention{st.warn.Render("↓"), fmt.Sprintf("%s is %s behind %s", s.Name(), plural(s.Behind, "commit"), s.Base), s.Path})
 		}
 	}
+	var clashes []attention
 	for path, idx := range m.snap.Overlaps {
-		var names []string
+		var names, clash []string
+		first := -1
 		for _, i := range idx {
 			names = append(names, m.snap.States[i].Name())
+			if m.willConflict(i, path) {
+				clash = append(clash, m.snap.States[i].Name())
+				if first < 0 {
+					first = i
+				}
+			}
+		}
+		if len(clash) > 0 {
+			clashes = append(clashes, attention{st.conflict.Render("✗"), path + " will conflict between " + strings.Join(clash, ", ") + "; merge one and update the other", m.snap.States[first].Path})
+			continue
 		}
 		later = append(later, attention{st.warn.Render("⚠"), path + " is changed in " + strings.Join(names, ", "), m.snap.States[idx[0]].Path})
 	}
+	sortAttention(clashes)
+	urgent = append(urgent, clashes...)
 	for _, p := range m.plans {
 		if p.Status == plan.Draft {
 			continue
@@ -387,9 +406,14 @@ func (m *Model) overviewPane(w, h int) string {
 	items := m.attentionItems()
 	n := len(m.snap.States)
 	plans := m.planLines(inner, 3)
+	// Short screens keep the table and leave the pairs to the attention list.
+	clashes := m.conflictSummary(inner, min(4, max(ih-n-8, 0)))
 	above := 3 // the totals, a gap and the column titles
 	if len(plans) > 0 {
 		above += len(plans) + 1
+	}
+	if len(clashes) > 0 {
+		above += len(clashes) + 1
 	}
 	avail := max(ih-above, 1)
 	tableRoom, attnRoom := min(n, avail), 0
@@ -402,6 +426,9 @@ func (m *Model) overviewPane(w, h int) string {
 	body := []string{" " + strings.Join(totals, sep), ""}
 	if len(plans) > 0 {
 		body = append(append(body, plans...), "")
+	}
+	if len(clashes) > 0 {
+		body = append(append(body, clashes...), "")
 	}
 	body = append(body, header)
 	cur := m.ovIndex()
@@ -498,7 +525,7 @@ func (m *Model) overviewColumns(width int) []ovColumn {
 		}
 		return st.accent.Render(fmt.Sprintf("↑%d", s.Ahead)) + " " + st.warn.Render(fmt.Sprintf("↓%d", s.Behind))
 	}}
-	flags := ovColumn{"NOTES", 11, 'l', func(_ int, s git.State) string {
+	flags := ovColumn{"NOTES", 11, 'l', func(i int, s git.State) string {
 		var f []string
 		if n := conflictedFiles(s); n > 0 {
 			f = append(f, st.del.Bold(true).Render(fmt.Sprintf("✕%d", n)))
@@ -512,11 +539,17 @@ func (m *Model) overviewColumns(width int) []ovColumn {
 		if n > 0 {
 			f = append(f, st.warn.Render(fmt.Sprintf("●%d", n)))
 		}
-		o := 0
+		o, c := 0, 0
 		for _, fc := range s.Files {
-			if len(m.snap.Overlaps[fc.Path]) > 1 {
+			switch {
+			case m.willConflict(i, fc.Path):
+				c++
+			case len(m.snap.Overlaps[fc.Path]) > 1:
 				o++
 			}
+		}
+		if c > 0 {
+			f = append(f, st.conflict.Render(fmt.Sprintf("✗%d", c)))
 		}
 		if o > 0 {
 			f = append(f, st.warn.Bold(true).Render(fmt.Sprintf("⚠%d", o)))
@@ -615,6 +648,31 @@ func (m *Model) taskIcon(t *plan.Task) string {
 		return st.del.Render("✕")
 	}
 	return st.faint.Render("◌")
+}
+
+// conflictSummary is the overview's Conflicts section: a title and which
+// worktrees conflict with which, in how many files, at most most lines in
+// all. It is empty when nothing conflicts or there is no room.
+func (m *Model) conflictSummary(width, most int) []string {
+	st := m.st
+	pairs := m.conflictPairs()
+	if len(pairs) == 0 || most < 2 {
+		return nil
+	}
+	out := []string{" " + st.conflict.Render("✗ Conflicts") + st.faint.Render(" · predicted by test-merging in git's object store")}
+	for i, p := range pairs {
+		if len(out) == most-1 && len(pairs)-i > 1 {
+			out = append(out, "   "+st.faint.Render(fmt.Sprintf("… and %d more pairs", len(pairs)-i)))
+			break
+		}
+		line := "   " + st.text.Render(m.snap.States[p.A].Name()) + st.faint.Render(" ⇄ ") + st.text.Render(m.snap.States[p.B].Name()) +
+			"  " + st.conflict.Render(plural(len(p.Files), "file")) + st.faint.Render(": "+p.Files[0].Path)
+		if len(p.Files) > 1 {
+			line += st.faint.Render(fmt.Sprintf(" +%d", len(p.Files)-1))
+		}
+		out = append(out, ansi.Truncate(line, width, "…"))
+	}
+	return out
 }
 
 // planLines summarise the newest started plans for the overview.

@@ -148,7 +148,8 @@ func (m *Model) groupContext(p *plan.Plan, t *plan.Task) string {
 	b.WriteString("\nUse grove's tools for it: `members` lists the group, `post` sends a message (to everyone, or one member with `to`), " +
 		"`read` gets messages sent to you (`wait_seconds` waits for an answer). Read your messages when you start, before you say you are done, " +
 		"and whenever you need something from a groupmate. Post when you settle anything they depend on: APIs, types, names, file layout, decisions. " +
-		"Keep messages short and specific. The user can read and post in the chat too; their name is \"you\".\n")
+		"Keep messages short and specific. The user can read and post in the chat too; their name is \"you\". " +
+		"grove itself posts as \"grove\", for example when your worktree starts conflicting with another.\n")
 	return b.String()
 }
 
@@ -356,8 +357,11 @@ func (m *Model) groupPane(w, h int) string {
 	} else {
 		for _, msg := range state.msgs {
 			name := st.bold.Render(msg.From)
-			if msg.From == group.User {
+			switch msg.From {
+			case group.User:
 				name = st.accent.Bold(true).Render("you")
+			case group.Grove:
+				name = st.warn.Bold(true).Render("grove")
 			}
 			head := " " + st.faint.Render(msg.Time.Local().Format("15:04")) + " " + name
 			if msg.To != "" {

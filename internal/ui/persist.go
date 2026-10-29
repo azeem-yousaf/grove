@@ -33,6 +33,7 @@ type savedSession struct {
 	Touched     []string       `json:"touched,omitempty"`
 	Allow       []string       `json:"allow,omitempty"`
 	Pending     []savedPending `json:"pending,omitempty"`
+	Notes       []string       `json:"notes,omitempty"` // news from grove not yet given to the agent
 	Cost        string         `json:"cost,omitempty"`
 	Failed      bool           `json:"failed,omitempty"`
 	Interrupted bool           `json:"interrupted,omitempty"` // saved while the agent was working
@@ -68,7 +69,7 @@ func (s *session) file() string {
 func (s *session) saved() savedSession {
 	out := savedSession{
 		Version: 1, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
-		History: s.history, Checkpoint: s.checkpoint, Allow: s.allow, Cost: s.cost,
+		History: s.history, Checkpoint: s.checkpoint, Allow: s.allow, Notes: s.notes, Cost: s.cost,
 		Failed: s.failed, Interrupted: s.running, Planner: s.planner,
 	}
 	for _, e := range s.entries {
@@ -89,7 +90,7 @@ func (s *session) saved() savedSession {
 func restore(v savedSession, checkpointOK bool) *session {
 	s := &session{
 		kind: v.Kind, path: v.Path, name: v.Name, model: v.Model, id: v.ID,
-		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, cost: v.Cost,
+		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, cost: v.Cost,
 		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner,
 	}
 	for _, e := range v.Entries {

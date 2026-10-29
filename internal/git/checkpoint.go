@@ -13,7 +13,8 @@ import (
 // Checkpoint records every file in the worktree at dir, tracked or not
 // (ignored files excepted), as a git tree object. It works on a copy of the
 // index, so the real index, the files and the branch are untouched. The
-// tree lets an agent's changes be listed and undone later.
+// tree lets an agent's changes be listed and undone later, and SideOf uses
+// it to predict conflicts in work that isn't committed yet.
 func Checkpoint(ctx context.Context, dir string) (string, error) {
 	out, err := run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-path", "index")
 	if err != nil {
