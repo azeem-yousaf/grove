@@ -343,8 +343,9 @@ func (m *Model) orchestrate() tea.Cmd {
 	}
 	o.turns++
 	text, summary := m.orchPrompt(o.queue)
-	o.queue = nil
 	s := m.planner
+	s.nextPlan = planIDs(o.queue)[0]
+	o.queue = nil
 	cmd := m.send(s, text)
 	// The chat shows a line about it, not the whole request.
 	s.entries[len(s.entries)-1] = chatEntry{roleNote, summary}
