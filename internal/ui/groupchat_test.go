@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
+	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
 )
@@ -177,6 +178,69 @@ func TestIdleAgentsWakeForMessagesUpToTheLimit(t *testing.T) {
 		if strings.Contains(r.Dir, "shop-a") {
 			t.Error("a was woken for its own message")
 		}
+	}
+}
+
+func TestWakeWaitsForTheChatToSettle(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	m.cfg.Planner.Settle = nil // the default, 15 s
+	log, _ := m.groupLog(p, "g")
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) {
+		m.now = t0.Add(d)
+		m.pollingGroups = false
+	}
+	at(0)
+	log.Post(group.Message{From: "feature/a", Text: "first"})
+	poll(t, m, fake)
+	at(5 * time.Second)
+	log.Post(group.Message{From: "feature/a", Text: "second"})
+	poll(t, m, fake)
+	at(19 * time.Second)
+	poll(t, m, fake)
+	if len(fake.reqs) != 0 {
+		t.Fatalf("woken before the chat was quiet for 15 s: %+v", fake.reqs)
+	}
+	at(20 * time.Second)
+	poll(t, m, fake)
+	if len(fake.reqs) != 1 || !strings.Contains(fake.reqs[0].Message, "2 new messages") {
+		t.Fatalf("both messages should wake b once: %+v", fake.reqs)
+	}
+	if g := m.groups[log.Dir]; g.wakeups != 1 {
+		t.Errorf("a batched wake counts once: %d", g.wakeups)
+	}
+}
+
+func TestSteadyChatWakesAtTheMaximum(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	m.cfg.Planner.Settle = nil
+	log, _ := m.groupLog(p, "g")
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for d := time.Duration(0); d < config.SettleMax; d += 5 * time.Second {
+		m.now, m.pollingGroups = t0.Add(d), false
+		log.Post(group.Message{From: "feature/a", Text: "more"})
+		poll(t, m, fake)
+	}
+	if len(fake.reqs) != 0 {
+		t.Fatalf("woken while the chat kept going: %d", len(fake.reqs))
+	}
+	m.now, m.pollingGroups = t0.Add(config.SettleMax), false
+	log.Post(group.Message{From: "feature/a", Text: "still more"})
+	poll(t, m, fake)
+	if len(fake.reqs) != 1 || !strings.Contains(fake.reqs[0].Dir, "shop-b") {
+		t.Fatalf("b should be woken once the oldest message waited the maximum: %+v", fake.reqs)
+	}
+}
+
+func TestSettleZeroWakesAtOnce(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	m.cfg.Planner.Settle = &config.Duration{}
+	m.now = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	log, _ := m.groupLog(p, "g")
+	log.Post(group.Message{From: "feature/a", Text: "hello"})
+	poll(t, m, fake)
+	if len(fake.reqs) != 1 {
+		t.Fatalf("settle 0 wakes at once: %+v", fake.reqs)
 	}
 }
 

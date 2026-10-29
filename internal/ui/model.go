@@ -477,6 +477,10 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		if m.termFocused {
 			cmds = append(cmds, m.pollPRs(false))
 		}
+		if len(m.orch.queue) > 0 {
+			// Items held back until they settle.
+			cmds = append(cmds, m.orchestrate())
+		}
 		if m.baseReady && !m.scanning && m.now.Sub(m.lastScan) >= m.refreshInterval() {
 			cmds = append(cmds, m.startScan())
 		}

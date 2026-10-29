@@ -105,6 +105,12 @@ type Planner struct {
 	// plans it watches before it waits for the user to say something. 0 or
 	// less means the default, 20.
 	MaxDecisions int `toml:"max_decisions"`
+	// Settle is how long a chat must be quiet before grove wakes an agent
+	// for its messages, so a burst of messages costs one turn. The planner
+	// waits at most 5 s after the newest item it is sent. Nobody waits more
+	// than SettleMax for the oldest message. Unset means 15 s; 0 wakes at
+	// once.
+	Settle *Duration `toml:"settle"`
 	// Watcher is who watches a running plan's agents and answers them:
 	// "you", or "planner" for the planner to approve their commands, answer
 	// their questions and follow their group chats. Empty means ask before
@@ -146,6 +152,24 @@ func (p Planner) Decisions() int {
 		return 20
 	}
 	return p.MaxDecisions
+}
+
+// SettleMax is the longest grove holds back a wake-up or a planner turn
+// while messages or items keep arriving.
+const SettleMax = 60 * time.Second
+
+// SettleDelay is Settle with the default applied.
+func (p Planner) SettleDelay() time.Duration {
+	if p.Settle == nil {
+		return 15 * time.Second
+	}
+	return max(p.Settle.Duration, 0)
+}
+
+// PlannerSettle is how long the planner's turn waits after the newest
+// queued item: SettleDelay, at most 5 s.
+func (p Planner) PlannerSettle() time.Duration {
+	return min(p.SettleDelay(), 5*time.Second)
 }
 
 // TestTimeout is TestMinutes with the default applied.
@@ -402,6 +426,11 @@ max_wakeups = 6
 # How many turns in a row a planner may take for a plan it watches without
 # the plan moving forward before it waits for you to say something.
 max_decisions = 20
+# How long a chat must be quiet before grove wakes an agent for its
+# messages, so a burst of messages costs one turn (the planner waits at
+# most 5s after the newest thing it is sent). Nobody waits more than a
+# minute. "0s" = wake at once.
+settle = "15s"
 # Who watches a running plan's agents and answers them: "you", or "planner"
 # to put the planner (and a planner per group) in charge: it approves their
 # commands (all but destructive git), answers their questions, helps the

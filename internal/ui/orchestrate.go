@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/config"
@@ -59,6 +60,10 @@ type orchItem struct {
 	lines  []string // the commands, the question, or the messages
 	ids    []string // the approvals', alongside lines
 	urgent bool     // starts a planner turn; other items wait for one
+	now    bool     // starts it without waiting for more items (the user is involved)
+
+	// When orchestrate first saw it, for waiting until items settle.
+	at time.Time
 }
 
 // orchestrator is grove's state for the planners watching plans: what
@@ -231,7 +236,8 @@ func (m *Model) queueTurn(s *session) {
 	reply := strings.TrimSpace(s.lastReply.String())
 	switch {
 	case len(cmds) > 0:
-		m.orch.queue = append(m.orch.queue, orchItem{kind: orchApproval, plan: p.ID, branch: t.Branch, lines: cmds, ids: ids, urgent: true})
+		userToo := slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval && a.policy.userOnly })
+		m.orch.queue = append(m.orch.queue, orchItem{kind: orchApproval, plan: p.ID, branch: t.Branch, lines: cmds, ids: ids, urgent: true, now: userToo})
 	case slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval }):
 		// Only the user can answer what it waits on.
 	case t.Status == plan.Working && !s.failed && endsWithQuestion(reply):
@@ -283,8 +289,9 @@ func (m *Model) queueGroups() {
 				it.lines = append(it.lines, msg.From+to+": "+msg.Text)
 				switch {
 				case msg.From == group.User:
-					// The user talks to the planner in charge of that chat.
-					it.urgent = true
+					// The user talks to the planner in charge of that chat,
+					// and waits for its answer.
+					it.urgent, it.now = true, true
 				default:
 					it.urgent = it.urgent || msg.To == "" && msg.From != group.User
 				}
@@ -347,6 +354,11 @@ func (m *Model) liveItems(items []orchItem) []orchItem {
 func (m *Model) orchestrate() tea.Cmd {
 	o := &m.orch
 	o.queue = m.liveItems(o.queue)
+	for i := range o.queue {
+		if o.queue[i].at.IsZero() {
+			o.queue[i].at = m.now
+		}
+	}
 	var owners []string // crewKey, "" for the lead, in queue order
 	byOwner := map[string][]orchItem{}
 	for _, it := range o.queue {
@@ -373,7 +385,7 @@ func (m *Model) orchestrate() tea.Cmd {
 // orchestrateOne starts a turn of the planner that owns items, all of one
 // owner, reporting whether it took them.
 func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
-	if !slices.ContainsFunc(items, func(it orchItem) bool { return it.urgent }) {
+	if !slices.ContainsFunc(items, func(it orchItem) bool { return it.urgent }) || !m.itemsSettled(items) {
 		return nil, false
 	}
 	planID, groupID := items[0].plan, m.ownerOf(items[0])
@@ -419,6 +431,30 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	// The chat shows a line about it, not the whole request.
 	s.entries[len(s.entries)-1] = chatEntry{roleNote, summary}
 	return cmd, true
+}
+
+// itemsSettled reports whether a planner's turn for items may start: no
+// item has come in for the planner's settle delay, so items arriving
+// together go in one turn, or the oldest has waited the longest it may, or
+// one involves the user.
+func (m *Model) itemsSettled(items []orchItem) bool {
+	delay := m.cfg.Planner.PlannerSettle()
+	if delay <= 0 || slices.ContainsFunc(items, func(it orchItem) bool { return it.urgent && it.now }) {
+		return true
+	}
+	var oldest, newest time.Time
+	for _, it := range items {
+		if !it.urgent {
+			continue // waits for a turn anyway
+		}
+		if oldest.IsZero() || it.at.Before(oldest) {
+			oldest = it.at
+		}
+		if it.at.After(newest) {
+			newest = it.at
+		}
+	}
+	return m.now.Sub(newest) >= delay || m.now.Sub(oldest) >= config.SettleMax
 }
 
 // groupTitleOf is a group's name, or its ID when it isn't known.

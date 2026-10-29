@@ -92,6 +92,23 @@ func TestGitProtected(t *testing.T) {
 	}
 }
 
+func TestSettle(t *testing.T) {
+	var cfg Config
+	if _, err := toml.Decode(setKey(Template, "planner", "settle", `"0s"`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Planner.SettleDelay(); got != 0 || cfg.Planner.PlannerSettle() != 0 {
+		t.Errorf("settle 0 = %v", got)
+	}
+	if got := (Planner{}).SettleDelay(); got != 15*time.Second || (Planner{}).PlannerSettle() != 5*time.Second {
+		t.Errorf("default = %v, planner %v", got, (Planner{}).PlannerSettle())
+	}
+	short := Planner{Settle: &Duration{2 * time.Second}}
+	if short.SettleDelay() != 2*time.Second || short.PlannerSettle() != 2*time.Second {
+		t.Errorf("2s = %v, planner %v", short.SettleDelay(), short.PlannerSettle())
+	}
+}
+
 func TestTestTimeout(t *testing.T) {
 	if got := (Planner{}).TestTimeout(); got != 20*time.Minute {
 		t.Errorf("default = %v", got)

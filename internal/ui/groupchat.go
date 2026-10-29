@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
+	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/charmbracelet/x/ansi"
@@ -32,6 +33,18 @@ type groupState struct {
 	direct  map[string]int // the unread ones addressed to that member alone
 	wakeups int            // automatic wake-ups since the user or the planner last posted
 	paused  bool           // wake-ups stopped at the limit
+
+	// When a poll last saw new messages, and since when each member has had
+	// messages waiting, for waiting until the chat settles (settled).
+	newest time.Time
+	since  map[string]time.Time
+}
+
+// settled reports whether member's messages may wake it: the chat has been
+// quiet for the settle delay, or its oldest waiting message has waited the
+// longest it may.
+func (g *groupState) settled(member string, now time.Time, delay time.Duration) bool {
+	return delay <= 0 || now.Sub(g.newest) >= delay || now.Sub(g.since[member]) >= config.SettleMax
 }
 
 // groupChat is the group chat pane, shown in place of the diff.
@@ -236,6 +249,9 @@ func (m *Model) onGroupsRead(msg groupsReadMsg) tea.Cmd {
 			g = &groupState{}
 			m.groups[dir] = g
 		}
+		if len(r.msgs) > len(g.msgs) {
+			g.newest = m.now
+		}
 		g.msgs, g.unread, g.direct = r.msgs, r.unread, r.direct
 	}
 	m.queueGroups()
@@ -243,8 +259,8 @@ func (m *Model) onGroupsRead(msg groupsReadMsg) tea.Cmd {
 }
 
 // wakeGroups starts a turn for each idle grouped agent with messages
-// waiting, and each agent with plan chat messages addressed to it, until
-// the chat reaches the wake-up limit.
+// waiting, and each agent with plan chat messages addressed to it, once the
+// chat has settled, until the chat reaches the wake-up limit.
 func (m *Model) wakeGroups() tea.Cmd {
 	var cmds []tea.Cmd
 	for _, p := range m.plans {
@@ -261,7 +277,16 @@ func (m *Model) wakeGroups() tea.Cmd {
 			if grp.ID == plan.ChatID {
 				waiting, tool = g.direct, "the plan chat's read tool"
 			}
+			if g.since == nil {
+				g.since = map[string]time.Time{}
+			}
 			for _, t := range p.ChatMembers(grp.ID) {
+				switch _, ok := g.since[t.Branch]; {
+				case waiting[t.Branch] == 0:
+					delete(g.since, t.Branch)
+				case !ok:
+					g.since[t.Branch] = m.now
+				}
 				s := m.sessionFor(t.Path)
 				if t.Path == "" || s == nil || s.running || len(s.pending) > 0 || waiting[t.Branch] == 0 {
 					continue
@@ -284,7 +309,11 @@ func (m *Model) wakeGroups() tea.Cmd {
 					}
 					continue
 				}
+				if !g.settled(t.Branch, m.now, m.cfg.Planner.SettleDelay()) {
+					continue
+				}
 				g.wakeups++
+				delete(g.since, t.Branch)
 				n := waiting[t.Branch]
 				g.unread[t.Branch], g.direct[t.Branch] = 0, 0 // until the next poll sees what it read
 				cmds = append(cmds, m.send(s, fmt.Sprintf("You have %s in %s. Read them with %s, answer if they need it, and carry on with your task.",

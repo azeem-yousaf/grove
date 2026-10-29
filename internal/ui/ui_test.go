@@ -78,6 +78,8 @@ func noAgents(m *Model) {
 	// As if the config answered who watches plans; tests of the question
 	// clear it.
 	m.cfg.Planner.Watcher = config.WatchYou
+	// Wake agents and planners at once; the tests of waiting set a delay.
+	m.cfg.Planner.Settle = &config.Duration{}
 	m.runAgent = func(_ context.Context, _ agent.Request, emit func(agent.Event)) {
 		emit(agent.Event{Kind: agent.EvDone, Err: fmt.Errorf("no agent in tests")})
 	}
