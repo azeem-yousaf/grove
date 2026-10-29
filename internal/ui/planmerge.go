@@ -109,9 +109,25 @@ func (m *Model) findPlan(name string) *plan.Plan {
 
 // reviewAsk tells the planner what to do with a merged plan whose tests
 // passed, or that it tests itself.
-const reviewAsk = "Then post a short summary for the user in the plan chat: what was built, how to try it, and anything that needs their attention, " +
-	"and wait for their feedback there. When they ask for changes, reply to the agents of the tasks that own that part, which reopens them, " +
-	"and merge again once they are finished; when the user is happy, close the plan."
+func (m *Model) reviewAsk() string {
+	if m.cfg.Planner.OpenPRs() {
+		return "Then post a short summary in the plan chat: what was built, how to try it, and anything the reviewer should look at. " +
+			"grove pushes the plan's branch and opens a pull request; the user reviews that and nothing else. grove passes you every review and comment on it: " +
+			"reply to the agents of the tasks that own that part, which reopens them, and merge again once they are finished; grove tests it again and pushes " +
+			"to the same pull request. You may answer a reviewer on the pull request with gh pr comment. Don't close the plan: grove closes it once the pull request is merged."
+	}
+	return "Then post a short summary for the user in the plan chat: what was built, how to try it, and anything that needs their attention, " +
+		"and wait for their feedback there. When they ask for changes, reply to the agents of the tasks that own that part, which reopens them, " +
+		"and merge again once they are finished; when the user is happy, close the plan."
+}
+
+// tryIt is grove's line in the plan chat about trying a merged plan.
+func (m *Model) tryIt() string {
+	if m.cfg.Planner.OpenPRs() {
+		return "grove is opening a pull request for your review; comments there go to the planner."
+	}
+	return "Try it there, then tell the planner here what to change."
+}
 
 // testFixAsk tells the planner what to do when a merged plan's tests fail.
 const testFixAsk = "Don't ask the user yet. Work out which task's work causes each failure: read the output, the merged code and the tasks' diffs, " +
@@ -364,8 +380,8 @@ func (m *Model) onPlanMerged(msg planMergedMsg) tea.Cmd {
 			break
 		}
 		m.queueMerge(p, ask+" No test command is set ([planner] test in grove's config, or \"test\" in the plan): "+
-			"work out how this repository is built and tested, and run that in the worktree, without changing files. "+reviewAsk)
-		post = text + " Try it there, then tell the planner here what to change."
+			"work out how this repository is built and tested, and run that in the worktree, without changing files. "+m.reviewAsk())
+		post = text + " " + m.tryIt()
 		cmds = append(cmds, m.waitForFeedback(p))
 		publish = m.publishPlan(p, "")
 	}
@@ -551,8 +567,8 @@ func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
 		m.progressed()
 		m.plannerNote(roleOutput, testEntry(msg.command, true, string(res.Output)))
 		m.queueMerge(p, msg.report+" grove ran `"+msg.command+"` in that worktree and it passed. "+
-			"Check anything else the change needs, if you must, without changing files. "+reviewAsk)
-		post := fmt.Sprintf("The tests (`%s`) passed. Try it there, then tell the planner here what to change.", msg.command)
+			"Check anything else the change needs, if you must, without changing files. "+m.reviewAsk())
+		post := fmt.Sprintf("The tests (`%s`) passed. %s", msg.command, m.tryIt())
 		if out := outputTail(string(res.Output), 8); out != "" {
 			post += "\n\n```\n" + out + "\n```"
 		}
@@ -582,8 +598,12 @@ func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
 		m.grovePost(p, post, m.orchestrate()))
 }
 
-// waitForFeedback tells the user a merged plan is ready for them.
+// waitForFeedback tells the user a merged plan is ready for them, unless
+// a pull request will be: then onPlanPR tells them.
 func (m *Model) waitForFeedback(p *plan.Plan) tea.Cmd {
+	if m.cfg.Planner.OpenPRs() {
+		return nil
+	}
 	title := p.Title + " is merged into " + p.Merge.Branch + " and waits for your feedback"
 	return tea.Batch(m.notify("✦ "+title+" (t in its worktree)", toastOK), m.alert(title))
 }

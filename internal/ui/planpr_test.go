@@ -3,9 +3,11 @@ package ui
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/gh"
@@ -196,5 +198,63 @@ func TestBaseBranchIsNeverPushed(t *testing.T) {
 	p.Merge.Branch = "plan/shop"
 	if m.publishPlan(p, "passed") != nil {
 		t.Error("pull_requests = false should do nothing")
+	}
+}
+
+func TestPlannerFollowsThePullRequest(t *testing.T) {
+	m, p, f := mergedPlan(t)
+	p.Merge.PR = "https://github.com/x/shop/pull/7"
+	fake := &fakeAgent{}
+	m.runAgent = fake.run
+	var mu sync.Mutex
+	review := gh.Review{State: "OPEN", Feedback: []gh.Feedback{
+		{ID: "review:R1", Author: "ann", Body: "Rename total to sum.", State: "CHANGES_REQUESTED"},
+		{ID: "line:9", Author: "ann", Body: "Off by one", Path: "c.txt", Line: 2},
+	}}
+	m.prHooks.review = func(context.Context, string, string) (gh.Review, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return review, nil
+	}
+	_ = f
+	poll := func() {
+		for _, msg := range runCmds(m.pollReviews()) {
+			_, cmd := m.Update(msg)
+			pump(t, m, cmd)
+		}
+	}
+	m.now = time.Now()
+	poll()
+	if len(fake.reqs) != 1 || !fake.reqs[0].ReadOnly {
+		t.Fatalf("the planner should get the review: %d requests", len(fake.reqs))
+	}
+	ask := fake.reqs[0].Message
+	for _, want := range []string{"ann (requested changes): Rename total to sum.", "ann on c.txt line 2: Off by one", "pull/7"} {
+		if !strings.Contains(ask, want) {
+			t.Errorf("planner request is missing %q:\n%s", want, ask)
+		}
+	}
+	if !slices.Equal(p.Merge.Seen, []string{"review:R1", "line:9"}) {
+		t.Errorf("seen = %q", p.Merge.Seen)
+	}
+
+	// Nothing new: no turn. Read again only after reviewEvery.
+	if m.pollReviews() != nil {
+		t.Error("polled again too soon")
+	}
+	m.now = m.now.Add(reviewEvery)
+	poll()
+	if len(fake.reqs) != 1 {
+		t.Errorf("the same comments were passed on again: %d requests", len(fake.reqs))
+	}
+
+	// Once the user merges it, grove closes the plan.
+	mu.Lock()
+	review.State = "MERGED"
+	mu.Unlock()
+	m.now = m.now.Add(reviewEvery)
+	poll()
+	if p.Status != plan.Done {
+		t.Errorf("status = %s, want done after the pull request was merged", p.Status)
 	}
 }

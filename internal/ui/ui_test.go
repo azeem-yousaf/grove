@@ -92,6 +92,7 @@ func noAgents(m *Model) {
 	m.prHooks.push = func(context.Context, string, string, string, []string) error { return nil }
 	m.prHooks.open = func(context.Context, string, string) (gh.PR, bool, error) { return gh.PR{}, false, nil }
 	m.prHooks.create = func(context.Context, string, string, string, string, string) (string, error) { return "", nil }
+	m.prHooks.review = func(context.Context, string, string) (gh.Review, error) { return gh.Review{State: "OPEN"}, nil }
 }
 
 func press(m *Model, keys ...string) {

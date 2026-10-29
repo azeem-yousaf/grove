@@ -4,6 +4,7 @@ package gh
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -147,4 +148,105 @@ func newest(prs []PR) map[string]PR {
 func firstLine(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
 	return strings.TrimSpace(line)
+}
+
+// Feedback is one thing a reviewer said on a pull request: a review, a
+// comment, or a comment on a line of the code.
+type Feedback struct {
+	ID     string // unique within the pull request, e.g. "review:123"
+	Author string
+	Body   string
+	State  string // a review's: APPROVED, CHANGES_REQUESTED or COMMENTED
+	Path   string // a line comment's file
+	Line   int    // and line, when GitHub knows it
+}
+
+// Review is a pull request's state and everything said on it, oldest
+// first.
+type Review struct {
+	State    string // OPEN, CLOSED or MERGED
+	Feedback []Feedback
+}
+
+// ReadReview reads the state of the pull request at url (or number), its
+// reviews, comments and line comments.
+func ReadReview(ctx context.Context, dir, pr string) (Review, error) {
+	view, err := command(ctx, dir, "", "pr", "view", pr, "--json", "number,state,reviews,comments")
+	if err != nil {
+		return Review{}, err
+	}
+	r, number, err := parseView(view)
+	if err != nil {
+		return Review{}, err
+	}
+	// Line comments are only in the REST API.
+	lines, err := command(ctx, dir, "", "api", "--paginate", fmt.Sprintf("repos/{owner}/{repo}/pulls/%d/comments", number))
+	if err != nil {
+		return r, err
+	}
+	err = r.addLineComments(lines)
+	return r, err
+}
+
+// parseView reads `gh pr view --json number,state,reviews,comments`.
+func parseView(out []byte) (Review, int, error) {
+	type author struct {
+		Login string `json:"login"`
+	}
+	var v struct {
+		Number  int    `json:"number"`
+		State   string `json:"state"`
+		Reviews []struct {
+			ID     string `json:"id"`
+			Author author `json:"author"`
+			Body   string `json:"body"`
+			State  string `json:"state"`
+		} `json:"reviews"`
+		Comments []struct {
+			ID     string `json:"id"`
+			Author author `json:"author"`
+			Body   string `json:"body"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		return Review{}, 0, fmt.Errorf("gh pr view: %w", err)
+	}
+	r := Review{State: v.State}
+	for _, c := range v.Reviews {
+		// A review that only holds line comments has no body of its own.
+		if strings.TrimSpace(c.Body) != "" || c.State == "APPROVED" || c.State == "CHANGES_REQUESTED" {
+			r.Feedback = append(r.Feedback, Feedback{ID: "review:" + c.ID, Author: c.Author.Login, Body: c.Body, State: c.State})
+		}
+	}
+	for _, c := range v.Comments {
+		if strings.TrimSpace(c.Body) != "" {
+			r.Feedback = append(r.Feedback, Feedback{ID: "comment:" + c.ID, Author: c.Author.Login, Body: c.Body})
+		}
+	}
+	return r, v.Number, nil
+}
+
+// addLineComments adds the line comments from `gh api --paginate
+// repos/…/pulls/N/comments`, which prints one JSON array per page.
+func (r *Review) addLineComments(out []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for dec.More() {
+		var page []struct {
+			ID   int64 `json:"id"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Body         string `json:"body"`
+			Path         string `json:"path"`
+			Line         int    `json:"line"`
+			OriginalLine int    `json:"original_line"`
+		}
+		if err := dec.Decode(&page); err != nil {
+			return fmt.Errorf("gh api: %w", err)
+		}
+		for _, c := range page {
+			r.Feedback = append(r.Feedback, Feedback{ID: fmt.Sprintf("line:%d", c.ID), Author: c.User.Login, Body: c.Body, Path: c.Path, Line: cmp.Or(c.Line, c.OriginalLine)})
+		}
+	}
+	return nil
 }

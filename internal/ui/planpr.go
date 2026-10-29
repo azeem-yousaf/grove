@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,9 +25,12 @@ type prHooks struct {
 	push   func(ctx context.Context, dir, remote, branch string, env []string) error
 	open   func(ctx context.Context, dir, branch string) (gh.PR, bool, error)
 	create func(ctx context.Context, dir, base, head, title, body string) (string, error)
+	review func(ctx context.Context, dir, pr string) (gh.Review, error)
 }
 
-func defaultPRHooks() prHooks { return prHooks{push: git.Push, open: gh.Open, create: gh.Create} }
+func defaultPRHooks() prHooks {
+	return prHooks{push: git.Push, open: gh.Open, create: gh.Create, review: gh.ReadReview}
+}
 
 // planPRMsg is how publishing a plan went.
 type planPRMsg struct {
@@ -127,14 +132,117 @@ func (m *Model) onPlanPR(msg planPRMsg) tea.Cmd {
 		return tea.Batch(m.grovePost(p, text), m.notify("Couldn't "+what+": "+err.Error(), toastErr), m.alert("Couldn't "+what))
 	}
 	p.Merge.PR = msg.url
+	m.progressed()
 	text := "Pushed " + msg.branch + "; its pull request " + msg.url + " has the new commits."
 	if msg.created {
 		text = "Opened a pull request from " + msg.branch + " into " + msg.base + ": " + msg.url
 	}
 	m.plannerNote(roleNote, text)
 	cmds := []tea.Cmd{m.savePlan(p), m.grovePost(p, text)}
-	if msg.created {
-		cmds = append(cmds, m.notify("✦ "+p.Title+": pull request opened", toastOK), m.alert(p.Title+": pull request opened"))
+	if msg.created || msg.url != "" && watched(p) {
+		what := p.Title + ": pull request ready for your review"
+		cmds = append(cmds, m.notify("✦ "+what, toastOK), m.alert(what+" "+msg.url))
 	}
 	return tea.Batch(cmds...)
+}
+
+// reviewMsg is a plan's pull request as gh read it.
+type reviewMsg struct {
+	plan   string
+	review gh.Review
+	err    error
+}
+
+// reviewEvery is how often a watched plan's pull request is read.
+const reviewEvery = time.Minute
+
+// pollReviews reads the pull requests of the plans the planner is in
+// charge of, at most once every reviewEvery, so it hears what the user
+// says in their review and grove closes the plan once it is merged.
+func (m *Model) pollReviews() tea.Cmd {
+	if m.ghPath == "" || m.reviewPolling || m.now.Sub(m.lastReviewPoll) < reviewEvery {
+		return nil
+	}
+	var cmds []tea.Cmd
+	for _, p := range m.plans {
+		if !orchestrated(p) || p.Merge == nil || p.Merge.PR == "" || p.Merge.Path == "" {
+			continue
+		}
+		id, dir, pr, read := p.ID, p.Merge.Path, p.Merge.PR, m.prHooks.review
+		cmds = append(cmds, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+			defer cancel()
+			r, err := read(ctx, dir, pr)
+			return reviewMsg{plan: id, review: r, err: err}
+		})
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	m.lastReviewPoll, m.reviewPolling = m.now, true
+	return tea.Batch(cmds...)
+}
+
+// onReview passes new reviews and comments to the planner, and closes the
+// plan once its pull request is merged or closed.
+func (m *Model) onReview(msg reviewMsg) tea.Cmd {
+	m.reviewPolling = false
+	p := m.planByID(msg.plan)
+	if p == nil || p.Merge == nil || !orchestrated(p) {
+		return nil
+	}
+	if msg.err != nil {
+		if m.reviewErr == "" {
+			m.reviewErr = msg.err.Error()
+			return m.notify("Couldn't read "+p.Title+"'s pull request: "+msg.err.Error(), toastErr)
+		}
+		return nil
+	}
+	m.reviewErr = ""
+	switch msg.review.State {
+	case "MERGED":
+		return m.closePlan(p, "its pull request was merged")
+	case "CLOSED":
+		return m.closePlan(p, "its pull request was closed without merging")
+	}
+	var fresh []string
+	for _, f := range msg.review.Feedback {
+		if slices.Contains(p.Merge.Seen, f.ID) {
+			continue
+		}
+		p.Merge.Seen = append(p.Merge.Seen, f.ID)
+		fresh = append(fresh, feedbackLine(f))
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	m.orch.queue = append(m.orch.queue, orchItem{kind: orchReview, plan: p.ID, lines: fresh, urgent: true})
+	text := fmt.Sprintf("%s on the pull request; the planner is on it.", plural(len(fresh), "new review comment"))
+	m.plannerNote(roleNote, text)
+	return tea.Batch(m.savePlan(p), m.grovePost(p, text, m.orchestrate()))
+}
+
+// feedbackLine is one review comment as the planner reads it.
+func feedbackLine(f gh.Feedback) string {
+	who := cmp.Or(f.Author, "someone")
+	switch {
+	case f.Path != "" && f.Line > 0:
+		who += fmt.Sprintf(" on %s line %d", f.Path, f.Line)
+	case f.Path != "":
+		who += " on " + f.Path
+	}
+	switch f.State {
+	case "APPROVED":
+		who += " (approved)"
+	case "CHANGES_REQUESTED":
+		who += " (requested changes)"
+	}
+	body := strings.TrimSpace(f.Body)
+	if r := []rune(body); len(r) > 2000 {
+		body = string(r[:2000]) + "…"
+	}
+	if body == "" {
+		return who
+	}
+	return who + ": " + body
 }

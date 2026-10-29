@@ -76,6 +76,9 @@ type Merge struct {
 	// PR is the URL of the pull request grove opened from Branch into the
 	// plan's base, once there is one.
 	PR string `json:"pr,omitempty"`
+	// Seen is the pull request's reviews and comments already passed on to
+	// the planner, by gh.Feedback ID.
+	Seen []string `json:"seen,omitempty"`
 }
 
 // Merge.Tests values.

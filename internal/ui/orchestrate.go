@@ -48,6 +48,7 @@ const (
 	orchFailed                   // a task failed
 	orchSettled                  // every task of a plan is finished or failed
 	orchMerge                    // how merging a plan went
+	orchReview                   // new reviews and comments on a plan's pull request
 )
 
 // orchItem is one thing waiting for the planner.
@@ -302,7 +303,7 @@ func (m *Model) liveItems(items []orchItem) []orchItem {
 			continue
 		}
 		switch it.kind {
-		case orchGroup, orchMerge:
+		case orchGroup, orchMerge, orchReview:
 		case orchSettled:
 			if p.Status != plan.Running || !p.Settled() || m.mergingPlan[p.ID] || p.Merge != nil && p.Merge.Fixing != "" {
 				continue
@@ -424,6 +425,19 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 			case orchMerge:
 				fmt.Fprintf(&b, "\n%s\n", it.lines[0])
 				what = append(what, "merging "+p.Title)
+			case orchReview:
+				pr := ""
+				if p.Merge != nil {
+					pr = " " + p.Merge.PR
+				}
+				fmt.Fprintf(&b, "\nNew reviews and comments on the plan's pull request%s:\n", pr)
+				for _, l := range it.lines {
+					b.WriteString(quoteText(l) + "\n")
+				}
+				b.WriteString("Do what they ask: reply to the agents of the tasks that own that part (which reopens them) with exactly what to change, " +
+					"and merge again once they are finished; grove tests it and pushes to the same pull request. " +
+					"Answer questions, or say what you changed, on the pull request with gh pr comment. An approval alone needs nothing from you.\n")
+				what = append(what, fmt.Sprintf("%s on %s's pull request", plural(len(it.lines), "review comment"), p.Title))
 			case orchGroup:
 				name := it.group
 				if g, ok := p.Chat(it.group); ok {

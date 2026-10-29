@@ -175,9 +175,12 @@ type Model struct {
 	prOff          bool             // polling stopped after a failure
 	prPolling      bool
 	lastPRPoll     time.Time
-	overview       bool   // the overview of every worktree, in place of both panes
-	ovPath         string // worktree under the overview's cursor
-	ovStart        int    // first and past-last rows of the overview table on screen
+	reviewPolling  bool      // a watched plan's pull request is being read
+	lastReviewPoll time.Time // when pollReviews last ran
+	reviewErr      string    // the last error reading one, shown once
+	overview       bool      // the overview of every worktree, in place of both panes
+	ovPath         string    // worktree under the overview's cursor
+	ovStart        int       // first and past-last rows of the overview table on screen
 	ovEnd          int
 	ovRowsY        int // screen row of the first table row
 	mergeSeq       int
@@ -467,7 +470,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case clockMsg:
 		m.now = time.Time(msg)
-		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick(), m.retryUsage(), m.gitAutoTick()}
+		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick(), m.retryUsage(), m.gitAutoTick(), m.pollReviews()}
 		if m.termFocused {
 			cmds = append(cmds, m.pollPRs(false))
 		}
@@ -552,6 +555,9 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case planPRMsg:
 		return m.onPlanPR(msg)
+
+	case reviewMsg:
+		return m.onReview(msg)
 
 	case guardInstalledMsg:
 		return m.onGuardInstalled(msg)
