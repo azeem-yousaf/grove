@@ -554,6 +554,10 @@ func (m *Model) taskContext(s *session) string {
 		b.WriteString("\nThe plan's other tasks, for context:\n" + strings.Join(others, "\n") + "\n")
 	}
 	b.WriteString(m.groupContext(p, t))
+	if m.groveBin != "" {
+		b.WriteString("\nThe plan also has a plan chat for the user, the planner and every task's agent, through the plan tools (`members`, `post`, `read`). " +
+			"The user gives feedback on the whole plan there. Read it when you are woken for a message in it; post there only for what the user or the whole plan needs to know.\n")
+	}
 	b.WriteString("\nWhen the task is done, say so plainly and list what you changed. If you need a decision from the user, end your reply with the question.\n")
 	return b.String()
 }

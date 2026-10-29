@@ -23,7 +23,7 @@ func TestTools(t *testing.T) {
 	if got, failed := call(t, dir, "tasks", nil); !failed || !strings.Contains(got, "Couldn't read") {
 		t.Errorf("tasks before grove wrote anything = %q", got)
 	}
-	if err := WriteState(dir, State{Plans: []Plan{{Title: "Shop", Status: "running", Tasks: []Task{
+	if err := WriteState(dir, State{Plans: []Plan{{ID: "p1", Title: "Shop", Status: "running", Groups: []string{"checkout"}, Tasks: []Task{
 		{Branch: "feature/api", Title: "API", Status: "working", Path: "/src/api", Busy: true,
 			Approvals: []Approval{{Tool: "Bash", Command: "npm test"}}, LastReply: "Running the tests."},
 		{Branch: "feature/ui", Title: "UI", Status: "queued"},
@@ -32,7 +32,7 @@ func TestTools(t *testing.T) {
 	}
 
 	got, failed := call(t, dir, "tasks", nil)
-	for _, want := range []string{`Plan "Shop" (running)`, "- feature/api: API · working · agent working · worktree /src/api", "Waiting for approval (Bash): npm test", "    Running the tests.", "- feature/ui: UI · queued"} {
+	for _, want := range []string{`Plan "Shop" (id p1, running)`, "Group chats: checkout", "- feature/api: API · working · agent working · worktree /src/api", "Waiting for approval (Bash): npm test", "    Running the tests.", "- feature/ui: UI · queued"} {
 		if failed || !strings.Contains(got, want) {
 			t.Errorf("tasks is missing %q:\n%s", want, got)
 		}
@@ -48,6 +48,10 @@ func TestTools(t *testing.T) {
 		{"message", map[string]any{"task": "feature/api", "text": " "}, "empty"},
 		{"approve", map[string]any{"task": "feature/api", "command": "rm -rf /"}, "isn't waiting to run"},
 		{"mark", map[string]any{"task": "feature/api", "status": "great"}, "status must be"},
+		{"post", map[string]any{"text": "hi", "group": "nope"}, "has no group"},
+		{"post", map[string]any{"text": "hi", "to": "feature/nope"}, "has no task"},
+		{"post", map[string]any{"text": "hi", "plan": "Other"}, "No running plan"},
+		{"post", map[string]any{"text": " "}, "empty"},
 	} {
 		if got, failed := call(t, dir, bad.tool, bad.args); !failed || !strings.Contains(got, bad.want) {
 			t.Errorf("%s %v = %q, want an error with %q", bad.tool, bad.args, got, bad.want)
@@ -64,6 +68,8 @@ func TestTools(t *testing.T) {
 		{"message", map[string]any{"task": "Feature/API", "text": "Use v2."}},
 		{"deny", map[string]any{"task": "feature/api", "command": "npm test", "reason": "use make test"}},
 		{"mark", map[string]any{"task": "feature/ui", "status": "failed", "note": "not needed"}},
+		{"post", map[string]any{"text": "Merged; try checkout."}},
+		{"post", map[string]any{"plan": "shop", "group": "checkout", "to": "feature/ui", "text": "Wait for the API."}},
 	} {
 		if got, failed := call(t, dir, ok.tool, ok.args); failed {
 			t.Errorf("%s: %s", ok.tool, got)
@@ -77,6 +83,8 @@ func TestTools(t *testing.T) {
 		{Action: Message, Task: "feature/api", Text: "Use v2."},
 		{Action: Deny, Task: "feature/api", Text: "npm test", Note: "use make test"},
 		{Action: Fail, Task: "feature/ui", Note: "not needed"},
+		{Action: Post, Plan: "p1", Text: "Merged; try checkout."},
+		{Action: Post, Plan: "p1", Group: "checkout", To: "feature/ui", Text: "Wait for the API."},
 	}
 	if len(orders) != len(want) {
 		t.Fatalf("orders = %+v", orders)

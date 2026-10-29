@@ -14,9 +14,10 @@ import (
 // shell commands without asking (still no edits of its own), for example to
 // check a task's diff and tests, and it gets grove's control tools (package
 // control): see the tasks, message their agents, answer their approval
-// requests and mark tasks done or failed. grove publishes the watched tasks
-// to the control folder and carries out the orders the tools queue there
-// every second, through the same decide as grove-orchestrate blocks.
+// requests, mark tasks done or failed, and post in the plans' chats. grove
+// publishes the watched tasks to the control folder and carries out the
+// orders the tools queue there every second, through the same decide as
+// grove-orchestrate blocks.
 
 type controlMsg struct {
 	orders []control.Order
@@ -62,7 +63,10 @@ func (m *Model) controlState() control.State {
 		if !watched(p) || p.Status != plan.Running {
 			continue
 		}
-		cp := control.Plan{Title: p.Title, Status: string(p.Status)}
+		cp := control.Plan{ID: p.ID, Title: p.Title, Status: string(p.Status)}
+		for _, g := range p.Groups {
+			cp.Groups = append(cp.Groups, g.ID)
+		}
 		for _, t := range p.Tasks {
 			ct := control.Task{Branch: t.Branch, Title: t.Title, Group: t.Group, Status: string(t.Status), Error: t.Error, Path: t.Path}
 			if s := m.sessionFor(t.Path); t.Path != "" && s != nil {
@@ -159,6 +163,8 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 			d.Mark = append(d.Mark, struct{ Branch, Status, Note string }{o.Task, "finished", o.Note})
 		case control.Fail:
 			d.Mark = append(d.Mark, struct{ Branch, Status, Note string }{o.Task, "failed", o.Note})
+		case control.Post:
+			d.Post = append(d.Post, struct{ Plan, Group, To, Message string }{o.Plan, o.Group, o.To, o.Text})
 		}
 	}
 	return m.decide(d)

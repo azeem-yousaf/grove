@@ -19,6 +19,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/open"
+	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -348,6 +349,9 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "ctrl+g":
 		if !s.planner {
 			return m.openGroupChat(s.path)
+		}
+		if p := m.latestStarted(); p != nil {
+			return m.openGroup(p.ID, plan.ChatID)
 		}
 	case "ctrl+a":
 		if s.running {

@@ -224,9 +224,10 @@ func (m *Model) queueTurn(s *session) {
 	}
 }
 
-// queueGroups passes new messages in watched plans' group chats to the
-// planner. Messages to everyone start a turn; messages between two agents
-// wait for the next one. What was there before grove started isn't news.
+// queueGroups passes new messages in watched plans' chats to the planner.
+// Messages to everyone start a turn, and in the plan chat so does anything
+// the user says; messages between two agents wait for the next one. What
+// was there before grove started isn't news.
 func (m *Model) queueGroups() {
 	if m.orch.seen == nil {
 		m.orch.seen = map[string]int{}
@@ -235,7 +236,7 @@ func (m *Model) queueGroups() {
 		if !watched(p) {
 			continue
 		}
-		for _, grp := range p.Groups {
+		for _, grp := range p.Chats() {
 			log, ok := m.groupLog(p, grp.ID)
 			g := m.groups[log.Dir]
 			if !ok || g == nil {
@@ -256,7 +257,14 @@ func (m *Model) queueGroups() {
 					to = " → " + msg.To
 				}
 				it.lines = append(it.lines, msg.From+to+": "+msg.Text)
-				it.urgent = it.urgent || msg.To == "" && msg.From != group.User
+				switch {
+				case grp.ID == plan.ChatID && msg.From == group.User:
+					it.urgent = true
+				case grp.ID == plan.ChatID && msg.From == group.Grove:
+					// grove's own news comes to the planner some other way.
+				default:
+					it.urgent = it.urgent || msg.To == "" && msg.From != group.User
+				}
 			}
 			if len(it.lines) > 0 {
 				m.orch.queue = append(m.orch.queue, it)
@@ -343,7 +351,7 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 	b.WriteString("[grove] You are watching these plans' agents for the user. Decide what you can; whatever you leave out waits for the user.\n")
 	for _, id := range planIDs(items) {
 		p := m.planByID(id)
-		fmt.Fprintf(&b, "\n## Plan %q\n", p.Title)
+		fmt.Fprintf(&b, "\n## Plan %q (id %s)\n", p.Title, p.ID)
 		for _, it := range items {
 			if it.plan != id {
 				continue
@@ -371,10 +379,14 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 				what = append(what, it.branch+" failed")
 			case orchGroup:
 				name := it.group
-				if g, ok := p.Group(it.group); ok {
+				if g, ok := p.Chat(it.group); ok {
 					name = g.Name
 				}
-				fmt.Fprintf(&b, "\nNew messages in the group chat %q (group id %q):\n", name, it.group)
+				if it.group == plan.ChatID {
+					fmt.Fprintf(&b, "\nNew messages in the plan chat (group id %q), where the user talks to you:\n", plan.ChatID)
+				} else {
+					fmt.Fprintf(&b, "\nNew messages in the group chat %q (group id %q):\n", name, it.group)
+				}
 				for _, l := range it.lines {
 					b.WriteString(quoteText(l) + "\n")
 				}
@@ -387,18 +399,19 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
   "approve": [{"branch": "feature/api", "command": "npm test"}],
   "deny": [{"branch": "feature/api", "command": "git push --force", "reason": "what the agent should do instead"}],
   "reply": [{"branch": "feature/ui", "message": "your answer to its question"}],
-  "post": [{"group": "checkout", "to": "", "message": "to everyone, or set to a member's branch"}],
+  "post": [{"plan": "plan id", "group": "checkout", "to": "", "message": "to everyone, or set to a member's branch"}],
   "mark": [{"branch": "feature/docs", "status": "failed", "note": "why, for the user"}]
 }` + "\n```\n\n")
 	if len(m.controlTools(m.planner)) > 0 {
-		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark) instead of the block, " +
+		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark, post) instead of the block, " +
 			"and you may run shell commands without asking, for example to read a task's diff or run its tests in its worktree. " +
 			"Don't change any files yourself; the task agents do the work.\n\n")
 	}
 	b.WriteString("Approve a command only when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for. " +
 		"Deny anything destructive, anything that reaches outside the worktree, and pushing or publishing. When unsure, leave it out so the user decides. " +
 		"Reply to a question only when the plan and the code answer it; leave questions about what the user wants for the user. " +
-		"Post in a group chat only to settle something the agents are stuck on or disagree about. Keep messages short.\n")
+		"Post in a group chat only to settle something the agents are stuck on or disagree about. " +
+		"Answer the user in the plan chat (group \"plan\"), not in your reply: they read the plan chat. Keep messages short.\n")
 	return b.String(), "Asked to decide: " + strings.Join(what, "; ")
 }
 
@@ -424,7 +437,7 @@ type decisions struct {
 	Approve []struct{ Branch, Command string }
 	Deny    []struct{ Branch, Command, Reason string }
 	Reply   []struct{ Branch, Message string }
-	Post    []struct{ Group, To, Message string }
+	Post    []struct{ Plan, Group, To, Message string }
 	Mark    []struct{ Branch, Status, Note string }
 }
 
@@ -526,7 +539,7 @@ func (m *Model) decide(d decisions) tea.Cmd {
 		cmds = append(cmds, m.finishIfSettled(p), m.savePlan(p), m.schedule())
 	}
 	for _, p := range d.Post {
-		cmds = append(cmds, m.plannerPost(p.Group, p.To, p.Message))
+		cmds = append(cmds, m.plannerPost(p.Plan, p.Group, p.To, p.Message))
 	}
 	return tea.Batch(cmds...)
 }
@@ -556,24 +569,30 @@ func (m *Model) pendingFor(branch, command string) (*session, int) {
 	return nil, -1
 }
 
-// plannerPost posts the planner's message in a watched plan's group chat.
-func (m *Model) plannerPost(groupID, to, text string) tea.Cmd {
+// plannerPost posts the planner's message in a watched plan's chat. Every
+// plan has a plan chat, so without planID it goes to the newest one still
+// going.
+func (m *Model) plannerPost(planID, groupID, to, text string) tea.Cmd {
 	text = strings.TrimSpace(text)
+	if groupID == "" {
+		groupID = plan.ChatID
+	}
 	if text == "" {
 		return nil
 	}
-	for _, p := range m.plans {
-		if !watched(p) {
+	for i := len(m.plans) - 1; i >= 0; i-- {
+		p := m.plans[i]
+		if !watched(p) || planID != "" && p.ID != planID && p.Title != planID || planID == "" && p.Status == plan.Done {
 			continue
 		}
-		if _, ok := p.Group(groupID); !ok {
+		if _, ok := p.Chat(groupID); !ok {
 			continue
 		}
 		log, ok := m.groupLog(p, groupID)
 		if !ok {
 			return nil
 		}
-		if !slices.ContainsFunc(p.Members(groupID), func(t *plan.Task) bool { return t.Branch == to }) {
+		if !slices.ContainsFunc(p.ChatMembers(groupID), func(t *plan.Task) bool { return t.Branch == to }) {
 			to = ""
 		}
 		msg := group.Message{From: group.Planner, To: to, Text: text}

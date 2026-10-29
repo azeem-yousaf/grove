@@ -43,7 +43,7 @@ func defaultKeys() keyMap {
 		Overview:   b("w", "overview of every worktree", "w"),
 		Merge:      b("c", "merge branches into this worktree", "c"),
 		Planner:    b("P", "planner", "P"),
-		Group:      b("t", "group chat", "t"),
+		Group:      b("t", "group or plan chat", "t"),
 		Ship:       b("s", "commit, push, pull request", "s"),
 		Review:     b("v", "every change in the worktree", "v"),
 		Filter:     b("/", "filter", "/"),
@@ -93,7 +93,7 @@ var helpSections = []helpSection{
 	{"Agent", [][2]string{
 		{"a", "open worktree agent"},
 		{"P", "planner: plan tasks"},
-		{"t", "group chat"},
+		{"t", "group or plan chat"},
 		{"enter", "send / allow / run"},
 		{"esc", "deny or skip a card"},
 		{"ctrl+x", "stop the agent"},

@@ -16,15 +16,20 @@ import (
 )
 
 // Grouped tasks' agents share a group chat (package group), reached through
-// grove's own MCP tool server, which only they are given. grove shows the
-// chat, lets the user post in it, and wakes idle agents that have messages
-// waiting, at most cfg.Planner.Wakeups() times in a row per group before
-// the user posts again, so agents can't keep each other going forever.
+// grove's own MCP tool server, which only they are given. Every started plan
+// also has a plan chat (plan.ChatID) for the user, the planner and all its
+// agents, reached through a second server named "plan"; there agents are
+// woken only for messages addressed to them, since the planner answers the
+// rest. grove shows the chats, lets the user post in them, and wakes idle
+// agents that have messages waiting, at most cfg.Planner.Wakeups() times in
+// a row per chat before the user posts again, so agents can't keep each
+// other going forever.
 
 // groupState is what grove last read of one group.
 type groupState struct {
 	msgs    []group.Message
 	unread  map[string]int // by member, from their read cursors
+	direct  map[string]int // the unread ones addressed to that member alone
 	wakeups int            // automatic wake-ups since the user last posted
 	paused  bool           // wake-ups stopped at the limit
 }
@@ -32,6 +37,7 @@ type groupState struct {
 // groupChat is the group chat pane, shown in place of the diff.
 type groupChat struct {
 	plan, group string
+	back        string // the group chat ctrl+t returns to from the plan chat
 	input       textarea.Model
 	view        viewport.Model
 	follow      bool
@@ -51,8 +57,8 @@ type groupsReadMsg struct {
 }
 
 type groupRead struct {
-	msgs   []group.Message
-	unread map[string]int
+	msgs           []group.Message
+	unread, direct map[string]int
 }
 
 // groupLog is the chat of a plan's group, or false without a store.
@@ -63,23 +69,30 @@ func (m *Model) groupLog(p *plan.Plan, groupID string) (group.Log, bool) {
 	return group.Log{Dir: group.Dir(m.store.Dir(), p.ID, groupID)}, true
 }
 
-// groupTools gives a grouped task's agent its group chat. Agents of
-// isolated tasks get nothing.
+// groupTools gives a task's agent its group chat, if it is grouped, and
+// its plan's chat.
 func (m *Model) groupTools(s *session) []agent.ToolServer {
 	p, t := m.taskFor(s.path)
-	if t == nil || t.Group == "" || m.groveBin == "" {
+	if t == nil || m.groveBin == "" || p.Status == plan.Draft {
 		return nil
 	}
-	log, ok := m.groupLog(p, t.Group)
-	if !ok {
-		return nil
+	server := func(name, groupID string) []agent.ToolServer {
+		log, ok := m.groupLog(p, groupID)
+		if !ok {
+			return nil
+		}
+		return []agent.ToolServer{{
+			Name:    name,
+			Command: m.groveBin,
+			Args:    []string{"mcp-group", "--dir", log.Dir, "--as", t.Branch},
+			Allow:   group.Tools,
+		}}
 	}
-	return []agent.ToolServer{{
-		Name:    "grove",
-		Command: m.groveBin,
-		Args:    []string{"mcp-group", "--dir", log.Dir, "--as", t.Branch},
-		Allow:   group.Tools,
-	}}
+	var out []agent.ToolServer
+	if t.Group != "" {
+		out = server("grove", t.Group)
+	}
+	return append(out, server("plan", plan.ChatID)...)
 }
 
 // groupmateDirs are the worktrees of s's groupmates that exist, which its
@@ -98,18 +111,18 @@ func (m *Model) groupmateDirs(s *session) []string {
 	return out
 }
 
-// groupInfo is who is in a group, for the members tool.
+// groupInfo is who is in a chat, for the members tool.
 func groupInfo(p *plan.Plan, g plan.Group) group.Info {
 	info := group.Info{Plan: p.Title, Name: g.Name}
-	for _, t := range p.Members(g.ID) {
+	for _, t := range p.ChatMembers(g.ID) {
 		info.Members = append(info.Members, group.Member{Name: t.Branch, Task: t.Title, Brief: t.Brief, Path: t.Path, Status: string(t.Status)})
 	}
 	return info
 }
 
-// writeGroupInfo refreshes every group's member list of a started plan.
+// writeGroupInfo refreshes every chat's member list of a started plan.
 func (m *Model) writeGroupInfo(p *plan.Plan) tea.Cmd {
-	if m.store == nil || p.Status == plan.Draft || len(p.Groups) == 0 {
+	if m.store == nil || p.Status == plan.Draft {
 		return nil
 	}
 	type job struct {
@@ -117,7 +130,7 @@ func (m *Model) writeGroupInfo(p *plan.Plan) tea.Cmd {
 		info group.Info
 	}
 	var jobs []job
-	for _, g := range p.Groups {
+	for _, g := range p.Chats() {
 		if log, ok := m.groupLog(p, g.ID); ok {
 			jobs = append(jobs, job{log, groupInfo(p, g)})
 		}
@@ -179,13 +192,13 @@ func (m *Model) pollGroups() tea.Cmd {
 		if p.Status == plan.Draft {
 			continue
 		}
-		for _, g := range p.Groups {
+		for _, g := range p.Chats() {
 			log, ok := m.groupLog(p, g.ID)
 			if !ok {
 				continue
 			}
 			logs = append(logs, log)
-			for _, t := range p.Members(g.ID) {
+			for _, t := range p.ChatMembers(g.ID) {
 				members = append(members, member{log, t.Branch})
 			}
 		}
@@ -198,11 +211,17 @@ func (m *Model) pollGroups() tea.Cmd {
 		out := map[string]groupRead{}
 		for _, l := range logs {
 			msgs, _ := l.All()
-			out[l.Dir] = groupRead{msgs: msgs, unread: map[string]int{}}
+			out[l.Dir] = groupRead{msgs: msgs, unread: map[string]int{}, direct: map[string]int{}}
 		}
 		for _, mb := range members {
 			r := out[mb.log.Dir]
-			r.unread[mb.name] = len(group.UnreadIn(r.msgs, mb.log.Cursor(mb.name), mb.name))
+			unread := group.UnreadIn(r.msgs, mb.log.Cursor(mb.name), mb.name)
+			r.unread[mb.name] = len(unread)
+			for _, msg := range unread {
+				if msg.To == mb.name {
+					r.direct[mb.name]++
+				}
+			}
 		}
 		return groupsReadMsg{out}
 	}
@@ -216,57 +235,80 @@ func (m *Model) onGroupsRead(msg groupsReadMsg) tea.Cmd {
 			g = &groupState{}
 			m.groups[dir] = g
 		}
-		g.msgs, g.unread = r.msgs, r.unread
+		g.msgs, g.unread, g.direct = r.msgs, r.unread, r.direct
 	}
 	m.queueGroups()
 	return tea.Batch(m.wakeGroups(), m.orchestrate())
 }
 
 // wakeGroups starts a turn for each idle grouped agent with messages
-// waiting, until its group reaches the wake-up limit.
+// waiting, and each agent with plan chat messages addressed to it, until
+// the chat reaches the wake-up limit.
 func (m *Model) wakeGroups() tea.Cmd {
 	var cmds []tea.Cmd
 	for _, p := range m.plans {
 		if p.Status == plan.Draft {
 			continue
 		}
-		for _, grp := range p.Groups {
+		for _, grp := range p.Chats() {
 			log, ok := m.groupLog(p, grp.ID)
 			g := m.groups[log.Dir]
 			if !ok || g == nil {
 				continue
 			}
-			for _, t := range p.Members(grp.ID) {
+			waiting, tool := g.unread, "grove's read tool"
+			if grp.ID == plan.ChatID {
+				waiting, tool = g.direct, "the plan chat's read tool"
+			}
+			for _, t := range p.ChatMembers(grp.ID) {
 				s := m.sessionFor(t.Path)
-				if t.Path == "" || s == nil || s.running || len(s.pending) > 0 || g.unread[t.Branch] == 0 {
+				if t.Path == "" || s == nil || s.running || len(s.pending) > 0 || waiting[t.Branch] == 0 {
 					continue
 				}
 				if g.wakeups >= m.cfg.Planner.Wakeups() {
 					if !g.paused {
 						g.paused = true
 						cmds = append(cmds,
-							m.notify(fmt.Sprintf("%s: paused waking agents after %d messages in a row; post in the group chat (t) to go on", groupTitle(grp), g.wakeups), toastInfo),
-							m.alert(groupTitle(grp)+": the group chat waits for you"))
+							m.notify(fmt.Sprintf("%s: paused waking agents after %d messages in a row; post in the chat (t) to go on", groupTitle(grp), g.wakeups), toastInfo),
+							m.alert(groupTitle(grp)+": the chat waits for you"))
 					}
 					continue
 				}
 				g.wakeups++
-				n := g.unread[t.Branch]
-				g.unread[t.Branch] = 0 // until the next poll sees what it read
-				cmds = append(cmds, m.send(s, fmt.Sprintf("You have %s in your group chat. Read them with grove's read tool, answer if they need it, and carry on with your task.", plural(n, "new message"))))
+				n := waiting[t.Branch]
+				g.unread[t.Branch], g.direct[t.Branch] = 0, 0 // until the next poll sees what it read
+				cmds = append(cmds, m.send(s, fmt.Sprintf("You have %s in %s. Read them with %s, answer if they need it, and carry on with your task.",
+					plural(n, "new message"), chatName(grp), tool)))
 			}
 		}
 	}
 	return tea.Batch(cmds...)
 }
 
-// openGroupChat shows the group chat of the task in the worktree at path.
+// openGroupChat shows the group chat of the task in the worktree at path,
+// or its plan's chat when the task isn't grouped.
 func (m *Model) openGroupChat(path string) tea.Cmd {
 	p, t := m.taskFor(path)
+	if t == nil {
+		if p = m.mergedInto(path); p == nil {
+			return m.notify("That worktree isn't part of a plan", toastInfo)
+		}
+	}
+	if p.Status == plan.Draft {
+		return nil
+	}
 	if t == nil || t.Group == "" {
-		return m.notify("That worktree isn't part of a group", toastInfo)
+		return m.openGroup(p.ID, plan.ChatID)
 	}
 	return m.openGroup(p.ID, t.Group)
+}
+
+// chatName is how an agent is told about a chat.
+func chatName(g plan.Group) string {
+	if g.ID == plan.ChatID {
+		return "your plan chat"
+	}
+	return "your group chat"
 }
 
 // openGroup shows a plan group's chat.
@@ -276,6 +318,9 @@ func (m *Model) openGroup(planID, groupID string) tea.Cmd {
 	}
 	ta := newChatInput()
 	ta.Placeholder = "message the group; @branch to address one agent…"
+	if groupID == plan.ChatID {
+		ta.Placeholder = "message the planner; @branch to address one agent…"
+	}
 	ta.SetStyles(chatInputStyles(m.dark))
 	m.groupChat = &groupChat{plan: planID, group: groupID, input: ta, view: viewport.New(), follow: true}
 	m.focus = focusGroup
@@ -293,6 +338,18 @@ func (m *Model) onGroupKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.quitNow()
 	case "tab", "shift+tab", "esc":
 		m.focus = focusList
+		return nil
+	case "ctrl+t":
+		// From a group's chat to its plan's, and back.
+		if gc.group != plan.ChatID {
+			back := gc.group
+			cmd := m.openGroup(gc.plan, plan.ChatID)
+			m.groupChat.back = back
+			return cmd
+		}
+		if gc.back != "" {
+			return m.openGroup(gc.plan, gc.back)
+		}
 		return nil
 	case "pgup":
 		gc.view.ScrollUp(max(gc.view.Height()/2, 1))
@@ -330,7 +387,7 @@ func (m *Model) postToGroup(text string) tea.Cmd {
 	m.userActed()
 	msg := group.Message{From: group.User, Text: text}
 	if name, rest, found := strings.Cut(text, " "); found && strings.HasPrefix(name, "@") {
-		for _, t := range p.Members(gc.group) {
+		for _, t := range p.ChatMembers(gc.group) {
 			if t.Branch == name[1:] {
 				msg.To, msg.Text = t.Branch, rest
 			}
@@ -358,13 +415,13 @@ func (m *Model) groupPane(w, h int) string {
 	if p == nil {
 		return m.panel("Group chat", "", "", nil, w, h, true)
 	}
-	g, _ := p.Group(gc.group)
+	g, _ := p.Chat(gc.group)
 	log, _ := m.groupLog(p, gc.group)
 	state := m.groups[log.Dir]
 
 	var lines []string
 	var who []string
-	for _, t := range p.Members(gc.group) {
+	for _, t := range p.ChatMembers(gc.group) {
 		badge := st.faint.Render(string(t.Status))
 		if s := m.sessionFor(t.Path); s != nil && s.running {
 			badge = st.accent.Render("working")
@@ -372,10 +429,17 @@ func (m *Model) groupPane(w, h int) string {
 		who = append(who, st.text.Render(t.Branch)+" "+badge)
 	}
 	lines = append(lines, " "+st.muted.Render("Members: ")+strings.Join(who, st.faint.Render(" · ")))
-	if state == nil || len(state.msgs) == 0 {
+	if mg := p.Merge; gc.group == plan.ChatID && mg != nil {
+		lines = append(lines, " "+ansi.Truncate(st.muted.Render("Merged into: ")+st.text.Render(mg.Branch)+st.faint.Render(" · "+mg.Path), inner-1, "…"))
+	}
+	switch {
+	case (state == nil || len(state.msgs) == 0) && gc.group == plan.ChatID:
+		lines = append(lines, "", "  "+st.muted.Render("No messages yet. The planner posts here once it has merged"),
+			"  "+st.muted.Render("the plan; tell it what to change, or @branch to ask one agent."))
+	case state == nil || len(state.msgs) == 0:
 		lines = append(lines, "", "  "+st.muted.Render("No messages yet. The agents post here when they need each"),
 			"  "+st.muted.Render("other; you can post too, or @branch to address one agent."))
-	} else {
+	default:
 		lines = append(lines, m.groupMessageLines(gc, state.msgs, inner)...)
 	}
 	if state != nil && state.paused {
@@ -391,7 +455,14 @@ func (m *Model) groupPane(w, h int) string {
 		}
 		bottom = append(bottom, " "+mark+l)
 	}
-	bottom = append(bottom, " "+ansi.Truncate(m.hints([][2]string{{"enter", "post"}, {"@branch", "to one"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}}), inner-1, ""))
+	hints := [][2]string{{"enter", "post"}, {"@branch", "to one"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}}
+	switch {
+	case gc.group != plan.ChatID:
+		hints = append(hints, [2]string{"ctrl+t", "plan chat"})
+	case gc.back != "":
+		hints = append(hints, [2]string{"ctrl+t", "group chat"})
+	}
+	bottom = append(bottom, " "+ansi.Truncate(m.hints(hints), inner-1, ""))
 	gc.view.SetWidth(inner)
 	gc.view.SetHeight(max(h-2-len(bottom), 1))
 	// The viewport measures every line it is given, so only hand it new
@@ -404,7 +475,7 @@ func (m *Model) groupPane(w, h int) string {
 		gc.view.GotoBottom()
 	}
 	body := append(strings.Split(gc.view.View(), "\n"), bottom...)
-	return m.panel(groupTitle(*g)+" · "+p.Title, st.faint.Render(plural(len(p.Members(gc.group)), "agent")), "", body, w, h, m.focus == focusGroup)
+	return m.panel(groupTitle(g)+" · "+p.Title, st.faint.Render(plural(len(p.ChatMembers(gc.group)), "agent")), "", body, w, h, m.focus == focusGroup)
 }
 
 // groupMessageLines renders msgs, reusing what earlier frames rendered.
@@ -420,6 +491,8 @@ func (m *Model) groupMessageLines(gc *groupChat, msgs []group.Message, inner int
 			name = st.accent.Bold(true).Render("you")
 		case group.Grove:
 			name = st.warn.Bold(true).Render("grove")
+		case group.Planner:
+			name = st.accent.Render("planner")
 		}
 		head := " " + st.faint.Render(msg.Time.Local().Format("15:04")) + " " + name
 		if msg.To != "" {

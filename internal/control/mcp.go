@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/azeem-yousaf/grove/internal/mcp"
@@ -71,6 +72,18 @@ func server(dir, version string) mcp.Server {
 					return order(dir, "mark", args)
 				},
 			},
+			{
+				Name: "post",
+				Description: "Post in a plan's chat: the plan chat, where the user gives you feedback on the plan and you answer them, " +
+					"or one of its group chats. Address one task's agent with `to`, or leave it out for everyone.",
+				Schema: mcp.Object(map[string]any{
+					"plan":  str("The plan's ID, as tasks shows it. Optional when only one plan is running."),
+					"group": str(`A group ID from tasks, or leave out for the plan chat.`),
+					"to":    str("A task's branch, to address only its agent."),
+					"text":  str("The message."),
+				}, "text"),
+				Call: func(args json.RawMessage) (string, bool) { return post(dir, args) },
+			},
 		},
 	}
 }
@@ -85,7 +98,13 @@ func tasks(dir string) (string, bool) {
 	}
 	var b strings.Builder
 	for _, p := range st.Plans {
-		fmt.Fprintf(&b, "Plan %q (%s)\n", p.Title, p.Status)
+		fmt.Fprintf(&b, "Plan %q (id %s, %s)\n", p.Title, p.ID, p.Status)
+		if len(p.Groups) > 0 {
+			fmt.Fprintf(&b, "Group chats: %s\n", strings.Join(p.Groups, ", "))
+		}
+		if p.Merge != "" {
+			fmt.Fprintf(&b, "Merge: %s\n", p.Merge)
+		}
 		for _, t := range p.Tasks {
 			fmt.Fprintf(&b, "\n- %s: %s · %s", t.Branch, t.Title, t.Status)
 			if t.Busy {
@@ -172,4 +191,49 @@ func order(dir, action string, args json.RawMessage) (string, bool) {
 		return "Couldn't reach grove: " + err.Error(), true
 	}
 	return done, false
+}
+
+// post checks a chat message against the plans grove last described and
+// queues it.
+func post(dir string, args json.RawMessage) (string, bool) {
+	var a struct{ Plan, Group, To, Text string }
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "Invalid arguments: " + err.Error(), true
+	}
+	if strings.TrimSpace(a.Text) == "" {
+		return "The message is empty.", true
+	}
+	p, msg := findPlan(dir, a.Plan)
+	if msg != "" {
+		return msg, true
+	}
+	if a.Group != "" && a.Group != "plan" && !slices.Contains(p.Groups, a.Group) {
+		return fmt.Sprintf("Plan %q has no group %q; its groups are: %s.", p.Title, a.Group, strings.Join(p.Groups, ", ")), true
+	}
+	if a.To != "" && !slices.ContainsFunc(p.Tasks, func(t Task) bool { return strings.EqualFold(t.Branch, a.To) }) {
+		return fmt.Sprintf("Plan %q has no task with the branch %q.", p.Title, a.To), true
+	}
+	if err := Queue(dir, Order{Action: Post, Plan: p.ID, Group: a.Group, To: a.To, Text: a.Text}); err != nil {
+		return "Couldn't reach grove: " + err.Error(), true
+	}
+	return "Posted.", false
+}
+
+// findPlan is the plan named by ID or title, or the only one when name is
+// empty, or a message saying why there is none.
+func findPlan(dir, name string) (Plan, string) {
+	st, err := ReadState(dir)
+	if err != nil {
+		return Plan{}, "Couldn't read the plans: " + err.Error()
+	}
+	if name == "" {
+		if len(st.Plans) != 1 {
+			return Plan{}, fmt.Sprintf("%d plans are running: say which with plan.", len(st.Plans))
+		}
+		return st.Plans[0], ""
+	}
+	if p, ok := st.FindPlan(name); ok {
+		return p, ""
+	}
+	return Plan{}, fmt.Sprintf("No running plan is called %q; use the tasks tool to see them.", name)
 }

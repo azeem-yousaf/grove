@@ -24,6 +24,7 @@ type Status string
 const (
 	Draft   Status = "draft"   // proposed, waiting for the user to confirm
 	Running Status = "running" // confirmed: worktrees made, agents at work
+	Review  Status = "review"  // merged by the planner, waiting for the user's feedback
 	Done    Status = "done"    // every task finished; merging is up to the user
 )
 
@@ -55,6 +56,17 @@ type Plan struct {
 	Updated      time.Time `json:"updated"`
 	Groups       []Group   `json:"groups,omitempty"`
 	Tasks        []Task    `json:"tasks"`
+	Merge        *Merge    `json:"merge,omitempty"` // where the planner merges the finished tasks
+}
+
+// Merge is the plan's own worktree, where the planner merges the finished
+// tasks' branches for the user to try.
+type Merge struct {
+	Branch string `json:"branch"`
+	Path   string `json:"path,omitempty"`
+	// Fixing is the branch of a task whose agent is resolving a conflict
+	// with the work merged so far; the merge goes on once it is done.
+	Fixing string `json:"fixing,omitempty"`
 }
 
 // Group is a set of tasks whose agents share a group chat and may read
@@ -92,6 +104,10 @@ func (p *Plan) Clone() *Plan {
 	c := *p
 	c.Groups = append([]Group(nil), p.Groups...)
 	c.Tasks = append([]Task(nil), p.Tasks...)
+	if p.Merge != nil {
+		mg := *p.Merge
+		c.Merge = &mg
+	}
 	return &c
 }
 
@@ -122,6 +138,40 @@ func (p *Plan) Members(group string) []*Task {
 		if group != "" && p.Tasks[i].Group == group {
 			out = append(out, &p.Tasks[i])
 		}
+	}
+	return out
+}
+
+// ChatID is the group ID of the plan chat, which every started plan has:
+// the user, the planner and all the plan's agents. Planned groups can't use
+// it.
+const ChatID = "plan"
+
+// Chat returns the group with the given ID, the plan chat included.
+func (p *Plan) Chat(id string) (Group, bool) {
+	if id == ChatID {
+		return Group{ID: ChatID, Name: "Plan chat"}, true
+	}
+	if g, ok := p.Group(id); ok {
+		return *g, true
+	}
+	return Group{}, false
+}
+
+// Chats lists the plan's chats: its groups, then the plan chat.
+func (p *Plan) Chats() []Group {
+	g, _ := p.Chat(ChatID)
+	return append(append([]Group(nil), p.Groups...), g)
+}
+
+// ChatMembers lists the tasks in a chat: every task for the plan chat.
+func (p *Plan) ChatMembers(id string) []*Task {
+	if id != ChatID {
+		return p.Members(id)
+	}
+	out := make([]*Task, len(p.Tasks))
+	for i := range p.Tasks {
+		out[i] = &p.Tasks[i]
 	}
 	return out
 }
@@ -212,9 +262,20 @@ func lastFence(s, info string) (string, bool) {
 	return strings.Join(body, "\n"), found
 }
 
-// Tidy drops groups nothing belongs to and groups of one task, which would
-// have nobody to talk to, leaving that task isolated.
+// Tidy renames a group that took the plan chat's ID, and drops groups
+// nothing belongs to and groups of one task, which would have nobody to
+// talk to, leaving that task isolated.
 func (p *Plan) Tidy() {
+	for i := range p.Groups {
+		if g := &p.Groups[i]; g.ID == ChatID {
+			g.ID = ChatID + "-group"
+			for j := range p.Tasks {
+				if p.Tasks[j].Group == ChatID {
+					p.Tasks[j].Group = g.ID
+				}
+			}
+		}
+	}
 	count := map[string]int{}
 	for _, t := range p.Tasks {
 		if t.Group != "" {

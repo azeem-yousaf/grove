@@ -121,7 +121,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "group-list", "watch", "overview-conflicts", "diff-conflicts", "actions", "actions-filtered", "ship", "commit", "worktree-view", "worktree-search", "revert"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "plan-chat", "group-list", "watch", "overview-conflicts", "diff-conflicts", "actions", "actions-filtered", "ship", "commit", "worktree-view", "worktree-search", "revert"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -243,6 +243,18 @@ func TestRenderFitsScreen(t *testing.T) {
 				m.pollingGroups = false
 				m.Update(m.pollGroups()())
 				m.groups[log.Dir].paused = true
+			case "plan-chat":
+				m = fakeModel(t, size[0], size[1])
+				m.store = store.Open(t.TempDir())
+				p := &plan.Plan{ID: "p", Title: strings.Repeat("Long plan title ", 8), Status: plan.Review,
+					Merge: &plan.Merge{Branch: "plan/" + strings.Repeat("long-", 20), Path: filepath.FromSlash("/src/" + strings.Repeat("long-", 20))},
+					Tasks: []plan.Task{{ID: "a", Branch: "feature/auth", Path: filepath.FromSlash("/src/shop-auth"), Status: plan.Finished}}}
+				m.plans = []*plan.Plan{p}
+				log, _ := m.groupLog(p, plan.ChatID)
+				log.Post(group.Message{From: group.Planner, Text: strings.Repeat("Merged and tested. ", 30)})
+				m.openGroupChat(filepath.FromSlash("/src/shop-auth"))
+				m.pollingGroups = false
+				m.Update(m.pollGroups()())
 			case "group-list":
 				press(m, "tab")
 				m.moveTo(m.groupRow(0))

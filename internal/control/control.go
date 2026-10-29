@@ -26,9 +26,12 @@ type State struct {
 
 // Plan is one started plan.
 type Plan struct {
-	Title  string `json:"title"`
-	Status string `json:"status"`
-	Tasks  []Task `json:"tasks"`
+	ID     string   `json:"id"`
+	Title  string   `json:"title"`
+	Status string   `json:"status"`
+	Groups []string `json:"groups,omitempty"` // its group chats' IDs
+	Tasks  []Task   `json:"tasks"`
+	Merge  string   `json:"merge,omitempty"` // what its merge worktree holds, once there is one
 }
 
 // Task is one task of a plan and what its agent is doing.
@@ -57,13 +60,17 @@ const (
 	Deny    = "deny"    // Text is the command to refuse, Note why
 	Finish  = "finish"  // mark the task finished, Note why
 	Fail    = "fail"    // mark the task failed, Note why
+	Post    = "post"    // Text goes to a chat of Plan: Group ("" for the plan chat), To one member or everyone
 )
 
 // Order is something the planner asked grove to do.
 type Order struct {
 	Time   time.Time `json:"time"`
 	Action string    `json:"action"`
-	Task   string    `json:"task"` // its branch
+	Task   string    `json:"task,omitempty"` // its branch
+	Plan   string    `json:"plan,omitempty"` // its ID, for orders about a whole plan
+	Group  string    `json:"group,omitempty"`
+	To     string    `json:"to,omitempty"`
 	Text   string    `json:"text,omitempty"`
 	Note   string    `json:"note,omitempty"`
 }
@@ -166,6 +173,16 @@ func Take(dir string) ([]Order, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// FindPlan looks a plan up by its ID or title.
+func (s State) FindPlan(name string) (Plan, bool) {
+	for _, p := range s.Plans {
+		if p.ID == name || strings.EqualFold(p.Title, name) {
+			return p, true
+		}
+	}
+	return Plan{}, false
 }
 
 // Find looks a task up by its branch.

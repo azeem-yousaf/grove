@@ -7,6 +7,7 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -59,8 +60,8 @@ func (m *Model) selectedSession() *session {
 	return m.sessionFor(m.snap.States[r.wt].Path)
 }
 
-// inGroup reports whether the cursor is on a plan group or a grouped task's
-// worktree.
+// inGroup reports whether the cursor is on a plan group, a started plan's
+// task, or the worktree a plan is merged in, which all have a chat.
 func inGroup(m *Model) bool {
 	r, ok := m.cursorRow()
 	if !ok {
@@ -69,8 +70,12 @@ func inGroup(m *Model) bool {
 	if r.kind == rowGroup {
 		return true
 	}
-	_, t := m.taskFor(m.snap.States[r.wt].Path)
-	return t != nil && t.Group != ""
+	path := m.snap.States[r.wt].Path
+	p, t := m.taskFor(path)
+	if t == nil {
+		p = m.mergedInto(path)
+	}
+	return p != nil && p.Status != plan.Draft
 }
 
 // allActions is every action in the order the palette lists them: the
@@ -93,7 +98,7 @@ func allActions(m *Model) []paletteAction {
 		{"Merge other branches into this worktree", key(k.Merge), onWorktree, (*Model).openConflictReview},
 		{"Undo the agent's changes", key(k.Undo), func(m *Model) bool { return m.selectedSession() != nil },
 			func(m *Model) tea.Cmd { return m.askUndo(m.selectedSession()) }},
-		{"Open the group chat", key(k.Group), inGroup, (*Model).openSelectedGroup},
+		{"Open the group or plan chat", key(k.Group), inGroup, (*Model).openSelectedGroup},
 		{"Remove the worktree", key(k.Remove), onWorktree, (*Model).askRemove},
 		{"New worktree", key(k.New), nil, (*Model).askCreate},
 		{"Plan tasks with the planner", key(k.Planner), nil, (*Model).openPlanner},

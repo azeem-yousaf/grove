@@ -51,8 +51,11 @@ func TestGroupedAgentsGetTheirGroup(t *testing.T) {
 	m, p, _ := groupedPlan(t)
 	a := m.sessionFor(m.taskPath(p, "feature/a"))
 	req := m.agentRequest(a)
-	if len(req.Tools) != 1 || req.Tools[0].Command != "/usr/bin/grove" || strings.Join(req.Tools[0].Args, " ") != "mcp-group --dir "+group.Dir(m.store.Dir(), "p1", "g")+" --as feature/a" {
+	if len(req.Tools) != 2 || req.Tools[0].Name != "grove" || req.Tools[0].Command != "/usr/bin/grove" || strings.Join(req.Tools[0].Args, " ") != "mcp-group --dir "+group.Dir(m.store.Dir(), "p1", "g")+" --as feature/a" {
 		t.Fatalf("grouped tools = %+v", req.Tools)
+	}
+	if pc := req.Tools[1]; pc.Name != "plan" || strings.Join(pc.Args, " ") != "mcp-group --dir "+group.Dir(m.store.Dir(), "p1", plan.ChatID)+" --as feature/a" {
+		t.Fatalf("every task gets the plan chat: %+v", pc)
 	}
 	ctx := m.agentContext(a)
 	if !strings.Contains(ctx, "## Your group: Checkout") || !strings.Contains(ctx, "- feature/b: Work on feature/b") || strings.Contains(ctx, "- feature/c:") {
@@ -69,8 +72,11 @@ func TestGroupedAgentsGetTheirGroup(t *testing.T) {
 		t.Errorf("a's briefing about b:\n%s", ctx)
 	}
 	c := m.sessionFor(m.taskPath(p, "feature/c"))
-	if req := m.agentRequest(c); len(req.Tools) != 0 || len(req.ReadDirs) != 0 || strings.Contains(m.agentContext(c), "Your group") {
-		t.Error("an isolated task must not get the group")
+	if req := m.agentRequest(c); len(req.Tools) != 1 || req.Tools[0].Name != "plan" || len(req.ReadDirs) != 0 || strings.Contains(m.agentContext(c), "Your group") {
+		t.Error("an isolated task must not get the group, only the plan chat")
+	}
+	if !strings.Contains(m.agentContext(c), "plan chat") {
+		t.Error("agents are told about the plan chat")
 	}
 	if ctx := m.agentContext(c); !strings.Contains(ctx, "never read or change anything in them") || !strings.Contains(ctx, bPath+" (feature/b)") {
 		t.Errorf("c's briefing should keep it out of b:\n%s", ctx)
@@ -85,6 +91,10 @@ func TestGroupedAgentsGetTheirGroup(t *testing.T) {
 	info, err := group.Log{Dir: group.Dir(m.store.Dir(), "p1", "g")}.ReadInfo()
 	if err != nil || info.Name != "Checkout" || len(info.Members) != 2 || info.Members[1].Name != "feature/b" || info.Members[1].Path == "" {
 		t.Errorf("members.json = %+v, %v", info, err)
+	}
+	info, err = group.Log{Dir: group.Dir(m.store.Dir(), "p1", plan.ChatID)}.ReadInfo()
+	if err != nil || info.Name != "Plan chat" || len(info.Members) != 3 {
+		t.Errorf("plan chat members.json = %+v, %v", info, err)
 	}
 }
 
