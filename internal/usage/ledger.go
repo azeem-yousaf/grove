@@ -198,7 +198,7 @@ type Ledger struct {
 	total    Sum
 	byAgent  map[string]Sum
 	byKind   map[Kind]Sum
-	agentIn map[string]map[string]Sum // agent → plan ("" for none) → turns
+	agentIn  map[string]map[string]Sum // agent → plan ("" for none) → turns
 	plans    map[string]*planTotals
 	unplaced Sum
 }
@@ -341,7 +341,7 @@ func (l *Ledger) applyTurn(t Turn) {
 		k = KindUnknown
 	}
 	l.byKind[k] = l.byKind[k].Add(s)
-	in :=l.agentIn[t.Agent]
+	in := l.agentIn[t.Agent]
 	if in == nil {
 		in = map[string]Sum{}
 		l.agentIn[t.Agent] = in
