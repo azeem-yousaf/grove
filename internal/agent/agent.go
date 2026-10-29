@@ -237,13 +237,16 @@ type Runner struct {
 	// Idle is how long a Claude process with nothing to do is kept.
 	Idle time.Duration
 
-	mu     sync.Mutex
+	// Replay limits the history a Codex turn sends; zero means DefaultReplay.
+	Replay Replay
+
+	mu    sync.Mutex
 	procs  map[string]*claudeProc   // by Request.Dir
 	totals map[string]*usage.Tokens // each Claude session's SessionTotal by session id; nil once unknown
 }
 
 func NewRunner() *Runner {
-	return &Runner{Idle: 10 * time.Minute, procs: map[string]*claudeProc{}, totals: map[string]*usage.Tokens{}}
+	return &Runner{Idle: 10 * time.Minute, Replay: DefaultReplay, procs: map[string]*claudeProc{}, totals: map[string]*usage.Tokens{}}
 }
 
 // sessionBase is what req's session had used before this turn: nothing for
@@ -315,7 +318,7 @@ func (r *Runner) Run(ctx context.Context, req Request, emit func(Event)) {
 		r.noteTotal(req, ev)
 		emit(ev)
 	case Codex:
-		args, input := codexArgs(req)
+		args, input := codexArgs(req, r.Replay)
 		runOnce(ctx, bin, req.Dir, req.Env, args, input, &codexParser{}, emit)
 	default:
 		emit(Event{Kind: EvDone, Err: fmt.Errorf("unknown agent %q", req.Kind)})

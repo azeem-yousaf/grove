@@ -9,10 +9,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/azeem-yousaf/grove/internal/usage"
 )
@@ -428,7 +431,7 @@ func TestArgs(t *testing.T) {
 		t.Errorf("claude input = %+v", msg)
 	}
 
-	args, in := codexArgs(Request{Message: "and now?", Context: "CTX", History: []Turn{{User: "hi", Agent: "hello"}}})
+	args, in := codexArgs(Request{Message: "and now?", Context: "CTX", History: []Turn{{User: "hi", Agent: "hello"}}}, DefaultReplay)
 	if strings.Join(args, " ") != "exec --json --sandbox workspace-write -" {
 		t.Errorf("codex args = %q", args)
 	}
@@ -452,7 +455,7 @@ func TestReadOnlyArgs(t *testing.T) {
 	if args[len(args)-1] != "Bash(ls)" {
 		t.Error("--allowedTools values must come last")
 	}
-	if args, _ := codexArgs(req); strings.Join(args, " ") != "exec --json --sandbox read-only -" {
+	if args, _ := codexArgs(req, DefaultReplay); strings.Join(args, " ") != "exec --json --sandbox read-only -" {
 		t.Errorf("read-only codex args = %q", args)
 	}
 	if strings.Contains(joined, "--allowedTools Bash ") || strings.Contains(joined, " PowerShell ") {
@@ -466,7 +469,7 @@ func TestReadOnlyArgs(t *testing.T) {
 	if !strings.Contains(joined, " Bash PowerShell ") || !strings.Contains(joined, "--disallowedTools Edit") || args[len(args)-1] != "Bash(ls)" {
 		t.Errorf("claude args with commands: %s", joined)
 	}
-	if args, _ := codexArgs(req); strings.Join(args, " ") != "exec --json --sandbox workspace-write -" {
+	if args, _ := codexArgs(req, DefaultReplay); strings.Join(args, " ") != "exec --json --sandbox workspace-write -" {
 		t.Errorf("codex args with commands = %q", args)
 	}
 	tools := []ToolServer{{Name: "grove", Command: `C:\bin\grove.exe`, Args: []string{"mcp-group", "--as", "feature/x"}, Allow: []string{"post", "read"}}}
@@ -479,7 +482,7 @@ func TestReadOnlyArgs(t *testing.T) {
 	if strings.Contains(strings.Join(claudeArgs(Request{}), " "), "--mcp-config") {
 		t.Error("no tools should mean no --mcp-config")
 	}
-	cargs, _ := codexArgs(Request{Tools: tools})
+	cargs, _ := codexArgs(Request{Tools: tools}, DefaultReplay)
 	if j := strings.Join(cargs, " "); !strings.Contains(j, `-c mcp_servers.grove.command="C:\\bin\\grove.exe" -c mcp_servers.grove.args=["mcp-group","--as","feature/x"]`) {
 		t.Errorf("codex args with tools: %s", j)
 	}
@@ -811,6 +814,73 @@ func TestCodexRunsOnce(t *testing.T) {
 	}
 	if rec := record(t); !strings.Contains(rec, "---\nCTX") || !strings.HasSuffix(rec, "hello there") {
 		t.Errorf("stdin not delivered: %q", rec)
+	}
+}
+
+// codexStdin runs one Codex turn through the fake binary and returns the
+// conversation part of what it read on stdin.
+func codexStdin(t *testing.T, r *Runner, req Request) (history, all string) {
+	t.Helper()
+	bin, dir := fakeAgent(t, "codex")
+	req.Kind, req.Bin, req.Dir = Codex, bin, dir
+	if done := turn(t, r, context.Background(), req); done[len(done)-1].Err != nil {
+		t.Fatalf("codex done = %+v", done[len(done)-1])
+	}
+	_, all, _ = strings.Cut(record(t), "\n---\n")
+	_, history, _ = strings.Cut(all, "## Conversation so far\n\n")
+	history, _, _ = strings.Cut(history, "## Request\n\n")
+	return history, all
+}
+
+func TestCodexReplay(t *testing.T) {
+	// A short history goes as it is.
+	short := []Turn{{User: "hi", Agent: "hello"}, {User: "fix it", Agent: "done"}}
+	h, all := codexStdin(t, NewRunner(), Request{Message: "and now?", Context: "CTX", History: short})
+	if h != "User: hi\n\nYou: hello\n\nUser: fix it\n\nYou: done\n\n" || !strings.HasPrefix(all, "CTX\n\n") || !strings.HasSuffix(all, "## Request\n\nand now?") {
+		t.Errorf("short history = %q", all)
+	}
+
+	// A long one: the last Full whole, older replies cut, within the budget.
+	var long []Turn
+	for i := range 40 {
+		long = append(long, Turn{User: fmt.Sprintf("ask %d", i), Agent: fmt.Sprintf("reply %d ", i) + strings.Repeat("x", 1000)})
+	}
+	r := NewRunner()
+	r.Replay = Replay{Full: 3, Brief: 50, Budget: 5000}
+	ctx := strings.Repeat("C", 20000) // never cut, whatever the budget
+	msg := "the current message " + strings.Repeat("m", 10000)
+	h, all = codexStdin(t, r, Request{Message: msg, Context: ctx, History: long})
+	if n := utf8.RuneCountInString(h); n > 5000+100 {
+		t.Errorf("history is %d characters, over the budget", n)
+	}
+	if !strings.HasPrefix(all, ctx+"\n\n") || !strings.HasSuffix(all, "## Request\n\n"+msg) {
+		t.Error("the briefing and the message must be sent whole")
+	}
+	for i := 37; i < 40; i++ {
+		if !strings.Contains(h, "User: ask "+strconv.Itoa(i)+"\n\nYou: "+long[i].Agent+"\n\n") {
+			t.Errorf("turn %d should be whole", i)
+		}
+	}
+	if !strings.Contains(h, "User: ask 36\n\nYou: reply 36 "+strings.Repeat("x", 41)+"…\n\n") {
+		t.Errorf("older replies should be cut: %q", h)
+	}
+	m := regexp.MustCompile(`^\((\d+) earlier turns left out\.\)\n\n`).FindStringSubmatch(h)
+	if m == nil {
+		t.Fatalf("no left-out line: %q", h[:min(len(h), 200)])
+	}
+	left, _ := strconv.Atoi(m[1])
+	if first := fmt.Sprintf("User: ask %d\n\n", left); !strings.Contains(h, first) || strings.Contains(h, fmt.Sprintf("User: ask %d\n\n", left-1)) {
+		t.Errorf("%d left out, but the oldest sent isn't turn %d: %q", left, left, h)
+	}
+	if strings.Count(h, "User: ask ") != 40-left {
+		t.Errorf("sent %d turns, want %d", strings.Count(h, "User: ask "), 40-left)
+	}
+
+	// One huge reply among the newest is cut rather than crowding the rest out.
+	big := []Turn{{User: "a", Agent: "small"}, {User: "b", Agent: strings.Repeat("y", 10000)}}
+	h, _ = codexStdin(t, r, Request{Message: "next", History: big})
+	if h != "User: a\n\nYou: small\n\nUser: b\n\nYou: "+strings.Repeat("y", 50)+"…\n\n" {
+		t.Errorf("huge reply = %q", h)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/azeem-yousaf/grove/internal/usage"
 )
@@ -13,8 +14,8 @@ import (
 // Codex edit and run commands inside the working folder only; a linked
 // worktree's git data lives outside it, so commits and checkouts fail by
 // design. Each turn is a fresh run with the conversation so far replayed
-// in the prompt, which works on every Codex version.
-func codexArgs(req Request) (args []string, input string) {
+// in the prompt, within lim, which works on every Codex version.
+func codexArgs(req Request, lim Replay) (args []string, input string) {
 	sandbox := "workspace-write"
 	if req.ReadOnly && !req.Commands {
 		sandbox = "read-only"
@@ -39,13 +40,74 @@ func codexArgs(req Request) (args []string, input string) {
 	}
 	if len(req.History) > 0 {
 		in.WriteString("## Conversation so far\n\n")
-		for _, t := range req.History {
-			fmt.Fprintf(&in, "User: %s\n\nYou: %s\n\n", t.User, t.Agent)
-		}
+		in.WriteString(lim.history(req.History))
 	}
 	in.WriteString("## Request\n\n")
 	in.WriteString(req.Message)
 	return args, in.String()
+}
+
+// Replay limits how much of the conversation a Codex turn sends again, since
+// every turn replays it in full and the cost would otherwise grow each turn.
+// Only what is sent changes; the briefing and the message are never cut.
+type Replay struct {
+	Full   int // newest turns sent whole
+	Brief  int // characters an older turn's reply is cut to
+	Budget int // characters of history at most; older turns beyond it are left out
+}
+
+// DefaultReplay is what NewRunner uses.
+var DefaultReplay = Replay{Full: 6, Brief: 300, Budget: 24000}
+
+// history renders turns newest first into the budget: the newest Full whole,
+// older ones with the reply cut to Brief. A whole turn that doesn't fit is
+// cut too; once one doesn't fit at all, it and every older turn are left
+// out, which one line at the top says.
+func (lim Replay) history(turns []Turn) string {
+	if lim == (Replay{}) {
+		lim = DefaultReplay
+	}
+	var kept []string
+	size := 0
+	for i := len(turns) - 1; i >= 0; i-- {
+		t := turns[i]
+		whole := fmt.Sprintf("User: %s\n\nYou: %s\n\n", t.User, t.Agent)
+		cut := fmt.Sprintf("User: %s\n\nYou: %s\n\n", t.User, clip(t.Agent, lim.Brief))
+		s := cut
+		if len(kept) < lim.Full && size+utf8.RuneCountInString(whole) <= lim.Budget {
+			s = whole
+		}
+		n := utf8.RuneCountInString(s)
+		if size+n > lim.Budget {
+			break
+		}
+		kept, size = append(kept, s), size+n
+	}
+	var b strings.Builder
+	if left := len(turns) - len(kept); left > 0 {
+		fmt.Fprintf(&b, "(%d earlier %s left out.)\n\n", left, plural(left, "turn", "turns"))
+	}
+	for i := len(kept) - 1; i >= 0; i-- {
+		b.WriteString(kept[i])
+	}
+	return b.String()
+}
+
+// clip cuts s to its first n characters, ending with "…" when it was cut.
+func clip(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	r := []rune(s)
+	return strings.TrimSpace(string(r[:n])) + "…"
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // codexParser reads `codex exec --json`. Codex reports usage only when a
