@@ -40,6 +40,20 @@ func TestSetKey(t *testing.T) {
 	}
 }
 
+func TestConflictsEnabled(t *testing.T) {
+	if !(Conflicts{}).Enabled() {
+		t.Error("prediction should be on when unset")
+	}
+	var cfg Config
+	if _, err := toml.Decode(Template, &cfg); err != nil || !cfg.Conflicts.Enabled() {
+		t.Errorf("template: %+v, %v", cfg.Conflicts, err)
+	}
+	cfg = Config{}
+	if _, err := toml.Decode(setKey(Template, "conflicts", "predict", "false"), &cfg); err != nil || cfg.Conflicts.Enabled() {
+		t.Errorf("predict = false: %+v, %v", cfg.Conflicts, err)
+	}
+}
+
 func TestModelFor(t *testing.T) {
 	var cfg Config
 	if _, err := toml.Decode(setKey(Template, "ai", "claude_model", `"sonnet"`), &cfg); err != nil {
