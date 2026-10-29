@@ -12,6 +12,8 @@ import (
 	"os/signal"
 	"regexp"
 	"runtime/debug"
+	"sort"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -147,7 +149,7 @@ func run() error {
 	}
 
 	if *plain {
-		return printPlain(ctx, repo, cfg.Base, m)
+		return printPlain(ctx, repo, cfg.Base, m, cfg.Conflicts.Enabled())
 	}
 
 	p := tea.NewProgram(ui.New(ctx, ui.Options{
@@ -187,7 +189,7 @@ func parseArgs(args []string) ([]string, error) {
 }
 
 // printPlain writes a plain-text summary, handy for scripts and CI logs.
-func printPlain(ctx context.Context, repo *git.Repo, baseOverride string, mode git.Mode) error {
+func printPlain(ctx context.Context, repo *git.Repo, baseOverride string, mode git.Mode, predict bool) error {
 	base, err := git.DetectBase(ctx, repo, baseOverride)
 	if err != nil {
 		return err
@@ -224,9 +226,57 @@ func printPlain(ctx context.Context, repo *git.Repo, baseOverride string, mode g
 		for p := range snap.Overlaps {
 			paths = append(paths, p)
 		}
+		sort.Strings(paths)
 		fmt.Printf("⚠ %d file(s) changed in more than one worktree: %s\n", n, strings.Join(paths, ", "))
+		if predict {
+			printConflicts(ctx, repo, snap)
+		}
 	}
 	return nil
+}
+
+// printConflicts lists the pairs of worktrees that would conflict if
+// merged, with the files and lines on each side.
+func printConflicts(ctx context.Context, repo *git.Repo, snap *git.Snapshot) {
+	if ok, err := git.MergeTreeSupported(ctx, repo.CommonDir); err != nil || !ok {
+		fmt.Println("\nConflict prediction needs git 2.38 or later.")
+		return
+	}
+	fmt.Println("\nConflicts")
+	found := false
+	for _, p := range git.NewPredictor().Predict(ctx, repo, snap) {
+		a, b := snap.States[p.A], snap.States[p.B]
+		if p.Err != nil {
+			fmt.Printf("  %s ↔ %s: can't predict: %v\n", a.Name(), b.Name(), p.Err)
+			continue
+		}
+		if len(p.Files) == 0 {
+			continue
+		}
+		found = true
+		fmt.Printf("  %s ↔ %s\n", a.Name(), b.Name())
+		for _, f := range p.Files {
+			fmt.Printf("    %-50s %s | %s\n", f.Path, lineRanges(f.A), lineRanges(f.B))
+		}
+	}
+	if !found {
+		fmt.Println("  none: the overlapping files merge cleanly")
+	}
+}
+
+// lineRanges formats ranges as "lines 3-5, 9", or "deleted" for none.
+func lineRanges(rs []git.LineRange) string {
+	if len(rs) == 0 {
+		return "deleted"
+	}
+	parts := make([]string, len(rs))
+	for i, r := range rs {
+		parts[i] = strconv.Itoa(r.Start)
+		if r.End != r.Start {
+			parts[i] += "-" + strconv.Itoa(r.End)
+		}
+	}
+	return "lines " + strings.Join(parts, ", ")
 }
 
 func usage() {
