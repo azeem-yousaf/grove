@@ -22,6 +22,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/gitguard"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/store"
 	"github.com/azeem-yousaf/grove/internal/ui"
@@ -91,6 +92,10 @@ func run() error {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp-plan" {
 		return mcpPlan(os.Args[2:])
+	}
+	if len(os.Args) > 2 && os.Args[1] == "git-guard" {
+		// The guard's hook scripts run this; git reads the exit status.
+		os.Exit(gitguard.Hook(os.Args[2], os.Args[3:], os.Stdin, os.Stderr, os.Environ()))
 	}
 	var (
 		base       = flag.String("base", "", "branch to compare worktrees against (default: auto-detect)")
