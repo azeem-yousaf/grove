@@ -535,6 +535,7 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 	}
 	b.WriteString("Approve a command when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for; " +
 		"git the task needs (committing, merging feature branches, pushing a task's own branch) is fine too. " +
+		"Add \"prefix\": true to approve a routine check's whole family (every `go test`, not just this line; never git). " +
 		"Deny anything destructive and anything that reaches outside the plan's worktrees, saying what to do instead. " +
 		"Commands grove's policy keeps for the user (deleting branches or worktrees, force pushes, discarding work, protected branches) aren't listed and can't be approved by you. " +
 		"grove reports every decision that doesn't apply. " +
@@ -579,6 +580,7 @@ type decisions struct {
 type (
 	answerDecision struct {
 		ID, Branch, Command, Reason string
+		Prefix                      bool // approve the command's family, not just the line
 		order                       string
 	}
 	replyDecision struct {
@@ -685,7 +687,16 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 			}
 			cmds = append(cmds, m.refuse(s, p))
 		default:
-			cmds = append(cmds, m.answer(s, i, approve, byPlanner, a.Reason))
+			rule := ""
+			if approve && a.Prefix {
+				p := s.pending[i]
+				if r, ok := m.familyRule(s, p.tool, p.text); ok {
+					rule = r
+				} else {
+					o.detail = "approved the exact command only: prefix approval isn't for git, interpreters or more than one command"
+				}
+			}
+			cmds = append(cmds, m.answerWith(s, i, approve, byPlanner, a.Reason, rule))
 			answered = append(answered, applied{len(outs), s, s.running})
 		}
 		outs = append(outs, o)

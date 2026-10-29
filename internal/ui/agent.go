@@ -698,7 +698,7 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Kind:     s.kind,
 		Dir:      s.path,
 		Session:  s.id,
-		Allow:    append([]string(nil), s.allow...),
+		Allow:    m.allowFor(s),
 		Model:    s.model,
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,

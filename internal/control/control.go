@@ -83,6 +83,7 @@ type Order struct {
 	To     string    `json:"to,omitempty"`
 	Text   string    `json:"text,omitempty"`
 	Note   string    `json:"note,omitempty"`
+	Prefix bool      `json:"prefix,omitempty"` // for Approve: the command's family, not just the line
 }
 
 // Outcomes of an order, or of a decision in a grove-orchestrate block.

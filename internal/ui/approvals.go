@@ -67,6 +67,12 @@ func (m *Model) awaitsPlanner(s *session, a pendingAction) bool {
 
 // answer approves or denies s.pending[i] on behalf of by.
 func (m *Model) answer(s *session, i int, approve bool, by, why string) tea.Cmd {
+	return m.answerWith(s, i, approve, by, why, "")
+}
+
+// answerWith is answer, approving with rule (familyRule's) in place of the
+// exact command's when it is set.
+func (m *Model) answerWith(s *session, i int, approve bool, by, why, rule string) tea.Cmd {
 	a := s.pending[i]
 	s.pending = slices.Delete(s.pending, i, i+1)
 	why = strings.TrimSpace(why)
@@ -85,9 +91,15 @@ func (m *Model) answer(s *session, i int, approve bool, by, why string) tea.Cmd 
 	verdict, done := "deny", "denied"
 	if approve {
 		verdict, done = "approve", "approved"
-		s.allow = append(s.allow, agent.ClaudeRule(a.tool, a.text))
+		note := "Allowed" + who + ": " + a.text
+		if rule == "" {
+			rule = agent.ClaudeRule(a.tool, a.text)
+		} else {
+			note += " (and the rest of its family: " + rule + ")"
+		}
+		s.allow = append(s.allow, rule)
 		s.approved = append(s.approved, a.text)
-		s.entries = append(s.entries, chatEntry{roleNote, "Allowed" + who + ": " + a.text})
+		s.entries = append(s.entries, chatEntry{roleNote, note})
 		// Called right away: the agent may be resumed before a command runs.
 		if err := m.grant(s, a.tool, a.text, a.policy, by); err != nil {
 			cmds = append(cmds, m.grantFailed(s, a.text, err))
