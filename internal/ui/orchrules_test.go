@@ -7,7 +7,6 @@ import (
 
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/plan"
-	"github.com/azeem-yousaf/grove/internal/store"
 )
 
 // The planner's standing rules go to a Claude conversation once; Codex,
@@ -18,6 +17,8 @@ func TestPlannerGetsItsRulesOnce(t *testing.T) {
 		m, p, fake := groupedPlan(t)
 		p.Orchestrated = true
 		m.cfg.Planner.MaxDecisions = 100
+		bin := m.groveBin
+		m.groveBin = "" // no control tools until later
 		chat := plan.ChatID
 		if groupID != "" {
 			chat = groupID
@@ -51,7 +52,10 @@ func TestPlannerGetsItsRulesOnce(t *testing.T) {
 		gets("new session", ask("s2"), true)
 
 		// Control tools change the rules.
-		m.store = store.Open(t.TempDir())
+		m.groveBin = bin
+		if len(m.controlTools(m.plannerFor(p.ID, groupID))) == 0 {
+			t.Fatalf("group %q: no control tools", groupID)
+		}
 		gets("control tools", ask("s2"), true)
 		gets("after control tools", ask("s2"), false)
 
