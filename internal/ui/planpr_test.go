@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/gh"
 	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/azeem-yousaf/grove/internal/shell"
@@ -132,6 +133,54 @@ func TestPullRequestFailureTellsTheUserWhatToRun(t *testing.T) {
 	}
 	if p.Merge.PR != "" {
 		t.Error("no PR to remember")
+	}
+}
+
+// A failed push after the merge is grove's own news: the planner still
+// gets the review ask and posts its summary.
+func TestFailedPushKeepsThePlanReview(t *testing.T) {
+	m, p, _ := groupedPlan(t)
+	p.Orchestrated, p.Base = true, "main"
+	for i := range p.Tasks {
+		p.Tasks[i].Status = plan.Failed
+		if p.Tasks[i].Branch == "feature/c" {
+			p.Tasks[i].Status = plan.Finished
+		}
+	}
+	m.cfg.Planner.PullRequests = nil
+	m.ghPath = "gh"
+	f := &fakePRs{open: map[string]string{}}
+	m.prHooks = f.hooks()
+	m.prHooks.push = func(context.Context, string, string, string, []string) error {
+		return errors.New("remote rejected")
+	}
+	planner := &scripted{reply: func(req agent.Request) string {
+		switch {
+		case req.ReadOnly && strings.Contains(req.Message, "is finished or failed"):
+			return "```grove-orchestrate\n{\"merge\": [{\"plan\": \"p1\"}]}\n```"
+		case req.ReadOnly && strings.Contains(req.Message, "Merged 1 task"):
+			return "```grove-orchestrate\n{\"post\": [{\"plan\": \"p1\", \"message\": \"All merged; try checkout.\"}]}\n```"
+		}
+		return ""
+	}}
+	m.runAgent = planner.run
+
+	m.finishIfSettled(p)
+	settle(t, m, m.orchestrate(), func() bool {
+		c := planChat(m, p)
+		return strings.Contains(c, "All merged; try checkout.") && strings.Contains(c, "couldn't push") && !m.planner.running
+	})
+	got := planChat(m, p)
+	for _, want := range []string{"planner: All merged; try checkout.", "grove: grove couldn't push plan/shop: remote rejected"} {
+		if n := strings.Count(got, want); n != 1 {
+			t.Errorf("%q appears %d times in the plan chat:\n%s", want, n, got)
+		}
+	}
+	if p.Status != plan.Review || p.Merge.PR != "" {
+		t.Errorf("plan = %s, PR %q", p.Status, p.Merge.PR)
+	}
+	if _, created := f.counts(); created != 0 {
+		t.Error("no pull request without a push")
 	}
 }
 
