@@ -115,6 +115,9 @@ type Request struct {
 	// SessionTotal is the last EvDone.SessionTotal of Session (Claude), for
 	// when this Runner hasn't run it yet; zero if unknown. Without it, a
 	// resumed session's turn is counted from result.usage alone, as Partial.
+	// The caller must clear it when a turn's EvDone has none (a turn cut
+	// short still adds to the session, so the old total would count it
+	// twice); this Runner ignores it for a session in that state anyway.
 	SessionTotal usage.Tokens
 }
 
@@ -169,7 +172,8 @@ type Event struct {
 	// SessionTotal is, on a Claude EvDone, everything the session has used
 	// since it began (Claude Code's modelUsage, which survives --resume).
 	// Pass it back as Request.SessionTotal after grove restarts so the next
-	// turn's figure can be Exact. Zero when unknown.
+	// turn's figure can be Exact. Zero when unknown, which makes any total
+	// saved before it stale.
 	SessionTotal usage.Tokens
 	Err          error
 }
@@ -199,17 +203,19 @@ type Runner struct {
 	Idle time.Duration
 
 	mu     sync.Mutex
-	procs  map[string]*claudeProc  // by Request.Dir
-	totals map[string]usage.Tokens // each Claude session's SessionTotal, by session id
+	procs  map[string]*claudeProc   // by Request.Dir
+	totals map[string]*usage.Tokens // each Claude session's SessionTotal by session id; nil once unknown
 }
 
 func NewRunner() *Runner {
-	return &Runner{Idle: 10 * time.Minute, procs: map[string]*claudeProc{}, totals: map[string]usage.Tokens{}}
+	return &Runner{Idle: 10 * time.Minute, procs: map[string]*claudeProc{}, totals: map[string]*usage.Tokens{}}
 }
 
 // sessionBase is what req's session had used before this turn: nothing for
 // a new session, else the last total seen here or passed in. nil if
-// unknown.
+// unknown, which includes a session whose last turn here ended without a
+// total: Claude Code still added that turn to the session, so any earlier
+// total, the request's included, would count it again.
 func (r *Runner) sessionBase(req Request) *usage.Tokens {
 	if req.Session == "" {
 		return &usage.Tokens{}
@@ -217,13 +223,34 @@ func (r *Runner) sessionBase(req Request) *usage.Tokens {
 	r.mu.Lock()
 	t, ok := r.totals[req.Session]
 	r.mu.Unlock()
-	if !ok {
-		if req.SessionTotal.IsZero() {
-			return nil
-		}
-		t = req.SessionTotal
+	switch {
+	case ok && t == nil:
+		return nil
+	case ok:
+		base := *t
+		return &base
+	case req.SessionTotal.IsZero():
+		return nil
 	}
-	return &t
+	base := req.SessionTotal
+	return &base
+}
+
+// noteTotal records the session's total after a turn, or that it is no
+// longer known.
+func (r *Runner) noteTotal(req Request, ev Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !ev.SessionTotal.IsZero() && ev.Session != "" {
+		t := ev.SessionTotal
+		r.totals[ev.Session] = &t
+		return
+	}
+	for _, s := range []string{req.Session, ev.Session} {
+		if s != "" {
+			r.totals[s] = nil
+		}
+	}
 }
 
 func binFor(req Request) string {
@@ -250,11 +277,7 @@ func (r *Runner) Run(ctx context.Context, req Request, emit func(Event)) {
 		}
 		ev := p.turn(ctx, req, r.sessionBase(req), emit)
 		r.release(procKey(req), p)
-		if ev.Session != "" && !ev.SessionTotal.IsZero() {
-			r.mu.Lock()
-			r.totals[ev.Session] = ev.SessionTotal
-			r.mu.Unlock()
-		}
+		r.noteTotal(req, ev)
 		emit(ev)
 	case Codex:
 		args, input := codexArgs(req)

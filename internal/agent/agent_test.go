@@ -82,6 +82,10 @@ func fakeClaude() {
 				fmt.Println(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Thinking"}},"parent_tool_use_id":null}`)
 				fmt.Println(`{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":4}},"parent_tool_use_id":null}`)
 				if strings.HasSuffix(msg, "die") {
+					// Claude Code has already added what the turn used to
+					// the session.
+					s.Main = s.Main.Add(diedTokens)
+					save()
 					os.Exit(1)
 				}
 				continue
@@ -129,6 +133,7 @@ func mainTokens(n int64) usage.Tokens {
 var (
 	subTokens     = usage.Tokens{Input: 50, Output: 7, HasCache: true}
 	stoppedTokens = usage.Tokens{Input: 3007, Output: 9, CacheRead: 3000, HasCache: true}
+	diedTokens    = usage.Tokens{Input: 3007, Output: 4, CacheRead: 3000, HasCache: true} // what "die" streamed
 )
 
 // turnTokens is everything turn n used, the subagent included.
@@ -634,8 +639,8 @@ func TestClaudeUsageCutShort(t *testing.T) {
 	// The process dies mid-turn: only the live figures, a lower bound.
 	evs := turn(t, r, context.Background(), Request{Kind: Claude, Bin: bin, Dir: dir, Message: "die"})
 	done := evs[len(evs)-1]
-	if want := (usage.Tokens{Input: 3007, Output: 4, CacheRead: 3000, HasCache: true}); done.Err == nil || done.Tokens != want || done.TokenStatus != usage.Partial {
-		t.Errorf("killed turn = %+v, want %+v partial", done, want)
+	if done.Err == nil || done.Tokens != diedTokens || done.TokenStatus != usage.Partial {
+		t.Errorf("killed turn = %+v, want %+v partial", done, diedTokens)
 	}
 	// A result without usage, and nothing live: unknown, not zero.
 	evs = turn(t, r, context.Background(), Request{Kind: Claude, Bin: bin, Dir: dir, Message: "quiet"})
@@ -647,6 +652,40 @@ func TestClaudeUsageCutShort(t *testing.T) {
 		if ev.Kind == EvUsage {
 			t.Errorf("no usage should mean no EvUsage: %+v", ev)
 		}
+	}
+}
+
+// A turn killed mid-way still adds to the session in Claude Code, so the
+// next turn mustn't subtract the total from before it: that would count the
+// killed turn again.
+func TestClaudeKilledTurnNotCountedTwice(t *testing.T) {
+	bin, dir := fakeAgent(t, "claude")
+	r := NewRunner()
+	defer r.Stop(dir)
+	ctx := context.Background()
+	evs := turn(t, r, ctx, Request{Kind: Claude, Bin: bin, Dir: dir, Message: "hello"})
+	first := evs[len(evs)-1]
+	if first.TokenStatus != usage.Exact || first.SessionTotal.IsZero() {
+		t.Fatalf("first turn = %+v", first)
+	}
+	req := Request{Kind: Claude, Bin: bin, Dir: dir, Session: "s-123", SessionTotal: first.SessionTotal, Message: "die"}
+	evs = turn(t, r, ctx, req)
+	if done := evs[len(evs)-1]; done.TokenStatus != usage.Partial || !done.SessionTotal.IsZero() {
+		t.Fatalf("killed turn = %+v", done)
+	}
+	// The resumed turn, even when the caller still passes the old total, is
+	// only the main conversation's figure: not the killed turn's as well.
+	req.Message = "go on"
+	evs = turn(t, r, ctx, req)
+	done := evs[len(evs)-1]
+	if done.Tokens != mainTokens(1) || done.TokenStatus != usage.Partial {
+		t.Errorf("turn after a killed one = %+v %v, want %+v partial", done.Tokens, done.TokenStatus, mainTokens(1))
+	}
+	// Its total is known again, so the turn after it is exact.
+	req.Message, req.SessionTotal = "and on", done.SessionTotal
+	evs = turn(t, r, ctx, req)
+	if done := evs[len(evs)-1]; done.Tokens != turnTokens(2) || done.TokenStatus != usage.Exact {
+		t.Errorf("next turn = %+v %v", done.Tokens, done.TokenStatus)
 	}
 }
 
