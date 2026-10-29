@@ -589,6 +589,9 @@ watcher = ""         # who watches a plan's agents: "you" or "planner" (in charg
 test = ""            # run in a merged plan's worktree, e.g. "go test ./..."; "" = the planner's suggestion
 test_minutes = 20    # how long that may run before it is stopped
 pull_requests = true # push a merged plan's branch and open a pull request with gh
+model = ""           # the planner's model; "" = [ai]'s
+crew_model = "sonnet" # group planners' model (a Claude alias is ignored for Codex)
+task_model = ""      # the model of task agents a plan starts
 
 [git]                # what agents may do with git on their own
 protected = ["release/*"]  # branches agents never change without you; main, master and the base always are

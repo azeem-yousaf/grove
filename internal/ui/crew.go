@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
+	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/plan"
 )
@@ -101,7 +102,7 @@ func (m *Model) plannerFor(planID, groupID string) *session {
 		return nil
 	}
 	s := m.newPlanner(dir, k)
-	s.name = "planner · " + g.Name
+	s.name, s.model = "planner · "+g.Name, m.roleModel(config.RoleCrew, k)
 	s.crewPlan, s.crewGroup = planID, groupID
 	m.crews[s.crewKey()] = s
 	return s

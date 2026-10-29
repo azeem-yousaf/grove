@@ -318,8 +318,14 @@ func (m *Model) openChat() tea.Cmd {
 	})
 }
 
+// newSession makes the agent for the worktree at path, on the model
+// [planner] task_model names when the worktree is a plan task's.
 func (m *Model) newSession(path, name string, k agent.Kind) *session {
-	s := &session{kind: k, path: path, name: name, model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true, uid: newUID(), created: time.Now()}
+	model := m.cfg.AI.ModelFor(string(k))
+	if _, t := m.taskFor(path); t != nil {
+		model = m.roleModel(config.RoleTask, k)
+	}
+	s := &session{kind: k, path: path, name: name, model: model, touched: map[string]bool{}, seen: true, uid: newUID(), created: time.Now()}
 	m.sessions[path] = s
 	return s
 }
