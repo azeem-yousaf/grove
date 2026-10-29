@@ -9,6 +9,8 @@ import (
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/usage"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestHeaderKeepsBase(t *testing.T) {
@@ -103,5 +105,79 @@ func TestFirstRun(t *testing.T) {
 	press(m, "down", "down")
 	if r, ok := m.selected(); !ok || r.kind != rowTree {
 		t.Errorf("cursor left the worktree: %+v", r)
+	}
+}
+
+// summary renders the selected worktree's summary.
+func summary(m *Model) string {
+	m.renderedFor = ""
+	m.refreshDiffView()
+	return plain(m)
+}
+
+func TestSummaryShowsAgentUsage(t *testing.T) {
+	m := fakeModel(t, 140, 44)
+	withLedger(t, m)
+
+	// No session: no Usage line.
+	if out := summary(m); strings.Contains(out, "Usage") {
+		t.Errorf("Usage line without an agent:\n%s", out)
+	}
+	s := m.newSession(filepath.FromSlash("/src/shop-auth"), "feature/auth", agent.Claude)
+	if out := summary(m); strings.Contains(out, "Usage") {
+		t.Errorf("Usage line before any usage:\n%s", out)
+	}
+
+	m.usage.Add(usage.Turn{ID: s.uid + "/1", Agent: s.uid, Tokens: usage.Tokens{Input: 1200, Output: 300}, Status: usage.Exact})
+	s.cost = "$0.12"
+	out := summary(m)
+	if !strings.Contains(out, "Usage") || !strings.Contains(out, "1.5k tok · $0.12") {
+		t.Errorf("summary lacks tokens and cost:\n%s", out)
+	}
+	if strings.Contains(out, "before this turn") {
+		t.Errorf("idle agent's cost marked as before this turn:\n%s", out)
+	}
+
+	// While a turn runs: live figures, and the cost from before it.
+	m.startTurn(s)
+	s.running = true
+	s.live, s.liveSeen = usage.Tokens{Input: 2300}, true
+	if out := summary(m); !strings.Contains(out, "1.5k tok + 2.3k live · $0.12 before this turn") {
+		t.Errorf("running summary:\n%s", out)
+	}
+	// The live count follows the agent's events, as in the chat header.
+	s.live = usage.Tokens{Input: 4100}
+	out = summary(m)
+	if !strings.Contains(out, "+ 4.1k live") {
+		t.Errorf("live count not updated:\n%s", out)
+	}
+	if head := ansi.Strip(strings.Join(m.agentUsageCost(s), " · ")); !strings.Contains(out, head) {
+		t.Errorf("summary differs from the chat header's %q:\n%s", head, out)
+	}
+}
+
+func TestSummaryUsageCodexHasNoCost(t *testing.T) {
+	m := fakeModel(t, 140, 44)
+	withLedger(t, m)
+	s := m.newSession(filepath.FromSlash("/src/shop-auth"), "feature/auth", agent.Codex)
+	m.usage.Add(usage.Turn{ID: s.uid + "/1", Agent: s.uid, Tokens: usage.Tokens{Input: 1200, Output: 300}, Status: usage.Exact})
+	out := summary(m)
+	if !strings.Contains(out, "1.5k tok") {
+		t.Errorf("Codex summary lacks tokens:\n%s", out)
+	}
+	if strings.Contains(out, "$") {
+		t.Errorf("Codex summary shows a cost:\n%s", out)
+	}
+}
+
+func TestSummaryUsageWithoutLedger(t *testing.T) {
+	m := fakeModel(t, 140, 44)
+	s := m.newSession(filepath.FromSlash("/src/shop-auth"), "feature/auth", agent.Claude)
+	if out := summary(m); strings.Contains(out, "Usage") {
+		t.Errorf("Usage line with no ledger and no cost:\n%s", out)
+	}
+	s.cost = "$0.40"
+	if out := summary(m); !strings.Contains(out, "Usage") || !strings.Contains(out, "$0.40") {
+		t.Errorf("cost missing without a ledger:\n%s", out)
 	}
 }
