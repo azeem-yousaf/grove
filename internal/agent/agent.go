@@ -102,6 +102,9 @@ type Request struct {
 	// its read-only sandbox. It gets its own process even in a folder that
 	// also has a worktree agent.
 	ReadOnly bool
+	// Slot keeps a separate Claude process for one of several read-only
+	// agents in the same folder: each group's planner beside the lead.
+	Slot string
 	// Commands lets a read-only agent run any shell command without asking:
 	// the planner while it runs a plan the user started. Claude still can't
 	// edit files with its own tools; Codex gets the workspace-write sandbox.
@@ -140,10 +143,10 @@ type ToolServer struct {
 }
 
 // procKey is the kept Claude process for req: one per folder, plus one for
-// a read-only agent there.
+// each read-only agent there (by Slot).
 func procKey(req Request) string {
 	if req.ReadOnly {
-		return req.Dir + "\x00read-only"
+		return req.Dir + "\x00read-only" + req.Slot
 	}
 	return req.Dir
 }

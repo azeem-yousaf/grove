@@ -39,7 +39,7 @@ func TestPlannerDecidesRefusedCommands(t *testing.T) {
 	if !ask.ReadOnly || !strings.Contains(ask.Message, ": `npm test`") || !strings.Contains(ask.Message, "- id "+s.answered[0].ID+": `npm test`") || !strings.Contains(ask.Message, "```grove-orchestrate") {
 		t.Errorf("planner request:\n%s", ask.Message)
 	}
-	if last := m.planner.entries[0]; last.role != roleNote || last.text != "Asked to decide: feature/a wants to run 2 commands" {
+	if last := m.ownerPlanner(s.path).entries[0]; last.role != roleNote || last.text != "Asked to decide: feature/a wants to run 2 commands" {
 		t.Errorf("planner chat shows %+v", last)
 	}
 	if len(s.pending) != 0 || !slices.Contains(s.allow, agent.ClaudeRule("Bash", "npm test")) || slices.Contains(s.allow, agent.ClaudeRule("Bash", "git push --force")) {
@@ -58,14 +58,14 @@ func TestPlannerAnswersQuestionsAndIsAskedAgain(t *testing.T) {
 	fake.turns = [][]agent.Event{plannerSays(`{"reply": [{"branch": "feature/b", "message": "Use JSON."}]}`)}
 	a, b := m.sessionFor(m.taskPath(p, "feature/a")), m.sessionFor(m.taskPath(p, "feature/b"))
 	// Both arrive while the planner is busy, so one turn covers them.
-	m.planner = m.newPlanner(m.plannerDir(), agent.Claude)
-	m.planner.running = true
+	crew := m.plannerFor(p.ID, "g")
+	crew.running = true
 	b.lastReply.WriteString("Should the API return JSON or XML?")
 	b.running = true
 	m.onAgentDone(b, agent.Event{Kind: agent.EvDone})
 	a.running = true
 	m.onAgentDone(a, agent.Event{Kind: agent.EvDone, Denied: []agent.Denial{{Tool: "Bash", Detail: "make deploy"}}})
-	m.planner.running = false
+	crew.running = false
 	pump(t, m, m.orchestrate())
 
 	// The planner is asked again about the command; left twice, it is
@@ -79,7 +79,7 @@ func TestPlannerAnswersQuestionsAndIsAskedAgain(t *testing.T) {
 	if !has(b.path, "From the planner, who is watching this plan for the user: Use JSON.") {
 		t.Error("the answer should go to b")
 	}
-	if !has(m.planner.path, "You didn't answer feature/a's `make deploy`") || !has(a.path, "Denied: `make deploy`") || !has(m.planner.path, "feature/b (task \"Work on feature/b\") says it is done") {
+	if !has(crew.path, "You didn't answer feature/a's `make deploy`") || !has(a.path, "Denied: `make deploy`") || !has(crew.path, "feature/b (task \"Work on feature/b\") says it is done") {
 		t.Errorf("requests: %d", len(fake.reqs))
 	}
 	if len(a.pending) != 0 {
@@ -109,13 +109,14 @@ func TestPlannerPausesAtTheLimit(t *testing.T) {
 	deny()
 	s.pending = nil
 	deny()
-	if len(fake.reqs) != 1 || !m.orch.paused {
-		t.Fatalf("after the limit: %d planner turns, paused %v", len(fake.reqs), m.orch.paused)
+	st := m.stateOf(m.ownerPlanner(s.path))
+	if len(fake.reqs) != 1 || !st.paused {
+		t.Fatalf("after the limit: %d planner turns, paused %v", len(fake.reqs), st.paused)
 	}
 	// Answering anything yourself lets it go on.
 	m.chatPath, m.focus = s.path, focusChat
 	press(m, "esc")
-	if m.orch.paused || m.orch.turns != 0 {
+	if st.paused || st.turns != 0 {
 		t.Error("the user's answer should reset the count")
 	}
 }

@@ -98,10 +98,15 @@ func TestPlannerCantApproveWhatOnlyTheUserMay(t *testing.T) {
 	if !slices.ContainsFunc(m.alerts, func(a string) bool { return strings.Contains(a, "needs you: pushes protected branch main") }) {
 		t.Errorf("alerts = %q", m.alerts)
 	}
-	if !slices.ContainsFunc(m.planner.entries, func(e chatEntry) bool {
+	// feature/a is grouped, so its group's planner decides.
+	owner := m.ownerPlanner(s.path)
+	if owner == m.planner || owner.crewGroup != "g" {
+		t.Fatalf("feature/a's group planner should decide, got %+v", owner)
+	}
+	if !slices.ContainsFunc(owner.entries, func(e chatEntry) bool {
 		return strings.Contains(e.text, "Not applied: approve `git push origin main` for feature/a: needs the user")
-	}) || len(m.orch.reports) != 1 {
-		t.Errorf("the refusal should be reported to the planner: entries %+v, reports %q", m.planner.entries, m.orch.reports)
+	}) || len(owner.crew.reports) != 1 {
+		t.Errorf("the refusal should be reported to the planner: entries %+v, reports %q", owner.entries, owner.crew.reports)
 	}
 	if got := g.list(); !slices.Equal(got, []string{"npm test"}) {
 		t.Errorf("grants = %q", got)
@@ -120,8 +125,8 @@ func TestPlannerCantApproveWhatOnlyTheUserMay(t *testing.T) {
 	}
 	// The resumed agent's turn ends without a question, so the planner checks
 	// its work, and hears once about the approval it couldn't give.
-	if len(fake.reqs) != 4 || !fake.reqs[3].ReadOnly || !strings.Contains(fake.reqs[3].Message, "earlier decisions didn't apply") || len(m.orch.reports) != 0 {
-		t.Errorf("planner follow-up: %d requests, reports left %q", len(fake.reqs), m.orch.reports)
+	if len(fake.reqs) != 4 || !fake.reqs[3].ReadOnly || !strings.Contains(fake.reqs[3].Message, "earlier decisions didn't apply") || len(owner.crew.reports) != 0 {
+		t.Errorf("planner follow-up: %d requests, reports left %q", len(fake.reqs), owner.crew.reports)
 	}
 	if got := g.list(); !slices.Equal(got, []string{"npm test", "git push origin main"}) || !slices.Equal(g.by, []string{byPlanner, byUser}) {
 		t.Errorf("grants = %q by %q", got, g.by)
@@ -175,7 +180,7 @@ func TestDecisionsByIDAndRepeated(t *testing.T) {
 		t.Fatalf("ids %q and %q", a1.id, a2.id)
 	}
 
-	cmd, outs := m.decide(decisions{Approve: []answerDecision{
+	cmd, outs := m.decide(nil, decisions{Approve: []answerDecision{
 		{ID: a1.id},
 		{ID: a1.id}, // the same again
 		{Branch: "feature/a", Command: "echo \\`date\\` && make"}, // a lost backtick escape and other spacing still match
@@ -198,11 +203,11 @@ func TestDecisionsByIDAndRepeated(t *testing.T) {
 	}
 
 	// An unmatched decision in a block is noted and told in the next request.
-	m.applyDecisions("```grove-orchestrate\n{\"deny\": [{\"branch\": \"feature/a\", \"id\": \"nope-2\"}]}\n```")
+	m.applyDecisions(m.planner, "```grove-orchestrate\n{\"deny\": [{\"branch\": \"feature/a\", \"id\": \"nope-2\"}]}\n```")
 	if last := m.planner.entries[len(m.planner.entries)-1]; !strings.Contains(last.text, "Not applied: deny nope-2 for feature/a: not found") {
 		t.Errorf("planner chat ends with %+v", last)
 	}
-	ask, _ := m.orchPrompt([]orchItem{{kind: orchGroup, plan: p.ID, group: "g", lines: []string{"feature/b: hi"}}})
+	ask, _ := m.orchPrompt(m.planner, []orchItem{{kind: orchGroup, plan: p.ID, group: "g", lines: []string{"feature/b: hi"}}})
 	if !strings.Contains(ask, "earlier decisions didn't apply") || !strings.Contains(ask, "deny nope-2 for feature/a: not found") {
 		t.Errorf("next request:\n%s", ask)
 	}

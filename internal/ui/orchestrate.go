@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/group"
@@ -62,15 +61,14 @@ type orchItem struct {
 	urgent bool     // starts a planner turn; other items wait for one
 }
 
-// orchestrator is the planner's state as the watcher of plans.
+// orchestrator is grove's state for the planners watching plans: what
+// waits for them, and the lead planner's own state (each group's planner
+// keeps its own in its session).
 type orchestrator struct {
-	queue   []orchItem
-	turns   int             // planner turns in a row without the user
-	paused  bool            // stopped at the limit until the user says something
-	seen    map[string]int  // group chat messages already passed on, by folder
-	asked   []string        // approvals in the planner's current turn, by ID
-	reports []string        // its decisions that didn't apply, for its next request
-	orders  map[string]bool // control orders already carried out, by ID
+	plannerState
+	queue  []orchItem
+	seen   map[string]int  // group chat messages already passed on, by folder
+	orders map[string]bool // control orders already carried out, by ID
 }
 
 // askWatcher runs then once it is known who watches the next plan: from the
@@ -201,9 +199,10 @@ func (m *Model) watchedTask(branch string) (*plan.Plan, *plan.Task, *session) {
 	return nil, nil, nil
 }
 
-// userActed lets the planner go on deciding after the user said something.
+// userActed lets the planners go on deciding after the user said
+// something.
 func (m *Model) userActed() {
-	m.orch.turns, m.orch.paused = 0, false
+	m.progressed()
 }
 
 // progressed lets the planner go on deciding after a watched plan moved
@@ -211,6 +210,9 @@ func (m *Model) userActed() {
 // limit only stops a planner and agents that go round in circles.
 func (m *Model) progressed() {
 	m.orch.turns, m.orch.paused = 0, false
+	for _, s := range m.crews {
+		s.crew.turns, s.crew.paused = 0, false
+	}
 }
 
 // queueTurn hands a watched task's refused commands, or its closing
@@ -280,7 +282,8 @@ func (m *Model) queueGroups() {
 				}
 				it.lines = append(it.lines, msg.From+to+": "+msg.Text)
 				switch {
-				case grp.ID == plan.ChatID && msg.From == group.User:
+				case msg.From == group.User:
+					// The user talks to the planner in charge of that chat.
 					it.urgent = true
 				default:
 					it.urgent = it.urgent || msg.To == "" && msg.From != group.User
@@ -338,55 +341,108 @@ func (m *Model) liveItems(items []orchItem) []orchItem {
 	return out
 }
 
-// orchestrate starts a planner turn for what's queued, once the planner is
-// free and something needs an answer.
+// orchestrate starts a turn for each planner that has something urgent
+// queued and is free: the lead for ungrouped tasks and plan-wide news,
+// each group's planner for its group.
 func (m *Model) orchestrate() tea.Cmd {
 	o := &m.orch
 	o.queue = m.liveItems(o.queue)
-	if !slices.ContainsFunc(o.queue, func(it orchItem) bool { return it.urgent }) {
-		return nil
-	}
-	if m.planner != nil && m.planner.running {
-		return nil
-	}
-	if o.turns >= m.cfg.Planner.Decisions() {
-		if o.paused {
-			return nil
-		}
-		o.paused = true
-		return tea.Batch(
-			m.notify(fmt.Sprintf("✦ The planner paused after %d decisions in a row; say something to it (P) or an agent to let it go on", o.turns), toastInfo),
-			m.alert(fmt.Sprintf("The planner paused after %d decisions in a row and waits for you", o.turns)))
-	}
-	if m.planner == nil {
-		dir := m.plannerDir()
-		k, ok := agent.Parse(m.planByID(o.queue[0].plan).Agent)
-		if dir == "" || !ok {
-			return nil
-		}
-		m.planner = m.newPlanner(dir, k)
-	}
-	o.turns++
-	text, summary := m.orchPrompt(o.queue)
+	var owners []string // crewKey, "" for the lead, in queue order
+	byOwner := map[string][]orchItem{}
 	for _, it := range o.queue {
-		o.asked = append(o.asked, it.ids...)
+		k := crewKey(it.plan, m.ownerOf(it))
+		if _, ok := byOwner[k]; !ok {
+			owners = append(owners, k)
+		}
+		byOwner[k] = append(byOwner[k], it)
 	}
-	s := m.planner
-	s.nextPlan = planIDs(o.queue)[0] // before the queue is cleared
-	o.queue, o.reports = nil, nil
+	var cmds []tea.Cmd
+	var rest []orchItem
+	for _, k := range owners {
+		items := byOwner[k]
+		cmd, sent := m.orchestrateOne(items)
+		if !sent {
+			rest = append(rest, items...)
+		}
+		cmds = append(cmds, cmd)
+	}
+	o.queue = rest
+	return tea.Batch(cmds...)
+}
+
+// orchestrateOne starts a turn of the planner that owns items, all of one
+// owner, reporting whether it took them.
+func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
+	if !slices.ContainsFunc(items, func(it orchItem) bool { return it.urgent }) {
+		return nil, false
+	}
+	planID, groupID := items[0].plan, m.ownerOf(items[0])
+	var cur *session
+	if groupID == "" {
+		cur = m.planner
+	} else {
+		cur = m.crews[crewKey(planID, groupID)]
+	}
+	if cur != nil && cur.running {
+		return nil, false
+	}
+	st := m.stateOf(cur)
+	if groupID != "" && cur == nil {
+		st = &plannerState{}
+	}
+	who := "The planner"
+	if groupID != "" {
+		who = "The planner of " + groupTitleOf(m.planByID(planID), groupID)
+	}
+	if st.turns >= m.cfg.Planner.Decisions() {
+		if st.paused {
+			return nil, false
+		}
+		st.paused = true
+		return tea.Batch(
+			m.notify(fmt.Sprintf("✦ %s paused after %d decisions in a row; say something to it (P) or an agent to let it go on", who, st.turns), toastInfo),
+			m.alert(fmt.Sprintf("%s paused after %d decisions in a row and waits for you", who, st.turns))), false
+	}
+	s := m.plannerFor(planID, groupID)
+	if s == nil {
+		return nil, false
+	}
+	st = m.stateOf(s)
+	st.turns++
+	text, summary := m.orchPrompt(s, items)
+	for _, it := range items {
+		st.asked = append(st.asked, it.ids...)
+	}
+	s.nextPlan = planIDs(items)[0]
+	st.reports = nil
 	cmd := m.send(s, text)
 	// The chat shows a line about it, not the whole request.
 	s.entries[len(s.entries)-1] = chatEntry{roleNote, summary}
-	return cmd
+	return cmd, true
+}
+
+// groupTitleOf is a group's name, or its ID when it isn't known.
+func groupTitleOf(p *plan.Plan, groupID string) string {
+	if p != nil {
+		if g, ok := p.Group(groupID); ok {
+			return g.Name
+		}
+	}
+	return groupID
 }
 
 // orchPrompt is the planner's request to decide on items, and a short
 // account of it for its chat.
-func (m *Model) orchPrompt(items []orchItem) (string, string) {
+func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 	var b strings.Builder
 	var what []string
-	b.WriteString("[grove] You are in charge of these plans for the user. The user only reviews the pull request at the end, so decide everything here yourself; " +
-		"nobody else will answer the agents.\n")
+	if s.crewGroup != "" {
+		b.WriteString("[grove] You are in charge of your group for the user. The user only reviews the pull request at the end, so decide everything here yourself; " +
+			"nobody else will answer your group's agents.\n")
+	} else {
+		b.WriteString("[grove] You are in charge of these plans for the user. The user only reviews the pull request at the end, so decide everything here yourself; " +
+			"nobody else will answer the agents. Each group has its own planner, which handles its tasks and chat.\n")
+	}
 	for _, id := range planIDs(items) {
 		p := m.planByID(id)
 		fmt.Fprintf(&b, "\n## Plan %q (id %s)\n", p.Title, p.ID)
@@ -455,9 +511,9 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 			}
 		}
 	}
-	if len(m.orch.reports) > 0 {
+	if reports := m.stateOf(s).reports; len(reports) > 0 {
 		b.WriteString("\nSome of your earlier decisions didn't apply:\n")
-		for _, r := range m.orch.reports {
+		for _, r := range reports {
 			b.WriteString("- " + r + "\n")
 		}
 	}
@@ -472,7 +528,7 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
   "merge": [{"plan": "plan id"}],
   "close": [{"plan": "plan id", "note": "what the user accepted"}]
 }` + "\n```\n\n")
-	if len(m.controlTools(m.planner)) > 0 {
+	if len(m.controlTools(s)) > 0 {
 		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark, post, merge, close) instead of the block, " +
 			"and you may run shell commands without asking, for example to read a task's diff, run its tests, install its dependencies or run git grove allows in its worktree. " +
 			"Don't change any files yourself; the task agents do the work.\n\n")
@@ -562,34 +618,39 @@ func (o outcome) String() string {
 // applyDecisions carries out the last grove-orchestrate block in a planner
 // reply. Only tasks of watched plans are touched; what didn't apply is
 // noted in the planner's chat and told in its next request.
-func (m *Model) applyDecisions(reply string) tea.Cmd {
+func (m *Model) applyDecisions(s *session, reply string) tea.Cmd {
 	found := orchBlock.FindAllStringSubmatch(reply, -1)
 	if len(found) == 0 {
 		return nil
 	}
+	st := m.stateOf(s)
 	var d decisions
 	if err := json.Unmarshal([]byte(found[len(found)-1][1]), &d); err != nil {
-		m.plannerNote(roleError, "Couldn't read the planner's decisions: "+err.Error())
-		m.orch.reports = append(m.orch.reports, "your last grove-orchestrate block wasn't valid JSON, so none of it applied: "+err.Error())
+		noteTo(s, roleError, "Couldn't read the planner's decisions: "+err.Error())
+		st.reports = append(st.reports, "your last grove-orchestrate block wasn't valid JSON, so none of it applied: "+err.Error())
 		return nil
 	}
-	cmd, outs := m.decide(d)
-	for _, o := range outs {
+	d, refused := m.scopeDecisions(s, d)
+	cmd, outs := m.decide(s, d)
+	for _, o := range append(refused, outs...) {
 		switch o.result {
 		case control.Applied:
 		case control.AlreadyApplied:
-			m.plannerNote(roleNote, "Already done: "+o.String())
+			noteTo(s, roleNote, "Already done: "+o.String())
 		default:
-			m.plannerNote(roleNote, "Not applied: "+o.String())
-			m.orch.reports = append(m.orch.reports, o.String())
+			noteTo(s, roleNote, "Not applied: "+o.String())
+			st.reports = append(st.reports, o.String())
 		}
 	}
 	return cmd
 }
 
-// decide carries out the planner's decisions on watched plans' tasks and
-// says what came of each.
-func (m *Model) decide(d decisions) (tea.Cmd, []outcome) {
+// decide carries out planner by's decisions (nil: the lead's control
+// tools) on watched plans' tasks and says what came of each.
+func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
+	if by == nil {
+		by = m.planner
+	}
 	var cmds []tea.Cmd
 	var outs []outcome
 	type applied struct {
@@ -683,7 +744,7 @@ func (m *Model) decide(d decisions) (tea.Cmd, []outcome) {
 			if n := strings.TrimSpace(mk.Note); n != "" {
 				text += ": " + n
 			}
-			m.plannerNote(roleNote, text+".")
+			noteTo(by, roleNote, text+".")
 			cmds = append(cmds, m.finishIfSettled(p), m.savePlan(p), m.schedule())
 		}
 		outs = append(outs, o)

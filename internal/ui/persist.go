@@ -42,6 +42,8 @@ type savedSession struct {
 	Failed      bool           `json:"failed,omitempty"`
 	Interrupted bool           `json:"interrupted,omitempty"` // saved while the agent was working
 	Planner     bool           `json:"planner,omitempty"`
+	CrewPlan    string         `json:"crew_plan,omitempty"` // a group's planner: its plan
+	CrewGroup   string         `json:"crew_group,omitempty"`
 
 	// Token usage (version 2). Version 1 sessions get a new UID on load.
 	UID      string       `json:"uid,omitempty"`
@@ -90,12 +92,19 @@ var roleNames = map[chatRole]string{roleUser: "user", roleAgent: "agent", roleTo
 
 func sessionFile(path string) string { return "sessions/" + git.PathKey(path) + ".json" }
 
-// plannerFile holds the planner's conversation.
-const plannerFile = "planner/session.json"
+// plannerFile holds the planner's conversation, and crewDir each group
+// planner's.
+const (
+	plannerFile = "planner/session.json"
+	crewDir     = "planner/groups"
+)
 
 // file is where s is saved.
 func (s *session) file() string {
-	if s.planner {
+	switch {
+	case s.crewGroup != "":
+		return crewDir + "/" + git.PathKey(s.crewPlan+"-"+s.crewGroup) + ".json"
+	case s.planner:
 		return plannerFile
 	}
 	return sessionFile(s.path)
@@ -106,6 +115,7 @@ func (s *session) saved() savedSession {
 		Version: 2, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
 		History: s.history, Checkpoint: s.checkpoint, TurnTree: s.turnTree, Allow: s.allow, Notes: s.notes, Cost: s.cost,
 		Failed: s.failed, Interrupted: s.running, Planner: s.planner, Approvals: s.seq, Answered: s.answered,
+		CrewPlan: s.crewPlan, CrewGroup: s.crewGroup,
 		UID: s.uid, Created: s.created, Turns: s.turns, Drafting: s.drafting,
 		Unrecorded: s.unrecorded, Unassigned: s.unassigned,
 	}
@@ -142,6 +152,7 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 		kind: v.Kind, path: v.Path, name: v.Name, model: v.Model, id: v.ID,
 		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, cost: v.Cost,
 		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner, seq: v.Approvals, answered: v.Answered,
+		crewPlan: v.CrewPlan, crewGroup: v.CrewGroup,
 		uid: v.UID, created: v.Created, turns: v.Turns, drafting: v.Drafting,
 		unrecorded: v.Unrecorded, unassigned: v.Unassigned,
 	}
@@ -217,6 +228,9 @@ func (m *Model) loadSessions() tea.Cmd {
 		if _, perr := os.Stat(filepath.Join(st.Dir(), filepath.FromSlash(plannerFile))); perr == nil {
 			names = append(names, plannerFile)
 		}
+		if crews, cerr := st.List(crewDir); cerr == nil {
+			names = append(names, crews...)
+		}
 		var out []*session
 		var errs []error
 		if err != nil {
@@ -247,6 +261,11 @@ func (m *Model) onSessionsLoaded(msg sessionsLoadedMsg) tea.Cmd {
 		cut := m.recordCutShort(s)
 		// One the user started while loading wins.
 		switch {
+		case s.crewGroup != "":
+			if m.crews[s.crewKey()] != nil {
+				continue
+			}
+			m.crews[s.crewKey()] = s
 		case s.planner && m.planner == nil:
 			m.planner = s
 		case s.planner, m.sessionFor(s.path) != nil:

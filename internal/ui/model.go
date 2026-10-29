@@ -175,12 +175,14 @@ type Model struct {
 	prOff          bool             // polling stopped after a failure
 	prPolling      bool
 	lastPRPoll     time.Time
-	reviewPolling  bool      // a watched plan's pull request is being read
-	lastReviewPoll time.Time // when pollReviews last ran
-	reviewErr      string    // the last error reading one, shown once
-	overview       bool      // the overview of every worktree, in place of both panes
-	ovPath         string    // worktree under the overview's cursor
-	ovStart        int       // first and past-last rows of the overview table on screen
+	crews          map[string]*session // each group's planner, by crewKey (crew.go)
+	chatCrew       string              // with chatPlanner: the chat shows that group's planner
+	reviewPolling  bool                // a watched plan's pull request is being read
+	lastReviewPoll time.Time           // when pollReviews last ran
+	reviewErr      string              // the last error reading one, shown once
+	overview       bool                // the overview of every worktree, in place of both panes
+	ovPath         string              // worktree under the overview's cursor
+	ovStart        int                 // first and past-last rows of the overview table on screen
 	ovEnd          int
 	ovRowsY        int // screen row of the first table row
 	mergeSeq       int
@@ -276,6 +278,7 @@ func New(ctx context.Context, o Options) *Model {
 		lastClickRow: -1,
 		gitCmd:       newGitPrompt(),
 		sessions:     map[string]*session{},
+		crews:        map[string]*session{},
 		savedJSON:    map[string][]byte{},
 		creatingTask: map[string]bool{},
 		mergingPlan:  map[string]bool{},
@@ -1053,6 +1056,12 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Usage):
 		return m.openUsage()
 	case key.Matches(msg, k.Planner):
+		// On a group of a plan the planner watches: that group's planner.
+		if cr, ok := m.cursorRow(); ok && cr.kind == rowGroup && m.focus == focusList {
+			if g := m.listGroups[cr.grp]; watched(m.planByID(g.plan)) {
+				return m.openCrew(g.plan, g.id)
+			}
+		}
 		return m.openPlanner()
 	case key.Matches(msg, k.Group):
 		return m.openSelectedGroup()

@@ -94,7 +94,7 @@ var helpSections = []helpSection{
 	}},
 	{"Agent", [][2]string{
 		{"a", "open worktree agent"},
-		{"P", "planner: plan tasks"},
+		{"P", "planner: plan tasks (on a group: its planner)"},
 		{"t", "group or plan chat"},
 		{"enter", "send / allow / run"},
 		{"esc", "deny or skip a card"},

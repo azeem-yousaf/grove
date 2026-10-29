@@ -62,6 +62,11 @@ type session struct {
 	seen       bool // the user has looked since it last finished
 	planner    bool // the planner: reads the repository, never edits it
 
+	// A group's planner (crew.go) is a planner in charge of one group of a
+	// plan the planner watches; the lead planner has neither.
+	crewPlan, crewGroup string
+	crew                plannerState // its state as an orchestrator
+
 	// Token usage (usage.go).
 	uid      string       // grove's id for this agent in the usage ledger
 	created  time.Time    // when it was created
@@ -139,7 +144,8 @@ type (
 	// first turn, back to the UI.
 	agentMsg struct {
 		path       string
-		planner    bool // for the planner rather than path's worktree agent
+		planner    bool   // for the planner rather than path's worktree agent
+		crew       string // for that group's planner (crewKey), with planner
 		ev         agent.Event
 		checkpoint string
 		turnTree   string // taken before a later turn, for "since the last turn"
@@ -278,6 +284,9 @@ func (m *Model) allSessions() []*session {
 	if m.planner != nil {
 		out = append(out, m.planner)
 	}
+	for _, s := range m.crews {
+		out = append(out, s)
+	}
 	return out
 }
 
@@ -318,7 +327,7 @@ func (m *Model) newSession(path, name string, k agent.Kind) *session {
 func (m *Model) showChat(s *session) tea.Cmd {
 	draft := m.chatDraft
 	m.chatDraft = ""
-	m.chatPath, m.chatPlanner = s.path, s.planner
+	m.chatPath, m.chatPlanner, m.chatCrew = s.path, s.planner, s.crewKey()
 	m.focus = focusChat
 	s.seen = true
 	m.chatFollow = true
@@ -334,6 +343,9 @@ func (m *Model) showChat(s *session) tea.Cmd {
 
 // chatSession is the session shown in the chat pane.
 func (m *Model) chatSession() *session {
+	if m.chatPlanner && m.chatCrew != "" {
+		return m.crews[m.chatCrew]
+	}
 	if m.chatPlanner {
 		return m.planner
 	}
@@ -381,6 +393,9 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 			return m.openReview()
 		}
 	case "ctrl+g":
+		if s.crewGroup != "" {
+			return m.openGroup(s.crewPlan, s.crewGroup)
+		}
 		if !s.planner {
 			return m.openGroupChat(s.path)
 		}
@@ -625,20 +640,23 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	// once; Codex starts fresh every turn.
 	if s.id == "" || s.kind == agent.Codex {
 		req.Context = m.agentContext(s)
-		if s.planner {
+		switch {
+		case s.crewGroup != "":
+			req.Context = m.crewContext(s)
+		case s.planner:
 			req.Context = m.plannerContext()
 		}
 	}
 	req.Context, req.Message = s.takeNotes(req.Context, req.Message)
 	// The planner changes nothing, so there's nothing to undo.
-	path, planner, needCheckpoint := s.path, s.planner, s.checkpoint == "" && !s.planner
+	path, planner, crew, needCheckpoint := s.path, s.planner, s.crewKey(), s.checkpoint == "" && !s.planner
 	run := m.runAgent
 	go func() {
 		defer close(ch)
 		if checkGuard != nil {
 			if g, ok := checkGuard().(guardVerifiedMsg); ok {
 				ack := make(chan struct{})
-				ch <- agentMsg{path: path, planner: planner, guard: &g, ack: ack}
+				ch <- agentMsg{path: path, planner: planner, crew: crew, guard: &g, ack: ack}
 				select {
 				case <-ack:
 				case <-time.After(10 * time.Second):
@@ -654,7 +672,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				// still works this session if pinning fails.
 				_ = git.KeepCheckpoint(ctx, path, path, tree)
 			}
-			ch <- agentMsg{path: path, planner: planner, checkpoint: tree, err: err}
+			ch <- agentMsg{path: path, planner: planner, crew: crew, checkpoint: tree, err: err}
 		case !planner:
 			// Cheap: it starts from the real index, so only what changed
 			// is hashed. Without it, v can only show all the changes.
@@ -662,7 +680,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				ch <- agentMsg{path: path, turnTree: tree}
 			}
 		}
-		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, ev: ev} })
+		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, crew: crew, ev: ev} })
 	}()
 	return tea.Batch(listen(ch), m.startAnimating(), registered, policyErr)
 }
@@ -681,6 +699,7 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Model:    s.model,
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,
+		Slot:     s.crewKey(),
 		Commands: s.planner && m.orchestrating(),
 		Tools:    append(m.groupTools(s), m.controlTools(s)...),
 		ReadDirs: m.groupmateDirs(s),
@@ -719,6 +738,9 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 	s := m.sessionFor(msg.path)
 	if msg.planner {
 		s = m.planner
+		if msg.crew != "" {
+			s = m.crews[msg.crew]
+		}
 	}
 	if s == nil {
 		return nil
@@ -819,8 +841,10 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	s.seen = viewing
 	cmds := []tea.Cmd{m.startScan(), recordErr, gitCmd, m.checkWatches(s)}
 	switch {
+	case s.crewGroup != "":
+		cmds = append(cmds, m.applyDecisions(s, reply), m.leaveUndecided(s), m.orchestrate())
 	case s.planner:
-		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(reply), m.leaveUndecided(), m.orchestrate())
+		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(s, reply), m.leaveUndecided(s), m.orchestrate())
 	default:
 		// Answers given while it worked go to it now, which carries on its
 		// turn rather than ending it.
@@ -1239,7 +1263,7 @@ func (m *Model) chatBottom(s *session, width int) []string {
 				why += ": " + a.policy.reason
 			}
 			head += st.warn.Render("  · " + why)
-		case m.watchedBy(s.path) && !a.left && !m.orch.paused:
+		case m.watchedBy(s.path) && !a.left && !m.stateOf(m.ownerPlanner(s.path)).paused:
 			head += st.faint.Render("  · the planner will decide unless you do")
 		case a.left:
 			head += st.faint.Render("  · the planner left it for you")

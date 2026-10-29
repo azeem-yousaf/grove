@@ -353,6 +353,12 @@ func (m *Model) onGroupKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "tab", "shift+tab", "esc":
 		m.focus = focusList
 		return nil
+	case "ctrl+p":
+		// The planner in charge of this group, or the lead for the plan chat.
+		if gc.group == plan.ChatID {
+			return m.openPlanner()
+		}
+		return m.openCrew(gc.plan, gc.group)
 	case "ctrl+t":
 		// From a group's chat to its plan's, and back.
 		if gc.group != plan.ChatID {
@@ -483,6 +489,9 @@ func (m *Model) groupPane(w, h int) string {
 		bottom = append(bottom, " "+mark+l)
 	}
 	hints := [][2]string{{"enter", "post"}, {"@branch", "to one"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}}
+	if watched(p) {
+		hints = append(hints, [2]string{"ctrl+p", "its planner"})
+	}
 	switch {
 	case gc.group != plan.ChatID:
 		hints = append(hints, [2]string{"ctrl+t", "plan chat"})

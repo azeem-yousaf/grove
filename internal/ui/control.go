@@ -200,7 +200,7 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 			results = append(results, control.Result{Order: o.ID, Outcome: control.Failed, Detail: "grove doesn't know the action " + o.Action})
 		}
 	}
-	cmd, outs := m.decide(d)
+	cmd, outs := m.decide(nil, d)
 	for _, o := range outs {
 		if o.order != "" {
 			results = append(results, control.Result{Order: o.order, Outcome: o.result, Detail: o.detail})

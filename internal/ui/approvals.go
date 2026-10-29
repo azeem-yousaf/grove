@@ -109,9 +109,9 @@ func (m *Model) answer(s *session, i int, approve bool, by, why string) tea.Cmd 
 		}
 	}
 	if m.watchedBy(s.path) && by != byPlanner {
-		m.plannerNote(roleNote, fmt.Sprintf("The user %s %s's command: %s", done, s.name, a.text))
+		noteTo(m.ownerPlanner(s.path), roleNote, fmt.Sprintf("The user %s %s's command: %s", done, s.name, a.text))
 	} else if by == byPlanner {
-		m.plannerNote(roleNote, fmt.Sprintf("%s %s for %s.", upperFirst(done), a.text, s.name))
+		noteTo(m.ownerPlanner(s.path), roleNote, fmt.Sprintf("%s %s for %s.", upperFirst(done), a.text, s.name))
 	}
 	cmds = append(cmds, m.logApproval(s, a, verdict, by, control.Applied, why))
 	return tea.Batch(cmds...)
@@ -257,9 +257,10 @@ const askAgain = 2
 // never gets those: it is asked again, and after askAgain turns without an
 // answer the command is denied and the agent told to find another way.
 // Approvals of plans it doesn't watch any more go to the user.
-func (m *Model) leaveUndecided() tea.Cmd {
-	asked := m.orch.asked
-	m.orch.asked = nil
+func (m *Model) leaveUndecided(planner *session) tea.Cmd {
+	st := m.stateOf(planner)
+	asked := st.asked
+	st.asked = nil
 	var cmds []tea.Cmd
 	var left, denied []string
 	for _, s := range m.allSessions() {
@@ -271,7 +272,7 @@ func (m *Model) leaveUndecided() tea.Cmd {
 			}
 			if m.awaitsPlanner(s, *a) {
 				if a.asked++; a.asked < askAgain {
-					m.orch.reports = append(m.orch.reports, fmt.Sprintf("You didn't answer %s's `%s` (id %s). Nobody else will: approve or deny it now.", s.name, firstLine(a.text), a.id))
+					st.reports = append(st.reports, fmt.Sprintf("You didn't answer %s's `%s` (id %s). Nobody else will: approve or deny it now.", s.name, firstLine(a.text), a.id))
 					m.queueTurn(s)
 					continue
 				}
@@ -290,11 +291,11 @@ func (m *Model) leaveUndecided() tea.Cmd {
 		}
 	}
 	if len(denied) > 0 {
-		m.plannerNote(roleNote, "Denied as you didn't answer: "+strings.Join(denied, "; "))
-		m.orch.reports = append(m.orch.reports, "You didn't answer, so grove denied: "+strings.Join(denied, "; ")+". Answer every approval you are asked about.")
+		noteTo(planner, roleNote, "Denied as you didn't answer: "+strings.Join(denied, "; "))
+		st.reports = append(st.reports, "You didn't answer, so grove denied: "+strings.Join(denied, "; ")+". Answer every approval you are asked about.")
 	}
 	if len(left) > 0 {
-		m.plannerNote(roleNote, "Left for the user: "+strings.Join(left, "; "))
+		noteTo(planner, roleNote, "Left for the user: "+strings.Join(left, "; "))
 		text := plural(len(left), "command") + " the planner left for you: " + strings.Join(left, "; ")
 		cmds = append(cmds, m.notify("✦ "+text, toastInfo), m.alert(text))
 	}

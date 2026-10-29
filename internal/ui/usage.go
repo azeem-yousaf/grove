@@ -68,7 +68,7 @@ func (m *Model) startTurn(s *session) tea.Cmd {
 	s.live, s.liveSeen = usage.Tokens{}, false
 	planID := ""
 	if s.planner {
-		planID = s.nextPlan
+		planID = cmp.Or(s.crewPlan, s.nextPlan)
 		if planID == "" {
 			planID = m.watchingPlan()
 		}
@@ -94,7 +94,7 @@ func (m *Model) watchingPlan() string {
 // task, or the plan its worktree is the merge of.
 func (m *Model) attrFor(s *session, planID string) turnAttr {
 	if s.planner {
-		a := turnAttr{Plan: planID}
+		a := turnAttr{Plan: planID, Group: s.crewGroup}
 		if p := m.planByID(planID); p != nil {
 			a.PlanTitle = p.Title
 		}
