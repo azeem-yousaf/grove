@@ -360,8 +360,9 @@ func (m *Model) orchestrate() tea.Cmd {
 	for _, it := range o.queue {
 		o.asked = append(o.asked, it.ids...)
 	}
-	o.queue, o.reports = nil, nil
 	s := m.planner
+	s.nextPlan = planIDs(o.queue)[0] // before the queue is cleared
+	o.queue, o.reports = nil, nil
 	cmd := m.send(s, text)
 	// The chat shows a line about it, not the whole request.
 	s.entries[len(s.entries)-1] = chatEntry{roleNote, summary}

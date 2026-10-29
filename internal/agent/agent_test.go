@@ -9,9 +9,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // The test binary doubles as a fake agent: with GROVE_FAKE_AGENT set it
@@ -36,14 +39,27 @@ func TestMain(m *testing.M) {
 }
 
 // fakeClaude acts like `claude -p --input-format stream-json`: a turn per
-// input line until stdin closes. A message of "wait" streams a little and
-// then waits for an interrupt. Each start and message is appended to
-// GROVE_FAKE_RECORD.
+// input line until stdin closes, reporting usage as the real one does
+// (fakeTurn), with the session's totals kept in a file so that they carry
+// on after --resume. A message of "wait" streams a little and then waits
+// for an interrupt; "die" streams a little and exits; "quiet" reports no
+// usage. Each start and message is appended to GROVE_FAKE_RECORD.
 func fakeClaude() {
 	rec, _ := os.OpenFile(os.Getenv("GROVE_FAKE_RECORD"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	fmt.Fprintf(rec, "start %s\n", strings.Join(os.Args[1:], " "))
+	sessionFile := os.Getenv("GROVE_FAKE_RECORD") + ".session"
+	var s fakeSession
+	if slices.Contains(os.Args, "--resume") {
+		b, _ := os.ReadFile(sessionFile)
+		json.Unmarshal(b, &s)
+	}
+	save := func() {
+		b, _ := json.Marshal(s)
+		os.WriteFile(sessionFile, b, 0o644)
+	}
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(nil, 1<<20)
+	n := 0 // turns this process has had
 	for sc.Scan() {
 		var in struct {
 			Type    string `json:"type"`
@@ -57,31 +73,104 @@ func fakeClaude() {
 		json.Unmarshal(sc.Bytes(), &in)
 		switch {
 		case in.Type == "user":
+			if v, ok := os.LookupEnv("GROVE_TEST_ENV"); ok {
+				fmt.Fprintf(rec, "env GROVE_TEST_ENV=%s\n", v) // reports the process's environment
+			}
 			fmt.Fprintf(rec, "user %q\n", in.Message.Content)
-			if strings.HasSuffix(in.Message.Content, "wait") {
+			n++
+			msg := in.Message.Content
+			if strings.HasSuffix(msg, "wait") || strings.HasSuffix(msg, "die") {
 				fmt.Println(`{"type":"system","subtype":"init","session_id":"s-123"}`)
+				fmt.Println(`{"type":"stream_event","event":{"type":"message_start","message":{"id":"w1","usage":{"input_tokens":7,"cache_creation_input_tokens":0,"cache_read_input_tokens":3000,"output_tokens":1}}},"parent_tool_use_id":null}`)
 				fmt.Println(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Thinking"}},"parent_tool_use_id":null}`)
+				fmt.Println(`{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":4}},"parent_tool_use_id":null}`)
+				if strings.HasSuffix(msg, "die") {
+					// Claude Code has already added what the turn used to
+					// the session.
+					s.Main = s.Main.Add(diedTokens)
+					save()
+					os.Exit(1)
+				}
 				continue
 			}
-			fmt.Println(claudeSample)
+			if strings.HasSuffix(msg, "quiet") {
+				fmt.Println(`{"type":"system","subtype":"init","session_id":"s-123"}`)
+				fmt.Println(`{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s-123"}`)
+				continue
+			}
+			fmt.Println(fakeTurn(n, &s))
+			save()
 		case in.Type == "control_request" && in.Request.Subtype == "interrupt":
 			fmt.Fprintln(rec, "interrupt")
+			s.Main = s.Main.Add(stoppedTokens)
+			save()
 			fmt.Println(`{"type":"control_response","response":{"subtype":"success","request_id":"grove-stop"}}`)
-			fmt.Println(`{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"s-123"}`)
+			fmt.Println(`{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"s-123","usage":{"input_tokens":7,"cache_creation_input_tokens":0,"cache_read_input_tokens":3000,"output_tokens":9},"modelUsage":` + s.modelUsage() + `}`)
 		}
 	}
 }
 
-const claudeSample = `{"type":"system","subtype":"init","session_id":"s-123","cwd":"/w","tools":["Read","Edit"]}
+// fakeSession is what a fake Claude session has used so far, by the main
+// conversation's model and the subagent's.
+type fakeSession struct{ Main, Sub usage.Tokens }
+
+// modelUsage is the session's modelUsage, as Claude Code writes it.
+func (s fakeSession) modelUsage() string {
+	model := func(t usage.Tokens) string {
+		return fmt.Sprintf(`{"inputTokens":%d,"outputTokens":%d,"cacheReadInputTokens":%d,"cacheCreationInputTokens":%d,"costUSD":0.01}`,
+			t.Input-t.CacheRead-t.CacheWrite, t.Output, t.CacheRead, t.CacheWrite)
+	}
+	if s.Sub.IsZero() {
+		return `{"claude-haiku":` + model(s.Main) + `}`
+	}
+	return `{"claude-haiku":` + model(s.Main) + `,"claude-sonnet":` + model(s.Sub) + `}`
+}
+
+// The fake's per-turn figures: the main conversation of turn n (live and in
+// result.usage), the subagent every turn has (only in modelUsage), and an
+// interrupted turn's.
+func mainTokens(n int64) usage.Tokens {
+	return usage.Tokens{Input: n + 2303, Output: 25, CacheRead: 2200, CacheWrite: 100, HasCache: true}
+}
+
+var (
+	subTokens     = usage.Tokens{Input: 50, Output: 7, HasCache: true}
+	stoppedTokens = usage.Tokens{Input: 3007, Output: 9, CacheRead: 3000, HasCache: true}
+	diedTokens    = usage.Tokens{Input: 3007, Output: 4, CacheRead: 3000, HasCache: true} // what "die" streamed
+)
+
+// turnTokens is everything turn n used, the subagent included.
+func turnTokens(n int64) usage.Tokens { return mainTokens(n).Add(subTokens) }
+
+// fakeTurn is the output of a turn that is the process's nth, adding it to
+// s. It has two messages, m<n>a (with tool calls, its assistant lines
+// repeating its usage per content block) and m<n>b, plus a subagent's. The
+// result's usage is the main conversation's for this turn alone; its
+// modelUsage adds up over the session and includes the subagent (like
+// Claude Code's). The live figures agree with result.usage: input
+// n+3+100+2200 = n+2303 (cache read 2200, write 100), output 25.
+func fakeTurn(n int, s *fakeSession) string {
+	s.Main = s.Main.Add(mainTokens(int64(n)))
+	s.Sub = s.Sub.Add(subTokens)
+	return fmt.Sprintf(`{"type":"system","subtype":"init","session_id":"s-123","cwd":"/w","tools":["Read","Edit"]}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"m%[1]da","model":"claude-haiku","usage":{"input_tokens":%[1]d,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":1}}},"parent_tool_use_id":null}
 {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Look"}},"parent_tool_use_id":null}
 {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ing…"}},"parent_tool_use_id":null}
-{"type":"assistant","message":{"content":[{"type":"text","text":"Looking…"},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/w/a.go"}}]},"parent_tool_use_id":null}
-{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"/w/a.go","old_string":"x","new_string":"y"}}]},"parent_tool_use_id":null}
-{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t9","name":"Read","input":{"file_path":"/w/sub.go"}}]},"parent_tool_use_id":"t5"}
+{"type":"assistant","message":{"id":"m%[1]da","content":[{"type":"text","text":"Looking…"},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/w/a.go"}}],"usage":{"input_tokens":%[1]d,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":1}},"parent_tool_use_id":null}
+{"type":"assistant","message":{"id":"m%[1]da","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"/w/a.go","old_string":"x","new_string":"y"}}],"usage":{"input_tokens":%[1]d,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":1}},"parent_tool_use_id":null}
+{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":%[1]d,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":20}},"parent_tool_use_id":null}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"sub1","usage":{"input_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}},"parent_tool_use_id":"t5"}
+{"type":"assistant","message":{"id":"sub1","content":[{"type":"tool_use","id":"t9","name":"Read","input":{"file_path":"/w/sub.go"}}]},"parent_tool_use_id":"t5"}
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"ok"}]},"parent_tool_use_id":null}
-{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"npm test"}}]},"parent_tool_use_id":null}
-{"type":"assistant","message":{"content":[{"type":"text","text":"Done. Run the tests to check."}]},"parent_tool_use_id":null}
-{"type":"result","subtype":"success","is_error":false,"result":"Done. Run the tests to check.","session_id":"s-123","total_cost_usd":0.0421,"permission_denials":[{"tool_name":"Bash","tool_use_id":"t3","tool_input":{"command":"npm test"}}]}`
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"m%[1]db","usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":1200,"output_tokens":1}}},"parent_tool_use_id":null}
+{"type":"assistant","message":{"id":"m%[1]db","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"npm test"}}]},"parent_tool_use_id":null}
+{"type":"assistant","message":{"id":"m%[1]db","content":[{"type":"text","text":"Done. Run the tests to check."}]},"parent_tool_use_id":null}
+{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":5}},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"result":"Done. Run the tests to check.","session_id":"s-123","total_cost_usd":%.4[2]f,"usage":{"input_tokens":%[3]d,"cache_creation_input_tokens":100,"cache_read_input_tokens":2200,"output_tokens":25},"modelUsage":%[4]s,"permission_denials":[{"tool_name":"Bash","tool_use_id":"t3","tool_input":{"command":"npm test"}}]}`,
+		n, 0.0421*float64(n), n+3, s.modelUsage())
+}
+
+var claudeSample = fakeTurn(1, &fakeSession{})
 
 const codexSample = `{"type":"thread.started","thread_id":"th-9"}
 {"type":"turn.started"}
@@ -89,7 +178,7 @@ const codexSample = `{"type":"thread.started","thread_id":"th-9"}
 {"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"bash -lc ls","exit_code":0,"status":"completed"}}
 {"type":"item.completed","item":{"id":"i2","type":"file_change","changes":[{"path":"src/a.ts","kind":"update"},{"path":"src/b.ts","kind":"add"}],"status":"completed"}}
 {"type":"item.completed","item":{"id":"i3","item_type":"agent_message","text":"Updated a.ts and added b.ts."}}
-{"type":"turn.completed","usage":{"input_tokens":12000,"cached_input_tokens":0,"output_tokens":340}}`
+{"type":"turn.completed","usage":{"input_tokens":12000,"cached_input_tokens":4000,"output_tokens":340,"reasoning_output_tokens":120}}`
 
 func feed(p parser, sample string) []Event {
 	var evs []Event
@@ -131,6 +220,28 @@ func TestClaudeParser(t *testing.T) {
 	if len(done.Denied) != 1 || done.Denied[0].Tool != "Bash" || done.Denied[0].Detail != "npm test" {
 		t.Errorf("denied = %+v", done.Denied)
 	}
+	if done.Tokens != turnTokens(1) || done.TokenStatus != usage.Exact {
+		t.Errorf("done tokens = %+v %v, want %+v exact", done.Tokens, done.TokenStatus, turnTokens(1))
+	}
+	// Live figures: each message counted once by id however often its usage
+	// repeats, the subagent's left out (Claude Code streams none of its
+	// messages), and an event only when the total changes.
+	var live []usage.Tokens
+	for _, ev := range evs {
+		if ev.Kind == EvUsage {
+			live = append(live, ev.Tokens)
+		}
+	}
+	wantLive := []usage.Tokens{
+		{Input: 1101, Output: 1, CacheRead: 1000, CacheWrite: 100, HasCache: true},
+		{Input: 1101, Output: 20, CacheRead: 1000, CacheWrite: 100, HasCache: true},
+		{Input: 2304, Output: 21, CacheRead: 2200, CacheWrite: 100, HasCache: true},
+		mainTokens(1),
+		turnTokens(1), // the result's figure, with the subagent
+	}
+	if fmt.Sprint(live) != fmt.Sprint(wantLive) {
+		t.Errorf("live usage =\n%+v\nwant\n%+v", live, wantLive)
+	}
 
 	// An error result carries its message.
 	p := &claudeParser{}
@@ -139,8 +250,78 @@ func TestClaudeParser(t *testing.T) {
 		t.Errorf("error result = %v", ev.Err)
 	}
 	// No result at all: explain from stderr.
-	if ev := (&claudeParser{}).done(fmt.Errorf("exit status 1"), "warn\nError: not logged in\n"); ev.Err == nil || !strings.Contains(ev.Err.Error(), "not logged in") {
-		t.Errorf("missing result = %v", ev.Err)
+	if ev := (&claudeParser{}).done(fmt.Errorf("exit status 1"), "warn\nError: not logged in\n"); ev.Err == nil || !strings.Contains(ev.Err.Error(), "not logged in") || ev.TokenStatus != usage.Unknown {
+		t.Errorf("missing result = %v %v", ev.Err, ev.TokenStatus)
+	}
+}
+
+func TestClaudeUsageMalformed(t *testing.T) {
+	start := func(id, u string) string {
+		return `{"type":"stream_event","event":{"type":"message_start","message":{"id":"` + id + `","usage":` + u + `}},"parent_tool_use_id":null}`
+	}
+	for name, c := range map[string]struct {
+		lines  []string
+		tokens usage.Tokens
+		status usage.Status
+	}{
+		"null usage":      {[]string{start("a", "null"), `{"type":"result","usage":null}`}, usage.Tokens{}, usage.Unknown},
+		"string counts":   {[]string{start("a", `{"input_tokens":"5","output_tokens":"1"}`), `{"type":"result","usage":{"input_tokens":"5","output_tokens":2}}`}, usage.Tokens{}, usage.Unknown},
+		"negative":        {[]string{`{"type":"result","usage":{"input_tokens":-5,"output_tokens":2}}`}, usage.Tokens{}, usage.Unknown},
+		"fractional":      {[]string{`{"type":"result","usage":{"input_tokens":1.5,"output_tokens":2}}`}, usage.Tokens{}, usage.Unknown},
+		"no output side":  {[]string{`{"type":"result","usage":{"input_tokens":5}}`}, usage.Tokens{}, usage.Unknown},
+		"not an object":   {[]string{`{"type":"result","usage":[1,2]}`}, usage.Tokens{}, usage.Unknown},
+		"lone delta":      {[]string{`{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":3}},"parent_tool_use_id":null}`}, usage.Tokens{}, usage.Unknown},
+		"no cache fields": {[]string{`{"type":"result","modelUsage":{"m":{"inputTokens":5,"outputTokens":2}}}`}, usage.Tokens{Input: 5, Output: 2}, usage.Exact},
+		"two models":      {[]string{`{"type":"result","modelUsage":{"a":{"inputTokens":5,"outputTokens":2,"cacheReadInputTokens":10},"b":{"inputTokens":1,"outputTokens":1}}}`}, usage.Tokens{Input: 16, Output: 3, CacheRead: 10, HasCache: true}, usage.Exact},
+		// Without modelUsage, result.usage may leave out subagents.
+		"usage only": {[]string{`{"type":"result","usage":{"input_tokens":5,"output_tokens":2}}`}, usage.Tokens{Input: 5, Output: 2}, usage.Partial},
+		"bad models": {[]string{`{"type":"result","usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"a":{"inputTokens":"5","outputTokens":2}}}`}, usage.Tokens{Input: 5, Output: 2}, usage.Partial},
+		"no models":  {[]string{`{"type":"result","usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{}}`}, usage.Tokens{Input: 5, Output: 2}, usage.Partial},
+		// A broken delta leaves the message's last good figures.
+		"bad delta": {[]string{start("a", `{"input_tokens":5,"cache_read_input_tokens":10,"output_tokens":1}`), `{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":"x"}},"parent_tool_use_id":null}`},
+			usage.Tokens{Input: 15, Output: 1, CacheRead: 10, HasCache: true}, usage.Partial},
+		// The same message started twice still counts once.
+		"repeated id": {[]string{start("a", `{"input_tokens":5,"output_tokens":1}`), start("a", `{"input_tokens":5,"output_tokens":1}`)},
+			usage.Tokens{Input: 5, Output: 1}, usage.Partial},
+		// A result with no usable usage falls back to the live figures.
+		"result without usage": {[]string{start("a", `{"input_tokens":5,"output_tokens":1}`), `{"type":"result","subtype":"success"}`},
+			usage.Tokens{Input: 5, Output: 1}, usage.Partial},
+	} {
+		p := &claudeParser{}
+		for _, l := range c.lines {
+			for _, ev := range p.line([]byte(l)) {
+				if ev.Kind == EvUsage && ev.Tokens.IsZero() {
+					t.Errorf("%s: zero usage reported", name)
+				}
+			}
+		}
+		if ev := p.done(nil, ""); ev.Tokens != c.tokens || ev.TokenStatus != c.status {
+			t.Errorf("%s: done = %+v %v, want %+v %v", name, ev.Tokens, ev.TokenStatus, c.tokens, c.status)
+		}
+	}
+}
+
+func TestClaudeUsageBase(t *testing.T) {
+	result := `{"type":"result","usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"m":{"inputTokens":105,"outputTokens":12}}}`
+	run := func(p *claudeParser) Event {
+		p.line([]byte(result))
+		return p.done(nil, "")
+	}
+	// The turn is the session's total less what it had used before.
+	ev := run(&claudeParser{base: usage.Tokens{Input: 95, Output: 9}})
+	if ev.Tokens != (usage.Tokens{Input: 10, Output: 3}) || ev.TokenStatus != usage.Exact || ev.SessionTotal != (usage.Tokens{Input: 105, Output: 12}) {
+		t.Errorf("with a base = %+v", ev)
+	}
+	// Without one, or with one that doesn't fit (the session was used
+	// elsewhere), only the main conversation's figure is known.
+	for name, p := range map[string]*claudeParser{
+		"unknown": {noBase: true},
+		"above":   {base: usage.Tokens{Input: 200, Output: 9}},
+		"too big": {base: usage.Tokens{Input: 102, Output: 9}}, // leaves less than result.usage
+	} {
+		if ev := run(p); ev.Tokens != (usage.Tokens{Input: 5, Output: 2}) || ev.TokenStatus != usage.Partial || ev.SessionTotal != (usage.Tokens{Input: 105, Output: 12}) {
+			t.Errorf("%s base = %+v", name, ev)
+		}
 	}
 }
 
@@ -164,14 +345,62 @@ func TestCodexParser(t *testing.T) {
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("events =\n%q\nwant\n%q", got, want)
 	}
-	if done.Err != nil || done.Cost != "12.3k tokens" {
+	// input_tokens already includes the cached ones, output_tokens the
+	// reasoning ones.
+	want0 := usage.Tokens{Input: 12000, Output: 340, CacheRead: 4000, HasCache: true}
+	if done.Err != nil || done.Cost != "" || done.Tokens != want0 || done.TokenStatus != usage.Exact {
 		t.Errorf("done = %+v", done)
 	}
 
 	p := &codexParser{}
 	p.line([]byte(`{"type":"turn.failed","error":{"message":"rate limited"}}`))
-	if ev := p.done(nil, ""); ev.Err == nil || ev.Err.Error() != "rate limited" {
-		t.Errorf("turn.failed = %v", ev.Err)
+	if ev := p.done(nil, ""); ev.Err == nil || ev.Err.Error() != "rate limited" || ev.TokenStatus != usage.Unknown {
+		t.Errorf("turn.failed = %v %v", ev.Err, ev.TokenStatus)
+	}
+}
+
+func TestCodexUsage(t *testing.T) {
+	for name, c := range map[string]struct {
+		lines  []string
+		exit   error
+		tokens usage.Tokens
+		status usage.Status
+		live   int // EvUsage events
+	}{
+		"several turns add up": {[]string{
+			`{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":10}}`,
+			`{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":150,"output_tokens":20,"reasoning_output_tokens":5}}`,
+		}, nil, usage.Tokens{Input: 300, Output: 30, CacheRead: 210, HasCache: true}, usage.Exact, 2},
+		"no cache field": {[]string{`{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":10}}`},
+			nil, usage.Tokens{Input: 100, Output: 10}, usage.Exact, 1},
+		"cache writes": {[]string{`{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":40,"cache_write_input_tokens":10,"output_tokens":5}}`},
+			nil, usage.Tokens{Input: 100, Output: 5, CacheRead: 40, CacheWrite: 10, HasCache: true}, usage.Exact, 1},
+		"failed with usage": {[]string{`{"type":"turn.failed","error":{"message":"boom"},"usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":2}}`},
+			nil, usage.Tokens{Input: 50, Output: 2, HasCache: true}, usage.Exact, 1},
+		"completed then error": {[]string{
+			`{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}`,
+			`{"type":"error","message":"stream closed"}`,
+		}, nil, usage.Tokens{Input: 100, Output: 10, HasCache: true}, usage.Exact, 1},
+		"stopped before a turn completed": {[]string{`{"type":"turn.started"}`}, errStopped, usage.Tokens{}, usage.Unknown, 0},
+		"null usage":                      {[]string{`{"type":"turn.completed","usage":null}`}, nil, usage.Tokens{}, usage.Unknown, 0},
+		"no usage":                        {[]string{`{"type":"turn.completed"}`}, nil, usage.Tokens{}, usage.Unknown, 0},
+		"strings":                         {[]string{`{"type":"turn.completed","usage":{"input_tokens":"100","output_tokens":10}}`}, nil, usage.Tokens{}, usage.Unknown, 0},
+		"negative":                        {[]string{`{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":-1,"output_tokens":10}}`}, nil, usage.Tokens{}, usage.Unknown, 0},
+		"more cached than input":          {[]string{`{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":60,"output_tokens":1}}`}, nil, usage.Tokens{}, usage.Unknown, 0},
+		"missing output":                  {[]string{`{"type":"turn.completed","usage":{"input_tokens":10}}`}, nil, usage.Tokens{}, usage.Unknown, 0},
+	} {
+		p := &codexParser{}
+		live := 0
+		for _, l := range c.lines {
+			for _, ev := range p.line([]byte(l)) {
+				if ev.Kind == EvUsage {
+					live++
+				}
+			}
+		}
+		if ev := p.done(c.exit, ""); ev.Tokens != c.tokens || ev.TokenStatus != c.status || live != c.live {
+			t.Errorf("%s: done = %+v %v after %d EvUsage, want %+v %v after %d", name, ev.Tokens, ev.TokenStatus, live, c.tokens, c.status, c.live)
+		}
 	}
 }
 
@@ -319,9 +548,14 @@ func TestClaudeKeepsItsProcess(t *testing.T) {
 	if done.Err != nil || done.Session != "s-123" {
 		t.Fatalf("first turn done = %+v", done)
 	}
-	// The next message goes to the same process.
+	if done.Tokens != turnTokens(1) || done.TokenStatus != usage.Exact {
+		t.Errorf("first turn tokens = %+v %v", done.Tokens, done.TokenStatus)
+	}
+	// The next message goes to the same process, and its usage is its own,
+	// not added to the first's.
 	req.Message, req.Context, req.Session = "and again", "", done.Session
-	if evs := turn(t, r, ctx, req); evs[len(evs)-1].Err != nil {
+	evs = turn(t, r, ctx, req)
+	if done := evs[len(evs)-1]; done.Err != nil || done.Tokens != turnTokens(2) || done.TokenStatus != usage.Exact {
 		t.Fatalf("second turn = %+v", evs)
 	}
 	rec := record(t)
@@ -335,12 +569,106 @@ func TestClaudeKeepsItsProcess(t *testing.T) {
 	// A newly approved command needs a process that allows it; it picks up
 	// the conversation.
 	req.Message, req.Allow = "go on", []string{ClaudeRule("Bash", "npm test")}
-	turn(t, r, ctx, req)
+	evs = turn(t, r, ctx, req)
+	done = evs[len(evs)-1]
+	if done.Tokens != turnTokens(1) || done.TokenStatus != usage.Exact {
+		t.Errorf("turn after --resume = %+v %v", done.Tokens, done.TokenStatus)
+	}
 	rec = record(t)
 	last := rec[strings.LastIndex(rec, "start "):]
 	last = last[:strings.IndexByte(last, '\n')]
 	if strings.Count(rec, "start ") != 2 || !strings.Contains(last, "--resume s-123") || !strings.HasSuffix(last, "Bash(npm test)") {
 		t.Errorf("approving should restart with --resume and the rule:\n%s", rec)
+	}
+
+	// After grove restarts, a new Runner knows the session's total only if
+	// it is passed in; otherwise just the main conversation's figure.
+	r.Stop(dir)
+	r2 := NewRunner()
+	defer r2.Stop(dir)
+	req.Message = "after a restart"
+	evs = turn(t, r2, ctx, req)
+	if done := evs[len(evs)-1]; done.Tokens != mainTokens(1) || done.TokenStatus != usage.Partial {
+		t.Errorf("resumed turn without a total = %+v %v", done.Tokens, done.TokenStatus)
+	}
+	r2.Stop(dir)
+	r3 := NewRunner()
+	defer r3.Stop(dir)
+	req.Message, req.SessionTotal = "with the total", evs[len(evs)-1].SessionTotal
+	evs = turn(t, r3, ctx, req)
+	if done := evs[len(evs)-1]; done.Tokens != turnTokens(1) || done.TokenStatus != usage.Exact {
+		t.Errorf("resumed turn with its total = %+v %v", done.Tokens, done.TokenStatus)
+	}
+}
+
+func TestHookArgs(t *testing.T) {
+	hook := []string{`C:\Program Files\grove\grove.exe`, "agent-hook", "--dir", "/s/grove/control", "--as", "/w/it's"}
+	args := claudeArgs(Request{Hook: hook, ReadOnly: true, Commands: true, Allow: []string{"Bash(ls)"}})
+	i := slices.Index(args, "--settings")
+	if i < 0 {
+		t.Fatalf("no --settings: %q", args)
+	}
+	var s struct {
+		Hooks struct {
+			PreToolUse []struct {
+				Matcher string
+				Hooks   []struct {
+					Type, Command string
+					Timeout       int
+				}
+			}
+		}
+	}
+	if err := json.Unmarshal([]byte(args[i+1]), &s); err != nil {
+		t.Fatalf("--settings isn't JSON: %v %s", err, args[i+1])
+	}
+	pre := s.Hooks.PreToolUse
+	if len(pre) != 1 || pre[0].Matcher != "Bash|PowerShell" || len(pre[0].Hooks) != 1 {
+		t.Fatalf("hook settings = %+v", s)
+	}
+	h := pre[0].Hooks[0]
+	want := `'C:\Program Files\grove\grove.exe' agent-hook --dir /s/grove/control --as '/w/it'\''s'`
+	if h.Type != "command" || h.Command != want || h.Timeout != 30 {
+		t.Errorf("hook = %+v, want command %s", h, want)
+	}
+	if j := strings.Join(args, " "); args[len(args)-1] != "Bash(ls)" || !strings.Contains(j, "--disallowedTools Edit") || !strings.Contains(j, " Bash PowerShell ") {
+		t.Errorf("the planner's modes should still apply with a hook: %s", j)
+	}
+	if slices.Contains(claudeArgs(Request{}), "--settings") {
+		t.Error("no hook should mean no --settings")
+	}
+}
+
+func TestEnvReachesAgents(t *testing.T) {
+	bin, dir := fakeAgent(t, "claude")
+	r := NewRunner()
+	defer r.Stop(dir)
+	ctx := context.Background()
+	req := Request{Kind: Claude, Bin: bin, Dir: dir, Message: "hi", Env: []string{"GROVE_TEST_ENV=one"}}
+	done := turn(t, r, ctx, req)
+	req.Session = done[len(done)-1].Session
+	turn(t, r, ctx, req)
+	if rec := record(t); strings.Count(rec, "start ") != 1 || !strings.Contains(rec, "env GROVE_TEST_ENV=one") {
+		t.Fatalf("Env should reach the kept process:\n%s", rec)
+	}
+	// Other values need a new process, which resumes the conversation.
+	req.Env = []string{"GROVE_TEST_ENV=two"}
+	turn(t, r, ctx, req)
+	rec := record(t)
+	if strings.Count(rec, "start ") != 2 || !strings.Contains(rec, "env GROVE_TEST_ENV=two") || !strings.Contains(rec[strings.LastIndex(rec, "start "):], "--resume s-123") {
+		t.Errorf("an Env change should restart with --resume:\n%s", rec)
+	}
+	// So does a new hook.
+	req.Hook = []string{"grove", "agent-hook"}
+	turn(t, r, ctx, req)
+	if rec := record(t); strings.Count(rec, "start ") != 3 || !strings.Contains(rec, "--settings") {
+		t.Errorf("a Hook change should restart:\n%s", rec)
+	}
+
+	bin, dir = fakeAgent(t, "codex")
+	turn(t, r, ctx, Request{Kind: Codex, Bin: bin, Dir: dir, Message: "hi", Env: []string{"GROVE_FAKE_RECORD=" + filepath.Join(dir, "env.txt")}})
+	if _, err := os.Stat(filepath.Join(dir, "env.txt")); err != nil {
+		t.Errorf("Env should reach codex: %v", err)
 	}
 }
 
@@ -365,12 +693,73 @@ func TestClaudeStopKeepsProcess(t *testing.T) {
 	if done.Kind != EvDone || !errors.Is(done.Err, errStopped) || done.Session != "s-123" {
 		t.Fatalf("stopped turn done = %+v", done)
 	}
+	// An interrupted turn still ends with a result and its usage.
+	if want := (usage.Tokens{Input: 3007, Output: 9, CacheRead: 3000, HasCache: true}); done.Tokens != want || done.TokenStatus != usage.Exact {
+		t.Errorf("stopped turn tokens = %+v %v, want %+v exact", done.Tokens, done.TokenStatus, want)
+	}
 	if !strings.Contains(record(t), "interrupt") {
 		t.Error("stopping should interrupt the turn, not kill the process")
 	}
 	evs = turn(t, r, context.Background(), Request{Kind: Claude, Bin: bin, Dir: dir, Message: "next", Session: "s-123"})
 	if evs[len(evs)-1].Err != nil || strings.Count(record(t), "start ") != 1 {
 		t.Errorf("the process should still be usable after a stop:\n%s", record(t))
+	}
+}
+
+func TestClaudeUsageCutShort(t *testing.T) {
+	bin, dir := fakeAgent(t, "claude")
+	r := NewRunner()
+	defer r.Stop(dir)
+	// The process dies mid-turn: only the live figures, a lower bound.
+	evs := turn(t, r, context.Background(), Request{Kind: Claude, Bin: bin, Dir: dir, Message: "die"})
+	done := evs[len(evs)-1]
+	if done.Err == nil || done.Tokens != diedTokens || done.TokenStatus != usage.Partial {
+		t.Errorf("killed turn = %+v, want %+v partial", done, diedTokens)
+	}
+	// A result without usage, and nothing live: unknown, not zero.
+	evs = turn(t, r, context.Background(), Request{Kind: Claude, Bin: bin, Dir: dir, Message: "quiet"})
+	done = evs[len(evs)-1]
+	if done.Err != nil || !done.Tokens.IsZero() || done.TokenStatus != usage.Unknown {
+		t.Errorf("turn without usage = %+v", done)
+	}
+	for _, ev := range evs {
+		if ev.Kind == EvUsage {
+			t.Errorf("no usage should mean no EvUsage: %+v", ev)
+		}
+	}
+}
+
+// A turn killed mid-way still adds to the session in Claude Code, so the
+// next turn mustn't subtract the total from before it: that would count the
+// killed turn again.
+func TestClaudeKilledTurnNotCountedTwice(t *testing.T) {
+	bin, dir := fakeAgent(t, "claude")
+	r := NewRunner()
+	defer r.Stop(dir)
+	ctx := context.Background()
+	evs := turn(t, r, ctx, Request{Kind: Claude, Bin: bin, Dir: dir, Message: "hello"})
+	first := evs[len(evs)-1]
+	if first.TokenStatus != usage.Exact || first.SessionTotal.IsZero() {
+		t.Fatalf("first turn = %+v", first)
+	}
+	req := Request{Kind: Claude, Bin: bin, Dir: dir, Session: "s-123", SessionTotal: first.SessionTotal, Message: "die"}
+	evs = turn(t, r, ctx, req)
+	if done := evs[len(evs)-1]; done.TokenStatus != usage.Partial || !done.SessionTotal.IsZero() {
+		t.Fatalf("killed turn = %+v", done)
+	}
+	// The resumed turn, even when the caller still passes the old total, is
+	// only the main conversation's figure: not the killed turn's as well.
+	req.Message = "go on"
+	evs = turn(t, r, ctx, req)
+	done := evs[len(evs)-1]
+	if done.Tokens != mainTokens(1) || done.TokenStatus != usage.Partial {
+		t.Errorf("turn after a killed one = %+v %v, want %+v partial", done.Tokens, done.TokenStatus, mainTokens(1))
+	}
+	// Its total is known again, so the turn after it is exact.
+	req.Message, req.SessionTotal = "and on", done.SessionTotal
+	evs = turn(t, r, ctx, req)
+	if done := evs[len(evs)-1]; done.Tokens != turnTokens(2) || done.TokenStatus != usage.Exact {
+		t.Errorf("next turn = %+v %v", done.Tokens, done.TokenStatus)
 	}
 }
 

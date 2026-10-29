@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"sort"
@@ -18,11 +19,15 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/azeem-yousaf/grove/internal/agenthook"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/gitguard"
 	"github.com/azeem-yousaf/grove/internal/group"
+	"github.com/azeem-yousaf/grove/internal/store"
 	"github.com/azeem-yousaf/grove/internal/ui"
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -83,20 +88,28 @@ func main() {
 
 func run() error {
 	version = buildVersion()
+	if len(os.Args) > 1 && os.Args[1] == "agent-hook" {
+		return agentHook(os.Args[2:])
+	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp-group" {
 		return mcpGroup(os.Args[2:])
 	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp-plan" {
 		return mcpPlan(os.Args[2:])
 	}
+	if len(os.Args) > 2 && os.Args[1] == "git-guard" {
+		// The guard's hook scripts run this; git reads the exit status.
+		os.Exit(gitguard.Hook(os.Args[2], os.Args[3:], os.Stdin, os.Stderr, os.Environ()))
+	}
 	var (
 		base       = flag.String("base", "", "branch to compare worktrees against (default: auto-detect)")
 		mode       = flag.String("mode", "", `"branch" (everything since the base) or "uncommitted"`)
 		plain      = flag.Bool("plain", false, "print a summary instead of opening the interface")
+		tokens     = flag.Bool("usage", false, "print the tokens grove's agents used, by plan, task and agent")
 		initConfig = flag.Bool("init-config", false, "write a starter config file and print its path")
 		showVer    = flag.Bool("version", false, "print the version")
 	)
-	flag.Usage = usage
+	flag.Usage = help
 	paths, err := parseArgs(os.Args[1:])
 	if err != nil {
 		return err
@@ -152,6 +165,9 @@ func run() error {
 		return err
 	}
 
+	if *tokens {
+		return printUsage(repo)
+	}
 	if *plain {
 		return printPlain(ctx, repo, cfg.Base, m, cfg.Conflicts.Enabled())
 	}
@@ -283,7 +299,95 @@ func lineRanges(rs []git.LineRange) string {
 	return "lines " + strings.Join(parts, ", ")
 }
 
-func usage() {
+// printUsage writes the usage ledger as a table, for comparing what plans,
+// tasks and agents cost.
+func printUsage(repo *git.Repo) error {
+	if repo.CommonDir == "" {
+		return errors.New("this repository has no git folder to keep usage in")
+	}
+	l, err := usage.Open(filepath.Join(store.Open(repo.CommonDir).Dir(), "usage"))
+	if err != nil {
+		return err
+	}
+	total := l.Total()
+	if total.Turns == 0 {
+		fmt.Println("No token usage recorded yet.")
+		return nil
+	}
+	row := func(indent int, name string, s usage.Sum) {
+		name = strings.Repeat("  ", indent) + name
+		if r := []rune(name); len(r) > 40 {
+			name = string(r[:39]) + "…"
+		}
+		line := fmt.Sprintf("%-40s %8s %8s %8s %8s %6d", name,
+			usage.Amount(s, s.Tokens.Input), usage.Cached(s), usage.Amount(s, s.Tokens.Output),
+			usage.Amount(s, s.Tokens.Total()), s.Turns)
+		if why := usage.Shortfall(s); why != "" {
+			line += "  " + why
+		}
+		fmt.Println(line)
+	}
+	fmt.Printf("%-40s %8s %8s %8s %8s %6s\n", "", "input", "cached", "output", "total", "turns")
+	row(0, "All agents", total)
+	if s := l.Planner(); s.Turns > 0 {
+		row(0, "Planner", s)
+	}
+
+	for _, p := range l.Plans() {
+		title := p.Title
+		if title == "" {
+			title = p.ID
+		}
+		if !p.Last.IsZero() {
+			title += "  " + p.Last.Local().Format("2006-01-02")
+		}
+		fmt.Println()
+		row(0, title, p.Sum)
+		if s := l.PlannerIn(p.ID); s.Turns > 0 {
+			row(1, "planner", s)
+		}
+		tasks := l.Tasks(p.ID)
+		for _, g := range l.Groups(p.ID) {
+			row(1, "group "+g.Group, g.Sum)
+			for _, t := range tasks {
+				if t.Group == g.Group {
+					row(2, t.Task, t.Sum)
+				}
+			}
+		}
+		for _, t := range tasks {
+			if t.Group == "" {
+				row(1, t.Task, t.Sum)
+			}
+		}
+	}
+
+	if s := l.Unassigned(); s.Turns > 0 {
+		fmt.Println()
+		row(0, "Not in a plan", s)
+	}
+
+	fmt.Println("\nTop agents")
+	for i, a := range l.Agents() {
+		if i == 10 {
+			break
+		}
+		name := a.Name()
+		if a.Planner {
+			name += " (planner)"
+		}
+		if a.Kind != "" {
+			name += " " + a.Kind
+		}
+		row(1, name, a.Sum)
+	}
+	if n := l.Skipped(); n > 0 {
+		fmt.Printf("\n%d unreadable line(s) in the ledger were skipped.\n", n)
+	}
+	return nil
+}
+
+func help() {
 	fmt.Fprint(os.Stderr, `grove: see every git worktree, what changed, and where they overlap
 
 Usage:
@@ -327,4 +431,20 @@ func mcpPlan(args []string) error {
 		return errors.New("mcp-plan needs --dir")
 	}
 	return control.Serve(os.Stdin, os.Stdout, *dir, version)
+}
+
+// agentHook checks an agent's shell command against grove's git policy:
+// `grove agent-hook --dir <control folder> --as <worktree>`, run by Claude
+// Code as a PreToolUse hook with the tool call on stdin.
+func agentHook(args []string) error {
+	fs := flag.NewFlagSet("agent-hook", flag.ContinueOnError)
+	dir := fs.String("dir", "", "grove's control folder")
+	as := fs.String("as", "", "the agent's worktree")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dir == "" || *as == "" {
+		return errors.New("agent-hook needs --dir and --as")
+	}
+	return agenthook.Hook{Dir: *dir, Worktree: *as}.Run(os.Stdin, os.Stdout)
 }
