@@ -48,6 +48,7 @@ type session struct {
 	allow      []string        // permission rules the user approved
 	pending    []pendingAction // approvals and suggested commands, oldest first
 	approved   []string        // commands approved in the current batch
+	notes      []string        // news from grove for the agent's next turn
 	cost       string
 	failed     bool
 	seen       bool // the user has looked since it last finished
@@ -579,6 +580,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 			req.Context = m.plannerContext()
 		}
 	}
+	req.Context, req.Message = s.takeNotes(req.Context, req.Message)
 	// The planner changes nothing, so there's nothing to undo.
 	path, planner, needCheckpoint := s.path, s.planner, s.checkpoint == "" && !s.planner
 	run := m.runAgent

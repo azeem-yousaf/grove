@@ -131,6 +131,7 @@ type Model struct {
 	groupChat     *groupChat             // the group chat pane
 	pollingGroups bool
 	lastGroupPoll time.Time
+	conflictsTold map[string][]string // files each task's agent was told conflict with another worktree (conflictnotify.go)
 	chatInput     textarea.Model
 	chatView      viewport.Model
 	chatFollow    bool // keep the chat scrolled to the newest line
