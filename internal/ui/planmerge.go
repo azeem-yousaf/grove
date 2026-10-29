@@ -307,6 +307,7 @@ func (m *Model) onPlanMerged(msg planMergedMsg) tea.Cmd {
 		committed = " grove committed the uncommitted work of " + strings.Join(msg.committedTasks, ", ") + " first."
 	}
 	post := ""
+	var publish tea.Cmd // pushing the plan's branch, after a clean merge
 	switch {
 	case msg.err != nil:
 		text := fmt.Sprintf("Couldn't merge %s: %v", p.Title, msg.err)
@@ -366,11 +367,13 @@ func (m *Model) onPlanMerged(msg planMergedMsg) tea.Cmd {
 			"work out how this repository is built and tested, and run that in the worktree, without changing files. "+reviewAsk)
 		post = text + " Try it there, then tell the planner here what to change."
 		cmds = append(cmds, m.waitForFeedback(p))
+		publish = m.publishPlan(p, "")
 	}
 	if post == "" {
-		return tea.Batch(append(cmds, m.orchestrate())...)
+		return tea.Batch(append(cmds, m.orchestrate(), publish)...)
 	}
-	return tea.Batch(append(cmds, m.grovePost(p, post, m.orchestrate()))...)
+	// The planner is asked first; publishing only adds grove's own news.
+	return tea.Batch(append(cmds, m.grovePost(p, post, m.orchestrate(), publish))...)
 }
 
 func (m *Model) onFixStarted(msg fixStartedMsg) tea.Cmd {
@@ -549,7 +552,7 @@ func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
 		m.queueMerge(p, msg.report+" grove ran `"+msg.command+"` in that worktree and it passed. "+
 			"Check anything else the change needs, if you must, without changing files. "+reviewAsk)
 		return tea.Batch(m.savePlan(p), m.waitForFeedback(p),
-			m.grovePost(p, "The tests passed. Try it there, then tell the planner here what to change.", m.orchestrate()))
+			m.grovePost(p, "The tests passed. Try it there, then tell the planner here what to change.", m.orchestrate(), m.publishPlan(p, "passed")))
 	}
 	p.Merge.Tests = plan.TestsFailed
 	var why string

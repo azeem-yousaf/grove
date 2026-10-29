@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
+	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/charmbracelet/x/ansi"
@@ -52,15 +54,19 @@ type orchItem struct {
 	branch string   // the task's, for approvals, questions, finished and failed tasks
 	group  string   // group ID, for group messages
 	lines  []string // the commands, the question, or the messages
+	ids    []string // the approvals', alongside lines
 	urgent bool     // starts a planner turn; other items wait for one
 }
 
 // orchestrator is the planner's state as the watcher of plans.
 type orchestrator struct {
-	queue  []orchItem
-	turns  int            // planner turns in a row without the user
-	paused bool           // stopped at the limit until the user says something
-	seen   map[string]int // group chat messages already passed on, by folder
+	queue   []orchItem
+	turns   int             // planner turns in a row without the user
+	paused  bool            // stopped at the limit until the user says something
+	seen    map[string]int  // group chat messages already passed on, by folder
+	asked   []string        // approvals in the planner's current turn, by ID
+	reports []string        // its decisions that didn't apply, for its next request
+	orders  map[string]bool // control orders already carried out, by ID
 }
 
 // askWatcher runs then once it is known who watches the next plan: from the
@@ -203,16 +209,18 @@ func (m *Model) queueTurn(s *session) {
 	if t == nil || !watched(p) {
 		return
 	}
-	var cmds []string
+	var cmds, ids []string
 	for _, a := range s.pending {
-		if a.kind == pendingApproval {
-			cmds = append(cmds, a.text)
+		if m.awaitsPlanner(s, a) {
+			cmds, ids = append(cmds, a.text), append(ids, a.id)
 		}
 	}
 	reply := strings.TrimSpace(s.lastReply.String())
 	switch {
 	case len(cmds) > 0:
-		m.orch.queue = append(m.orch.queue, orchItem{kind: orchApproval, plan: p.ID, branch: t.Branch, lines: cmds, urgent: true})
+		m.orch.queue = append(m.orch.queue, orchItem{kind: orchApproval, plan: p.ID, branch: t.Branch, lines: cmds, ids: ids, urgent: true})
+	case slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval }):
+		// Only the user can answer what it waits on.
 	case t.Status == plan.Working && !s.failed && endsWithQuestion(reply):
 		if r := []rune(reply); len(r) > 2000 {
 			reply = "…" + string(r[len(r)-2000:])
@@ -295,9 +303,15 @@ func (m *Model) liveItems(items []orchItem) []orchItem {
 				continue
 			}
 			if it.kind == orchApproval {
-				it.lines = slices.DeleteFunc(slices.Clone(it.lines), func(c string) bool {
-					return !slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval && a.text == c })
-				})
+				if slices.ContainsFunc(out, func(o orchItem) bool { return o.kind == orchApproval && o.branch == it.branch }) {
+					continue // one item lists them all
+				}
+				it.lines, it.ids = nil, nil
+				for _, a := range s.pending {
+					if m.awaitsPlanner(s, a) {
+						it.lines, it.ids = append(it.lines, a.text), append(it.ids, a.id)
+					}
+				}
 				if len(it.lines) == 0 {
 					continue
 				}
@@ -343,9 +357,12 @@ func (m *Model) orchestrate() tea.Cmd {
 	}
 	o.turns++
 	text, summary := m.orchPrompt(o.queue)
+	for _, it := range o.queue {
+		o.asked = append(o.asked, it.ids...)
+	}
 	s := m.planner
-	s.nextPlan = planIDs(o.queue)[0]
-	o.queue = nil
+	s.nextPlan = planIDs(o.queue)[0] // before the queue is cleared
+	o.queue, o.reports = nil, nil
 	cmd := m.send(s, text)
 	// The chat shows a line about it, not the whole request.
 	s.entries[len(s.entries)-1] = chatEntry{roleNote, summary}
@@ -369,8 +386,8 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 			case orchApproval:
 				_, t, _ := m.watchedTask(it.branch)
 				fmt.Fprintf(&b, "\n%s (task %q) wants to run commands it isn't allowed to:\n", it.branch, t.Title)
-				for _, c := range it.lines {
-					fmt.Fprintf(&b, "- `%s`\n", c)
+				for i, c := range it.lines {
+					fmt.Fprintf(&b, "- id %s: `%s`\n", it.ids[i], c)
 				}
 				what = append(what, fmt.Sprintf("%s wants to run %s", it.branch, plural(len(it.lines), "command")))
 			case orchQuestion:
@@ -410,10 +427,17 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 			}
 		}
 	}
-	b.WriteString("\nAnswer with one fenced code block whose language is grove-orchestrate, containing JSON; leave out the lists you don't need:\n\n")
+	if len(m.orch.reports) > 0 {
+		b.WriteString("\nSome of your earlier decisions didn't apply:\n")
+		for _, r := range m.orch.reports {
+			b.WriteString("- " + r + "\n")
+		}
+	}
+	b.WriteString("\nAnswer with one fenced code block whose language is grove-orchestrate, containing JSON; leave out the lists you don't need. " +
+		"Name commands by their id:\n\n")
 	b.WriteString("```grove-orchestrate\n" + `{
-  "approve": [{"branch": "feature/api", "command": "npm test"}],
-  "deny": [{"branch": "feature/api", "command": "git push --force", "reason": "what the agent should do instead"}],
+  "approve": [{"branch": "feature/api", "id": "3fa2c1-1"}],
+  "deny": [{"branch": "feature/api", "id": "3fa2c1-2", "reason": "what the agent should do instead"}],
   "reply": [{"branch": "feature/ui", "message": "your answer to its question"}],
   "post": [{"plan": "plan id", "group": "checkout", "to": "", "message": "to everyone, or set to a member's branch"}],
   "mark": [{"branch": "feature/docs", "status": "failed", "note": "why, for the user"}],
@@ -427,6 +451,8 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 	}
 	b.WriteString("Approve a command only when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for. " +
 		"Deny anything destructive, anything that reaches outside the worktree, and pushing or publishing. When unsure, leave it out so the user decides. " +
+		"Commands grove's policy keeps for the user (protected branches, anything destructive) aren't listed and can't be approved by you. " +
+		"grove reports every decision that doesn't apply. " +
 		"Reply to a question only when the plan and the code answer it; leave questions about what the user wants for the user. " +
 		"Post in a group chat only to settle something the agents are stuck on or disagree about. " +
 		"Answer the user in the plan chat (group \"plan\"), not in your reply: they read the plan chat. Keep messages short.\n")
@@ -452,18 +478,59 @@ var orchBlock = regexp.MustCompile("(?s)```grove-orchestrate[ \\t]*\\r?\\n(.*?)`
 // decisions is the planner's grove-orchestrate block, or the orders its
 // control tools queued.
 type decisions struct {
-	Approve []struct{ Branch, Command string }
-	Deny    []struct{ Branch, Command, Reason string }
-	Reply   []struct{ Branch, Message string }
-	Post    []struct{ Plan, Group, To, Message string }
-	Mark    []struct{ Branch, Status, Note string }
-	Merge   []struct{ Plan string }
-	Close   []struct{ Plan, Note string }
+	Approve []answerDecision
+	Deny    []answerDecision
+	Reply   []replyDecision
+	Post    []postDecision
+	Mark    []markDecision
+	Merge   []planDecision
+	Close   []planDecision
+}
+
+// Each decision may come from a control order, whose outcome grove records
+// under the order's ID.
+type (
+	answerDecision struct {
+		ID, Branch, Command, Reason string
+		order                       string
+	}
+	replyDecision struct {
+		Branch, Message string
+		order           string
+	}
+	postDecision struct {
+		Plan, Group, To, Message string
+		order                    string
+	}
+	markDecision struct {
+		Branch, Status, Note string
+		order                string
+	}
+	planDecision struct {
+		Plan, Note string
+		order      string
+	}
+)
+
+// outcome is what came of one decision.
+type outcome struct {
+	order  string // the control order's ID, "" for a block's decision
+	what   string // the decision, for the planner
+	result string // control.Applied and so on
+	detail string
+}
+
+func (o outcome) String() string {
+	s := o.what + ": " + o.result
+	if o.detail != "" {
+		s += " (" + o.detail + ")"
+	}
+	return s
 }
 
 // applyDecisions carries out the last grove-orchestrate block in a planner
-// reply. Only tasks of watched plans are touched; anything else it names is
-// ignored.
+// reply. Only tasks of watched plans are touched; what didn't apply is
+// noted in the planner's chat and told in its next request.
 func (m *Model) applyDecisions(reply string) tea.Cmd {
 	found := orchBlock.FindAllStringSubmatch(reply, -1)
 	if len(found) == 0 {
@@ -472,64 +539,93 @@ func (m *Model) applyDecisions(reply string) tea.Cmd {
 	var d decisions
 	if err := json.Unmarshal([]byte(found[len(found)-1][1]), &d); err != nil {
 		m.plannerNote(roleError, "Couldn't read the planner's decisions: "+err.Error())
+		m.orch.reports = append(m.orch.reports, "your last grove-orchestrate block wasn't valid JSON, so none of it applied: "+err.Error())
 		return nil
 	}
-	return m.decide(d)
+	cmd, outs := m.decide(d)
+	for _, o := range outs {
+		switch o.result {
+		case control.Applied:
+		case control.AlreadyApplied:
+			m.plannerNote(roleNote, "Already done: "+o.String())
+		default:
+			m.plannerNote(roleNote, "Not applied: "+o.String())
+			m.orch.reports = append(m.orch.reports, o.String())
+		}
+	}
+	return cmd
 }
 
-// decide carries out the planner's decisions on watched plans' tasks.
-func (m *Model) decide(d decisions) tea.Cmd {
-	var answered []*session
-	denied := map[*session][]string{}
-	for _, a := range d.Approve {
-		s, i := m.pendingFor(a.Branch, a.Command)
-		if s == nil {
-			continue
+// decide carries out the planner's decisions on watched plans' tasks and
+// says what came of each.
+func (m *Model) decide(d decisions) (tea.Cmd, []outcome) {
+	var cmds []tea.Cmd
+	var outs []outcome
+	type applied struct {
+		out  int
+		s    *session
+		busy bool // in a turn already
+	}
+	var answered []applied
+	answer := func(a answerDecision, approve bool) {
+		verb := "deny"
+		if approve {
+			verb = "approve"
 		}
-		p := s.pending[i]
-		s.pending = slices.Delete(s.pending, i, i+1)
-		s.allow = append(s.allow, agent.ClaudeRule(p.tool, p.text))
-		s.approved = append(s.approved, p.text)
-		s.entries = append(s.entries, chatEntry{roleNote, "Allowed by the planner: " + p.text})
-		answered = append(answered, s)
+		name := a.ID
+		if name == "" {
+			name = "`" + a.Command + "`"
+		}
+		o := outcome{order: a.order, what: fmt.Sprintf("%s %s for %s", verb, name, a.Branch), result: control.Applied}
+		s, i, rec := m.findApproval(a.Branch, a.ID, a.Command)
+		switch {
+		case s == nil:
+			o.result, o.detail = control.NotFound, "nothing a watched task waits on has that id or command; check tasks"
+		case rec != nil && rec.Approve == approve:
+			o.result, o.detail = control.AlreadyApplied, "it was already "+map[bool]string{true: "approved", false: "denied"}[approve]+" by the "+rec.By
+		case rec != nil:
+			o.result, o.detail = control.Failed, "it was already "+map[bool]string{true: "approved", false: "denied"}[rec.Approve]+" by the "+rec.By
+		case approve && s.pending[i].policy.userOnly:
+			p := s.pending[i]
+			o.result, o.detail = control.NeedsUser, p.policy.reason
+			if o.detail == "" {
+				o.detail = "only the user may approve it"
+			}
+			cmds = append(cmds, m.refuse(s, p))
+		default:
+			cmds = append(cmds, m.answer(s, i, approve, byPlanner, a.Reason))
+			answered = append(answered, applied{len(outs), s, s.running})
+		}
+		outs = append(outs, o)
+	}
+	for _, a := range d.Approve {
+		answer(a, true)
 	}
 	for _, a := range d.Deny {
-		s, i := m.pendingFor(a.Branch, a.Command)
-		if s == nil {
-			continue
-		}
-		p := s.pending[i]
-		s.pending = slices.Delete(s.pending, i, i+1)
-		why := strings.TrimSpace(a.Reason)
-		note := "Denied by the planner: " + p.text
-		item := "`" + p.text + "`"
-		if why != "" {
-			note += " (" + why + ")"
-			item += " (" + why + ")"
-		}
-		s.entries = append(s.entries, chatEntry{roleNote, note})
-		denied[s] = append(denied[s], item)
-		answered = append(answered, s)
+		answer(a, false)
 	}
-	var cmds []tea.Cmd
-	resumed := map[*session]bool{}
-	for _, s := range answered {
-		if resumed[s] || slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval }) {
-			continue // the user answers the rest first
+	for _, s := range uniqueSessions(answered, func(a applied) *session { return a.s }) {
+		cmds = append(cmds, m.resume(s))
+	}
+	for _, a := range answered {
+		switch s := a.s; {
+		case a.busy:
+			outs[a.out].detail = "the agent gets it when its turn ends"
+		case s.running:
+			outs[a.out].detail = "the agent was resumed with it"
+		default:
+			outs[a.out].detail = "the agent carries on once you answer the rest of what it waits on"
 		}
-		resumed[s] = true
-		var parts []string
-		if len(s.approved) > 0 {
-			parts = append(parts, "Approved: `"+strings.Join(s.approved, "`, `")+"`. Run it now.")
-			s.approved = nil
-		}
-		if len(denied[s]) > 0 {
-			parts = append(parts, "Denied: "+strings.Join(denied[s], ", ")+". Do without it or find another way.")
-		}
-		cmds = append(cmds, m.tell(s, strings.Join(parts, " ")+" Then carry on with your task."))
 	}
 	for _, r := range d.Reply {
-		if p, t, s := m.watchedTask(r.Branch); s != nil && strings.TrimSpace(r.Message) != "" {
+		o := outcome{order: r.order, what: "reply to " + r.Branch, result: control.Applied, detail: "it reaches the agent as soon as it isn't working; you'll hear when its turn ends"}
+		p, t, s := m.watchedTask(r.Branch)
+		switch {
+		case s == nil:
+			o.result, o.detail = control.NotFound, "no watched task has that branch, or it hasn't started"
+		case strings.TrimSpace(r.Message) == "":
+			o.result, o.detail = control.Failed, "the message is empty"
+		default:
 			// More to do: a finished or failed task works again.
 			if t.Status != plan.Working {
 				t.Status, t.Error, p.Status = plan.Working, "", plan.Running
@@ -537,41 +633,69 @@ func (m *Model) decide(d decisions) tea.Cmd {
 			}
 			cmds = append(cmds, m.tell(s, "From the planner, who is watching this plan for the user: "+strings.TrimSpace(r.Message)))
 		}
+		outs = append(outs, o)
 	}
 	for _, mk := range d.Mark {
+		o := outcome{order: mk.order, what: "mark " + mk.Branch + " " + mk.Status, result: control.Applied}
 		p, t, _ := m.watchedTask(mk.Branch)
-		if t == nil {
-			continue
-		}
-		switch mk.Status {
-		case "finished":
-			t.Status, t.Error = plan.Finished, ""
-		case "failed":
-			t.Status, t.Error = plan.Failed, strings.TrimSpace(mk.Note)
+		switch {
+		case t == nil:
+			o.result, o.detail = control.NotFound, "no watched task has that branch"
+		case mk.Status != "finished" && mk.Status != "failed":
+			o.result, o.detail = control.Failed, `status must be "finished" or "failed"`
 		default:
-			continue
+			t.Status, t.Error = plan.Finished, ""
+			if mk.Status == "failed" {
+				t.Status, t.Error = plan.Failed, strings.TrimSpace(mk.Note)
+			}
+			text := "The planner marked " + t.Title + " " + mk.Status
+			if n := strings.TrimSpace(mk.Note); n != "" {
+				text += ": " + n
+			}
+			m.plannerNote(roleNote, text+".")
+			cmds = append(cmds, m.finishIfSettled(p), m.savePlan(p), m.schedule())
 		}
-		text := "The planner marked " + t.Title + " " + mk.Status
-		if n := strings.TrimSpace(mk.Note); n != "" {
-			text += ": " + n
-		}
-		m.plannerNote(roleNote, text+".")
-		cmds = append(cmds, m.finishIfSettled(p), m.savePlan(p), m.schedule())
+		outs = append(outs, o)
 	}
 	for _, p := range d.Post {
-		cmds = append(cmds, m.plannerPost(p.Plan, p.Group, p.To, p.Message))
+		o := outcome{order: p.order, what: "post in " + cmp.Or(p.Group, plan.ChatID), result: control.Applied}
+		if cmd := m.plannerPost(p.Plan, p.Group, p.To, p.Message); cmd != nil {
+			cmds = append(cmds, cmd)
+		} else {
+			o.result, o.detail = control.NotFound, "no watched plan has that chat, or the message is empty"
+		}
+		outs = append(outs, o)
 	}
 	for _, mg := range d.Merge {
+		o := outcome{order: mg.order, what: "merge " + mg.Plan, result: control.Applied, detail: "merging; you'll hear how it went"}
 		if p := m.findPlan(mg.Plan); watched(p) {
 			cmds = append(cmds, m.mergePlan(p))
+		} else {
+			o.result, o.detail = control.NotFound, "no watched plan has that ID or title"
 		}
+		outs = append(outs, o)
 	}
 	for _, c := range d.Close {
+		o := outcome{order: c.order, what: "close " + c.Plan, result: control.Applied}
 		if p := m.findPlan(c.Plan); watched(p) {
 			cmds = append(cmds, m.closePlan(p, c.Note))
+		} else {
+			o.result, o.detail = control.NotFound, "no watched plan has that ID or title"
+		}
+		outs = append(outs, o)
+	}
+	return tea.Batch(cmds...), outs
+}
+
+// uniqueSessions is each session once, in order.
+func uniqueSessions[T any](items []T, of func(T) *session) []*session {
+	var out []*session
+	for _, it := range items {
+		if s := of(it); !slices.Contains(out, s) {
+			out = append(out, s)
 		}
 	}
-	return tea.Batch(cmds...)
+	return out
 }
 
 // tell sends a task's agent a message from grove or the planner: now if
@@ -582,21 +706,6 @@ func (m *Model) tell(s *session, text string) tea.Cmd {
 		return nil
 	}
 	return m.send(s, text)
-}
-
-// pendingFor finds a watched task's refused command waiting for an answer.
-func (m *Model) pendingFor(branch, command string) (*session, int) {
-	_, _, s := m.watchedTask(branch)
-	if s == nil {
-		return nil, -1
-	}
-	command = strings.TrimSpace(command)
-	for i, a := range s.pending {
-		if a.kind == pendingApproval && strings.TrimSpace(a.text) == command {
-			return s, i
-		}
-	}
-	return nil, -1
 }
 
 // plannerPost posts the planner's message in a watched plan's chat. Every

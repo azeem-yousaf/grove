@@ -19,9 +19,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/azeem-yousaf/grove/internal/agenthook"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/gitguard"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/store"
 	"github.com/azeem-yousaf/grove/internal/ui"
@@ -86,11 +88,18 @@ func main() {
 
 func run() error {
 	version = buildVersion()
+	if len(os.Args) > 1 && os.Args[1] == "agent-hook" {
+		return agentHook(os.Args[2:])
+	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp-group" {
 		return mcpGroup(os.Args[2:])
 	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp-plan" {
 		return mcpPlan(os.Args[2:])
+	}
+	if len(os.Args) > 2 && os.Args[1] == "git-guard" {
+		// The guard's hook scripts run this; git reads the exit status.
+		os.Exit(gitguard.Hook(os.Args[2], os.Args[3:], os.Stdin, os.Stderr, os.Environ()))
 	}
 	var (
 		base       = flag.String("base", "", "branch to compare worktrees against (default: auto-detect)")
@@ -422,4 +431,20 @@ func mcpPlan(args []string) error {
 		return errors.New("mcp-plan needs --dir")
 	}
 	return control.Serve(os.Stdin, os.Stdout, *dir, version)
+}
+
+// agentHook checks an agent's shell command against grove's git policy:
+// `grove agent-hook --dir <control folder> --as <worktree>`, run by Claude
+// Code as a PreToolUse hook with the tool call on stdin.
+func agentHook(args []string) error {
+	fs := flag.NewFlagSet("agent-hook", flag.ContinueOnError)
+	dir := fs.String("dir", "", "grove's control folder")
+	as := fs.String("as", "", "the agent's worktree")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dir == "" || *as == "" {
+		return errors.New("agent-hook needs --dir and --as")
+	}
+	return agenthook.Hook{Dir: *dir, Worktree: *as}.Run(os.Stdin, os.Stdout)
 }

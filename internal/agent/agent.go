@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -105,6 +106,15 @@ type Request struct {
 	// the planner while it runs a plan the user started. Claude still can't
 	// edit files with its own tools; Codex gets the workspace-write sandbox.
 	Commands bool
+	// Env is added to the agent process's environment, such as the git
+	// guard's settings. A kept Claude process started with other values is
+	// replaced (resuming its conversation).
+	Env []string
+	// Hook is the command line (`grove agent-hook ...`) Claude Code runs
+	// before each shell command, which allows it, asks for it or leaves it
+	// to the normal permissions. Codex has no hooks.
+	Hook []string
+
 	// Tools are MCP servers the agent's CLI starts for it, such as a
 	// grouped task's group chat.
 	Tools []ToolServer
@@ -281,7 +291,7 @@ func (r *Runner) Run(ctx context.Context, req Request, emit func(Event)) {
 		emit(ev)
 	case Codex:
 		args, input := codexArgs(req)
-		runOnce(ctx, bin, req.Dir, args, input, &codexParser{}, emit)
+		runOnce(ctx, bin, req.Dir, req.Env, args, input, &codexParser{}, emit)
 	default:
 		emit(Event{Kind: EvDone, Err: fmt.Errorf("unknown agent %q", req.Kind)})
 	}
@@ -381,9 +391,10 @@ func (r *Runner) idleLater(dir string, p *claudeProc) {
 }
 
 // runOnce runs an agent process for a single turn.
-func runOnce(ctx context.Context, bin, dir string, args []string, input string, p parser, emit func(Event)) {
+func runOnce(ctx context.Context, bin, dir string, env, args []string, input string, p parser, emit func(Event)) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = dir
+	cmd.Env = environ(env)
 	cmd.Stdin = strings.NewReader(input) // closed at EOF, so the agent doesn't wait for more
 	var stderr tailBuffer
 	cmd.Stderr = &stderr
@@ -413,6 +424,16 @@ func runOnce(ctx context.Context, bin, dir string, args []string, input string, 
 		err = errStopped
 	}
 	emit(p.done(err, stderr.String()))
+}
+
+// environ is grove's environment with extra appended, or nil (inherit it)
+// when there is nothing extra. exec keeps the last value of a repeated
+// name, so extra wins.
+func environ(extra []string) []string {
+	if len(extra) == 0 {
+		return nil
+	}
+	return append(os.Environ(), extra...)
 }
 
 // tailBuffer keeps the last few KB written to it, for error messages.

@@ -51,7 +51,11 @@ type session struct {
 	touched    map[string]bool // repo-relative files the agent changed
 	allow      []string        // permission rules the user approved
 	pending    []pendingAction // approvals and suggested commands, oldest first
+	seq        int             // approvals so far, for their IDs
 	approved   []string        // commands approved in the current batch
+	denied     []string        // commands the planner denied in the current batch, with why
+	byPlanner  bool            // the planner answered some of the current batch
+	answered   []answerRec     // recent answers, so a repeated one changes nothing
 	notes      []string        // news from grove for the agent's next turn
 	cost       string
 	failed     bool
@@ -120,9 +124,12 @@ const (
 )
 
 type pendingAction struct {
-	kind pendingKind
-	text string
-	tool string // the shell tool an approval is for: "Bash" or "PowerShell"
+	kind   pendingKind
+	id     string // an approval's, unique and stable: answers name it
+	text   string
+	tool   string         // the shell tool an approval is for: "Bash" or "PowerShell"
+	policy approvalPolicy // for approvals: whether only the user may answer, and why
+	left   bool           // the planner was asked and left it for the user
 }
 
 type (
@@ -136,6 +143,8 @@ type (
 		turnTree   string // taken before a later turn, for "since the last turn"
 		err        error
 		closed     bool
+		guard      *guardVerifiedMsg // the guard checked before the first turn
+		ack        chan struct{}     // closed once guard is applied
 	}
 	agentSavedMsg struct{ err error }
 	undoReadyMsg  struct {
@@ -537,20 +546,17 @@ func (m *Model) onPendingKey(s *session, key string) tea.Cmd {
 	m.userActed()
 	next := func() tea.Cmd {
 		s.pending = s.pending[1:]
-		return m.afterPending(s)
+		return m.resume(s)
 	}
 	switch key {
 	case "esc", "n":
 		if a.kind == pendingApproval {
-			s.entries = append(s.entries, chatEntry{roleNote, "Denied: " + a.text})
+			return tea.Batch(m.answer(s, 0, false, byUser, ""), m.resume(s))
 		}
 		return next()
 	case "enter", "y":
 		if a.kind == pendingApproval {
-			s.allow = append(s.allow, agent.ClaudeRule(a.tool, a.text))
-			s.approved = append(s.approved, a.text)
-			s.entries = append(s.entries, chatEntry{roleNote, "Allowed: " + a.text})
-			return next()
+			return tea.Batch(m.answer(s, 0, true, byUser, ""), m.resume(s))
 		}
 		cmd := m.runSuggested(s, a.text)
 		return tea.Batch(next(), cmd)
@@ -562,21 +568,6 @@ func (m *Model) onPendingKey(s *session, key string) tea.Cmd {
 		}
 	}
 	return nil
-}
-
-// afterPending continues the agent once every approval has an answer.
-func (m *Model) afterPending(s *session) tea.Cmd {
-	for _, p := range s.pending {
-		if p.kind == pendingApproval {
-			return nil
-		}
-	}
-	if len(s.approved) == 0 {
-		return nil
-	}
-	cmds := "`" + strings.Join(s.approved, "`, `") + "`"
-	s.approved = nil
-	return m.send(s, "I approved "+cmds+". Run it now and carry on.")
 }
 
 func (m *Model) runSuggested(s *session, command string) tea.Cmd {
@@ -622,6 +613,10 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	s.cancel = cancel
 	ch := make(chan agentMsg, 64)
 	s.events = ch
+	// The guard is checked in a worktree before its agent first runs git;
+	// until then its scope says unguarded, so git writes ask the user.
+	checkGuard := m.verifyGuard(s.path)
+	policyErr := m.writePolicy()
 	req := m.agentRequest(s)
 	req.Message = text
 	// Claude keeps the conversation itself, so it needs the instructions
@@ -638,6 +633,17 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	run := m.runAgent
 	go func() {
 		defer close(ch)
+		if checkGuard != nil {
+			if g, ok := checkGuard().(guardVerifiedMsg); ok {
+				ack := make(chan struct{})
+				ch <- agentMsg{path: path, planner: planner, guard: &g, ack: ack}
+				select {
+				case <-ack:
+				case <-time.After(10 * time.Second):
+				case <-ctx.Done():
+				}
+			}
+		}
 		switch {
 		case needCheckpoint:
 			tree, err := git.Checkpoint(ctx, path)
@@ -656,12 +662,16 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 		}
 		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, ev: ev} })
 	}()
-	return tea.Batch(listen(ch), m.startAnimating(), registered)
+	return tea.Batch(listen(ch), m.startAnimating(), registered, policyErr)
 }
 
-// agentRequest describes s's next turn, without the message.
+// agentRequest describes s's next turn, without the message. Every agent
+// runs git under the guard, and Claude checks shell commands with grove's
+// policy first.
 func (m *Model) agentRequest(s *session) agent.Request {
 	return agent.Request{
+		Env:      m.guardEnv(),
+		Hook:     m.agentHook(s),
 		Kind:     s.kind,
 		Dir:      s.path,
 		Session:  s.id,
@@ -712,6 +722,11 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 		return nil
 	}
 	next := listen(s.events)
+	if msg.guard != nil {
+		cmd := m.onGuardVerified(*msg.guard)
+		close(msg.ack)
+		return tea.Batch(next, cmd)
+	}
 	if msg.turnTree != "" {
 		s.turnTree = msg.turnTree
 		return next
@@ -767,10 +782,15 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	reply := s.lastReply.String()
 	s.history = append(s.history, agent.Turn{User: s.lastUser, Agent: reply})
 
+	var needsYou []pendingAction // only the user may answer these
 	for _, d := range ev.Denied {
 		if d.Tool == "Bash" || d.Tool == "PowerShell" {
 			if d.Detail != "" {
-				s.pending = append(s.pending, pendingAction{kind: pendingApproval, text: d.Detail, tool: d.Tool})
+				a := m.newApproval(s, d.Tool, d.Detail)
+				s.pending = append(s.pending, a)
+				if a.policy.userOnly {
+					needsYou = append(needsYou, a)
+				}
 			}
 			continue
 		}
@@ -786,24 +806,37 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 		}
 		s.entries = append(s.entries, chatEntry{roleNote, fmt.Sprintf("Blocked %s %s: %s", d.Tool, what, why)})
 	}
-	for _, c := range suggestedCommands(reply) {
-		s.pending = append(s.pending, pendingAction{kind: pendingCommand, text: c})
-	}
+	// grove runs the routine git lines itself; the rest wait for the user.
+	gitCmd := m.suggestedLines(s, suggestedCommands(reply))
 
 	viewing := m.focus == focusChat && m.chatSession() == s
 	s.seen = viewing
-	cmds := []tea.Cmd{m.startScan(), recordErr}
-	if s.planner {
-		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(reply), m.orchestrate())
-	} else {
-		cmds = append(cmds, m.onTaskTurn(s, ev))
+	cmds := []tea.Cmd{m.startScan(), recordErr, gitCmd, m.checkWatches(s)}
+	switch {
+	case s.planner:
+		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(reply), m.leaveUndecided(), m.orchestrate())
+	default:
+		// Answers given while it worked go to it now, which carries on its
+		// turn rather than ending it.
+		if resume := m.resume(s); resume != nil {
+			cmds = append(cmds, resume)
+		} else {
+			cmds = append(cmds, m.onTaskTurn(s, ev))
+		}
 	}
 	text, kind := s.name+": "+s.kind.Label()+" finished", toastOK
 	switch {
 	case ev.Err != nil:
 		text, kind = s.name+": "+ev.Err.Error(), toastErr
+	case len(needsYou) > 0:
+		text, kind = s.name+" needs you: "+needsYou[0].policy.reason, toastInfo
+		if needsYou[0].policy.reason == "" {
+			text = s.name + " needs you"
+		}
 	case len(s.pending) > 0:
 		text, kind = s.name+" needs you", toastInfo
+	case s.running:
+		return tea.Batch(cmds...) // resumed with its answers: it isn't finished
 	}
 	if !viewing {
 		cmds = append(cmds, m.notify("✦ "+text, kind))
@@ -883,7 +916,7 @@ func (m *Model) agentContext(s *session) string {
 	if len(mates) > 0 {
 		b.WriteString("\n- You may read, but never change, your groupmates' worktrees, to match their APIs, types and names: " + strings.Join(mates, "; ") + ".")
 	}
-	b.WriteString("\n- Don't run git commands that change the repository (commit, checkout, switch, merge, rebase, reset, restore, stash, push, pull, branch). When one is needed, put it in a fenced code block whose language is grove-run, one command per line, and the user will run it from grove:\n\n```grove-run\ngit commit -m \"Describe the change\"\n```\n")
+	b.WriteString("\n" + m.gitRules(s))
 	b.WriteString("- Some shell commands need the user's approval. If one is refused, say what you wanted to run and why, then stop.\n")
 	b.WriteString("- Replies appear in a narrow terminal panel: keep them short and plain.\n")
 
@@ -1081,6 +1114,9 @@ func (m *Model) chatPane(w, h int) string {
 	if s.cost != "" && !s.running {
 		info = append(info, st.faint.Render(s.cost))
 	}
+	if g := m.guardBadge(s.path, false); g != "" && ansi.StringWidth(strings.Join(info, " · "))+ansi.StringWidth(g)+3 < inner/2 {
+		info = append(info, g)
+	}
 
 	bottom := m.chatBottom(s, inner)
 	if s.running {
@@ -1132,8 +1168,18 @@ func (m *Model) chatBottom(s *session, width int) []string {
 	if len(s.pending) > 0 {
 		a := s.pending[0]
 		head, keys := st.warn.Bold(true).Render(" "+s.kind.Label()+" wants to run"), [][2]string{{"enter", "allow"}, {"esc", "deny"}}
-		if a.kind == pendingApproval && m.watchedBy(s.path) && !m.orch.paused {
+		switch {
+		case a.kind != pendingApproval:
+		case a.policy.userOnly:
+			why := "needs you"
+			if a.policy.reason != "" {
+				why += ": " + a.policy.reason
+			}
+			head += st.warn.Render("  · " + why)
+		case m.watchedBy(s.path) && !a.left && !m.orch.paused:
 			head += st.faint.Render("  · the planner will decide unless you do")
+		case a.left:
+			head += st.faint.Render("  · the planner left it for you")
 		}
 		if a.kind == pendingCommand {
 			head, keys = st.accent.Bold(true).Render(" Suggested command"), [][2]string{{"enter", "run"}, {"e", "edit"}, {"esc", "skip"}}
@@ -1144,7 +1190,7 @@ func (m *Model) chatBottom(s *session, width int) []string {
 		}
 		return []string{
 			rule,
-			head + more,
+			ansi.Truncate(head+more, width, "…"),
 			" " + st.text.Bold(true).Render(ansi.Truncate(a.text, width-2, "…")),
 			" " + m.hints(keys),
 		}

@@ -132,6 +132,7 @@ func (m *Model) plannerContext() string {
 	b.WriteString("- Ask clarifying questions instead of guessing when the requirements are unclear or leave real choices open. Don't propose a plan until you understand what is wanted.\n")
 	b.WriteString("- Each task must be doable on its own branch by one agent that sees only its brief and the code. Write each brief so that agent knows what to build, where in the code, any constraints, and how to tell it is done.\n")
 	b.WriteString("- Put tasks in the same group only when their agents must coordinate while they work, for example an API and the UI that calls it. Grouped agents can message each other and read each other's worktrees; tasks outside a group are fully isolated. Prefer isolated tasks when no coordination is needed.\n")
+	b.WriteString(plannerGitRules())
 	b.WriteString("- Branch names are short and lowercase, like feature/guest-checkout, and must not already exist.\n")
 	if m.base != "" {
 		fmt.Fprintf(&b, "- New worktrees start from %s.\n", m.base)
@@ -495,7 +496,9 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 	if t == nil {
 		return nil
 	}
-	if t.Status == plan.Working && len(s.pending) == 0 {
+	// While grove runs the agent's git for it, the agent carries on with
+	// the output.
+	if t.Status == plan.Working && len(s.pending) == 0 && !m.gitBusy(s) {
 		switch {
 		case ev.Err != nil:
 			t.Status, t.Error = plan.Failed, ev.Err.Error()

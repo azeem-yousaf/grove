@@ -185,6 +185,9 @@ func (m *Model) attentionItems() []attention {
 				later = append(later, attention{st.add.Render("✦"), s.Name() + "'s agent finished; review what it changed", s.Path})
 			}
 		}
+		if guarded, known, why := m.guardStatus(s.Path); known && !guarded && slices.ContainsFunc(m.agentDirs(), func(d string) bool { return git.SamePath(d, s.Path) }) {
+			later = append(later, attention{st.warn.Render("🛡"), s.Name() + " is unguarded: git writes need you (" + why + ")", s.Path})
+		}
 		if s.Behind > 0 && s.Base != "" && s.Branch != s.Base {
 			later = append(later, attention{st.warn.Render("↓"), fmt.Sprintf("%s is %s behind %s", s.Name(), plural(s.Behind, "commit"), s.Base), s.Path})
 		}
@@ -572,6 +575,9 @@ func (m *Model) overviewColumns(width int) []ovColumn {
 	}}
 	agentCol := ovColumn{"AGENT", 16, 'l', func(_ int, s git.State) string {
 		if b := m.agentBadge(s.Path); b != "" {
+			if guarded, known, _ := m.guardStatus(s.Path); known {
+				b = map[bool]string{true: "🛡 ", false: st.warn.Render("! ")}[guarded] + b
+			}
 			return b
 		}
 		return st.faint.Render("–")
