@@ -232,6 +232,10 @@ func (m *Model) attentionItems() []attention {
 			}
 		}
 		switch {
+		case p.Status == plan.Review && p.Merge != nil:
+			urgent = append(urgent, attention{st.accent.Bold(true).Render("✦"), fmt.Sprintf("%s is merged into %s and waits for your feedback in its plan chat (t)", p.Title, p.Merge.Branch), p.Merge.Path})
+		case p.Status == plan.Done && p.Merge != nil:
+			later = append(later, attention{st.add.Render("✓"), fmt.Sprintf("%s is done; ship %s from its worktree (s)", p.Title, p.Merge.Branch), p.Merge.Path})
 		case p.Status == plan.Done:
 			later = append(later, attention{st.add.Render("✓"), p.Title + " is done; review its worktrees and merge them with c", ""})
 		case c[plan.Queued] > 0:
@@ -691,7 +695,10 @@ func (m *Model) planLines(width, most int) []string {
 		}
 		c := planCounts(p)
 		status := st.accent.Render("running")
-		if p.Status == plan.Done {
+		switch p.Status {
+		case plan.Review:
+			status = st.warn.Render("merged, in review")
+		case plan.Done:
 			status = st.add.Render("done")
 		}
 		parts := []string{st.add.Render(fmt.Sprintf("✓ %d finished", c[plan.Finished]))}

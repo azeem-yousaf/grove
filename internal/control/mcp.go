@@ -25,9 +25,10 @@ func server(dir, version string) mcp.Server {
 	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	task := str("The task's branch, as the tasks tool lists it.")
 	return mcp.Server{
-		Name:         "grove",
-		Version:      version,
-		Instructions: "Run the plans the user started in grove: see what each task's agent is doing, message it, answer its approval requests and mark tasks done.",
+		Name:    "grove",
+		Version: version,
+		Instructions: "Run the plans the user started in grove: see what each task's agent is doing, message it, answer its approval requests, mark tasks done, " +
+			"merge a finished plan for the user to try and talk to them in its plan chat.",
 		Tools: []mcp.Tool{
 			{
 				Name:        "tasks",
@@ -83,6 +84,23 @@ func server(dir, version string) mcp.Server {
 					"text":  str("The message."),
 				}, "text"),
 				Call: func(args json.RawMessage) (string, bool) { return post(dir, args) },
+			},
+			{
+				Name: "merge",
+				Description: "Merge a plan whose tasks are all finished or failed: grove commits each finished task's worktree and merges their branches, " +
+					"in plan order, into the plan's own worktree (made the first time) for the user to try. Merging again brings in later changes. " +
+					"If a branch conflicts with the work merged so far, grove asks that task's agent to resolve it and merges again once it is done. You hear how it went.",
+				Schema: mcp.Object(map[string]any{"plan": str("The plan's ID, as tasks shows it. Optional when only one plan is running.")}),
+				Call:   func(args json.RawMessage) (string, bool) { return planOrder(dir, Merge, args) },
+			},
+			{
+				Name:        "close",
+				Description: "Close a merged plan once the user is happy with it. Its worktrees stay for the user to ship.",
+				Schema: mcp.Object(map[string]any{
+					"plan": str("The plan's ID, as tasks shows it. Optional when only one plan is running."),
+					"note": str("A sentence on what the user accepted."),
+				}),
+				Call: func(args json.RawMessage) (string, bool) { return planOrder(dir, Close, args) },
 			},
 		},
 	}
@@ -236,4 +254,34 @@ func findPlan(dir, name string) (Plan, string) {
 		return p, ""
 	}
 	return Plan{}, fmt.Sprintf("No running plan is called %q; use the tasks tool to see them.", name)
+}
+
+// planOrder checks an order about a whole plan and queues it.
+func planOrder(dir, action string, args json.RawMessage) (string, bool) {
+	var a struct{ Plan, Note string }
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "Invalid arguments: " + err.Error(), true
+	}
+	p, msg := findPlan(dir, a.Plan)
+	if msg != "" {
+		return msg, true
+	}
+	done := "Merging; you'll hear how it went."
+	switch action {
+	case Merge:
+		for _, t := range p.Tasks {
+			if t.Status != "finished" && t.Status != "failed" {
+				return fmt.Sprintf("%s is still %s: merge once every task is finished or failed.", t.Branch, t.Status), true
+			}
+		}
+	case Close:
+		if p.Status != "review" {
+			return fmt.Sprintf("Plan %q isn't merged and waiting for the user (it is %s).", p.Title, p.Status), true
+		}
+		done = "Closed."
+	}
+	if err := Queue(dir, Order{Action: action, Plan: p.ID, Note: a.Note}); err != nil {
+		return "Couldn't reach grove: " + err.Error(), true
+	}
+	return done, false
 }

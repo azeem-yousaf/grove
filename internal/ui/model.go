@@ -131,6 +131,7 @@ type Model struct {
 	plans          []*plan.Plan           // saved plans, newest first
 	review         *planReview            // the plan being reviewed, while open
 	creatingTask   map[string]bool        // plan tasks whose worktree is being made, by plan+task ID
+	mergingPlan    map[string]bool        // plans grove is merging, by ID
 	branchNames    []string               // existing branches, for the planner's briefing
 	planBranches   git.Branches           // branches when the last plan started, for creating its worktrees
 	groveBin       string                 // this program, which agents start for group tools
@@ -261,6 +262,7 @@ func New(ctx context.Context, o Options) *Model {
 		sessions:     map[string]*session{},
 		savedJSON:    map[string][]byte{},
 		creatingTask: map[string]bool{},
+		mergingPlan:  map[string]bool{},
 		groups:       map[string]*groupState{},
 		groveBin:     groveExecutable(),
 		predictor:    git.NewPredictor(),
@@ -460,7 +462,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		busy := m.scanning || m.diffPending() || m.removing != nil || m.anyAgentRunning() ||
 			m.creating != nil && m.creating.running || m.undo != nil && m.undo.running ||
 			m.conflicts != nil && m.conflicts.busy() ||
-			m.review != nil && m.review.checking || len(m.creatingTask) > 0
+			m.review != nil && m.review.checking || len(m.creatingTask) > 0 || len(m.mergingPlan) > 0
 		if !busy {
 			m.animating = false
 			return nil
@@ -516,6 +518,15 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case taskCreatedMsg:
 		return m.onTaskCreated(msg)
+
+	case planMergedMsg:
+		return m.onPlanMerged(msg)
+
+	case fixStartedMsg:
+		return m.onFixStarted(msg)
+
+	case fixDoneMsg:
+		return m.onFixDone(msg)
 
 	case groupsReadMsg:
 		return m.onGroupsRead(msg)

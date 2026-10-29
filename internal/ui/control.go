@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -10,11 +11,12 @@ import (
 	"github.com/azeem-yousaf/grove/internal/plan"
 )
 
-// While a plan the planner watches is running, the planner may also run
-// shell commands without asking (still no edits of its own), for example to
-// check a task's diff and tests, and it gets grove's control tools (package
-// control): see the tasks, message their agents, answer their approval
-// requests, mark tasks done or failed, and post in the plans' chats. grove
+// While a plan the planner watches is running or in review, the planner may
+// also run shell commands without asking (still no edits of its own), for
+// example to check a task's diff and tests, and it gets grove's control
+// tools (package control): see the tasks, message their agents, answer
+// their approval requests, mark tasks done or failed, post in the plans'
+// chats, merge a settled plan and close one the user is happy with. grove
 // publishes the watched tasks to the control folder and carries out the
 // orders the tools queue there every second, through the same decide as
 // grove-orchestrate blocks.
@@ -24,14 +26,14 @@ type controlMsg struct {
 	err    error
 }
 
-// orchestrating reports whether a plan the planner watches is running.
+// orchestrating reports whether a plan the planner watches is running, or
+// merged and waiting for the user's feedback.
 func (m *Model) orchestrating() bool {
-	for _, p := range m.plans {
-		if watched(p) && p.Status == plan.Running {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(m.plans, orchestrated)
+}
+
+func orchestrated(p *plan.Plan) bool {
+	return watched(p) && (p.Status == plan.Running || p.Status == plan.Review)
 }
 
 func (m *Model) controlDir() (string, bool) {
@@ -60,10 +62,16 @@ func (m *Model) controlTools(s *session) []agent.ToolServer {
 func (m *Model) controlState() control.State {
 	var st control.State
 	for _, p := range m.plans {
-		if !watched(p) || p.Status != plan.Running {
+		if !orchestrated(p) {
 			continue
 		}
 		cp := control.Plan{ID: p.ID, Title: p.Title, Status: string(p.Status)}
+		if mg := p.Merge; mg != nil {
+			cp.Merge = "branch " + mg.Branch + " in " + mg.Path
+			if mg.Fixing != "" {
+				cp.Merge += "; " + mg.Fixing + " is resolving a conflict with it"
+			}
+		}
 		for _, g := range p.Groups {
 			cp.Groups = append(cp.Groups, g.ID)
 		}
@@ -165,6 +173,10 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 			d.Mark = append(d.Mark, struct{ Branch, Status, Note string }{o.Task, "failed", o.Note})
 		case control.Post:
 			d.Post = append(d.Post, struct{ Plan, Group, To, Message string }{o.Plan, o.Group, o.To, o.Text})
+		case control.Merge:
+			d.Merge = append(d.Merge, struct{ Plan string }{o.Plan})
+		case control.Close:
+			d.Close = append(d.Close, struct{ Plan, Note string }{o.Plan, o.Note})
 		}
 	}
 	return m.decide(d)

@@ -41,13 +41,15 @@ const (
 	orchGroup                    // new group chat messages
 	orchFinished                 // a task's agent says it is done
 	orchFailed                   // a task failed
+	orchSettled                  // every task of a plan is finished or failed
+	orchMerge                    // how merging a plan went
 )
 
 // orchItem is one thing waiting for the planner.
 type orchItem struct {
 	kind   orchKind
 	plan   string   // plan ID
-	branch string   // the task's, for approvals and questions
+	branch string   // the task's, for approvals, questions, finished and failed tasks
 	group  string   // group ID, for group messages
 	lines  []string // the commands, the question, or the messages
 	urgent bool     // starts a planner turn; other items wait for one
@@ -278,10 +280,17 @@ func (m *Model) queueGroups() {
 func (m *Model) liveItems(items []orchItem) []orchItem {
 	var out []orchItem
 	for _, it := range items {
-		if !watched(m.planByID(it.plan)) {
+		p := m.planByID(it.plan)
+		if !watched(p) {
 			continue
 		}
-		if it.kind != orchGroup {
+		switch it.kind {
+		case orchGroup, orchMerge:
+		case orchSettled:
+			if p.Status != plan.Running || !p.Settled() || m.mergingPlan[p.ID] || p.Merge != nil && p.Merge.Fixing != "" {
+				continue
+			}
+		default:
 			_, t, s := m.watchedTask(it.branch)
 			if t == nil || s == nil || s.running {
 				continue
@@ -377,6 +386,13 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 				_, t, _ := m.watchedTask(it.branch)
 				fmt.Fprintf(&b, "\n%s (task %q) failed: %s\nReply to it to try again another way, or leave it for the user.\n", it.branch, t.Title, it.lines[0])
 				what = append(what, it.branch+" failed")
+			case orchSettled:
+				fmt.Fprintf(&b, "\nEvery task of this plan is finished or failed. Once you have checked the finished work and it is right, merge the plan "+
+					"(the merge tool, or \"merge\" in the block): grove commits each finished task's worktree and merges their branches into the plan's own worktree for the user to try.\n")
+				what = append(what, p.Title+" is ready to merge")
+			case orchMerge:
+				fmt.Fprintf(&b, "\n%s\n", it.lines[0])
+				what = append(what, "merging "+p.Title)
 			case orchGroup:
 				name := it.group
 				if g, ok := p.Chat(it.group); ok {
@@ -400,10 +416,12 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
   "deny": [{"branch": "feature/api", "command": "git push --force", "reason": "what the agent should do instead"}],
   "reply": [{"branch": "feature/ui", "message": "your answer to its question"}],
   "post": [{"plan": "plan id", "group": "checkout", "to": "", "message": "to everyone, or set to a member's branch"}],
-  "mark": [{"branch": "feature/docs", "status": "failed", "note": "why, for the user"}]
+  "mark": [{"branch": "feature/docs", "status": "failed", "note": "why, for the user"}],
+  "merge": [{"plan": "plan id"}],
+  "close": [{"plan": "plan id", "note": "what the user accepted"}]
 }` + "\n```\n\n")
 	if len(m.controlTools(m.planner)) > 0 {
-		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark, post) instead of the block, " +
+		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark, post, merge, close) instead of the block, " +
 			"and you may run shell commands without asking, for example to read a task's diff or run its tests in its worktree. " +
 			"Don't change any files yourself; the task agents do the work.\n\n")
 	}
@@ -439,6 +457,8 @@ type decisions struct {
 	Reply   []struct{ Branch, Message string }
 	Post    []struct{ Plan, Group, To, Message string }
 	Mark    []struct{ Branch, Status, Note string }
+	Merge   []struct{ Plan string }
+	Close   []struct{ Plan, Note string }
 }
 
 // applyDecisions carries out the last grove-orchestrate block in a planner
@@ -540,6 +560,16 @@ func (m *Model) decide(d decisions) tea.Cmd {
 	}
 	for _, p := range d.Post {
 		cmds = append(cmds, m.plannerPost(p.Plan, p.Group, p.To, p.Message))
+	}
+	for _, mg := range d.Merge {
+		if p := m.findPlan(mg.Plan); watched(p) {
+			cmds = append(cmds, m.mergePlan(p))
+		}
+	}
+	for _, c := range d.Close {
+		if p := m.findPlan(c.Plan); watched(p) {
+			cmds = append(cmds, m.closePlan(p, c.Note))
+		}
 	}
 	return tea.Batch(cmds...)
 }

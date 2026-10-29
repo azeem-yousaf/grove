@@ -61,6 +61,8 @@ const (
 	Finish  = "finish"  // mark the task finished, Note why
 	Fail    = "fail"    // mark the task failed, Note why
 	Post    = "post"    // Text goes to a chat of Plan: Group ("" for the plan chat), To one member or everyone
+	Merge   = "merge"   // merge Plan's finished tasks into its own worktree
+	Close   = "close"   // end Plan in review, Note why
 )
 
 // Order is something the planner asked grove to do.

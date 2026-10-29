@@ -499,6 +499,10 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 			t.Status, t.Error = plan.Finished, ""
 		}
 	}
+	if fix, ok := m.fixTurnEnded(p, t); ok {
+		// grove commits the resolved merge and merges the plan again.
+		return tea.Batch(fix, m.savePlan(p), m.schedule())
+	}
 	m.queueTurn(s)
 	return tea.Batch(m.finishIfSettled(p), m.savePlan(p), m.schedule(), m.orchestrate())
 }
@@ -508,9 +512,16 @@ func endsWithQuestion(reply string) bool {
 }
 
 // finishIfSettled marks a plan done once every task has finished or failed,
-// and points the user to merging.
+// and points the user to merging. A plan the planner watches stays running
+// for the planner to merge instead.
 func (m *Model) finishIfSettled(p *plan.Plan) tea.Cmd {
 	if p.Status != plan.Running || !p.Settled() {
+		return nil
+	}
+	if watched(p) {
+		if !m.mergingPlan[p.ID] && (p.Merge == nil || p.Merge.Fixing == "") {
+			m.queueSettled(p)
+		}
 		return nil
 	}
 	p.Status = plan.Done

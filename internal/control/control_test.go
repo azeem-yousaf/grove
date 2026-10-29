@@ -102,3 +102,37 @@ func TestTools(t *testing.T) {
 		t.Errorf("Take should empty the queue: %v", orders)
 	}
 }
+
+func TestPlanTools(t *testing.T) {
+	dir := t.TempDir()
+	st := State{Plans: []Plan{{ID: "p1", Title: "Shop", Status: "running", Tasks: []Task{
+		{Branch: "feature/a", Status: "finished"}, {Branch: "feature/b", Status: "working"},
+	}}}}
+	if err := WriteState(dir, st); err != nil {
+		t.Fatal(err)
+	}
+	if got, failed := call(t, dir, "merge", nil); !failed || !strings.Contains(got, "feature/b is still working") {
+		t.Errorf("merge while b works = %q", got)
+	}
+	if got, failed := call(t, dir, "close", map[string]any{"plan": "p1"}); !failed || !strings.Contains(got, "isn't merged") {
+		t.Errorf("close before merging = %q", got)
+	}
+	st.Plans[0].Tasks[1].Status = "failed"
+	if err := WriteState(dir, st); err != nil {
+		t.Fatal(err)
+	}
+	if got, failed := call(t, dir, "merge", map[string]any{"plan": "Shop"}); failed {
+		t.Errorf("merge = %q", got)
+	}
+	st.Plans[0].Status = "review"
+	if err := WriteState(dir, st); err != nil {
+		t.Fatal(err)
+	}
+	if got, failed := call(t, dir, "close", map[string]any{"note": "looks good"}); failed {
+		t.Errorf("close = %q", got)
+	}
+	orders, _ := Take(dir)
+	if len(orders) != 2 || orders[0].Action != Merge || orders[0].Plan != "p1" || orders[1].Action != Close || orders[1].Note != "looks good" {
+		t.Errorf("orders = %+v", orders)
+	}
+}

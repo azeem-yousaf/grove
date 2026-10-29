@@ -242,8 +242,22 @@ Before you plan, grove asks who will watch the plan's agents while it runs:
   edits files itself, and it gets grove's control tools through a small MCP
   server built into grove (`grove mcp-plan`): `tasks` (each task's status,
   the end of its agent's last reply and the commands it waits on),
-  `message`, `approve`, `deny` and `mark`. It can act with these during a
-  turn as well as with its decisions block at the end.
+  `message`, `approve`, `deny`, `mark`, `post`, `merge` and `close`. It can
+  act with these during a turn as well as with its decisions block at the
+  end.
+
+  Once every task is finished or failed, the planner merges the plan for
+  you. grove commits each finished task's worktree and merges the branches,
+  in plan order, into a new worktree on a branch named after the plan
+  (`plan/guest-checkout`, from the plan's base), so your own branches stay
+  untouched. If a branch conflicts with the work merged so far, grove merges
+  the plan's branch into that task's worktree, asks its agent to resolve
+  the conflict, commits the merge when it is done and merges again. The
+  planner then checks the result, posts a summary in the plan chat and
+  waits for your feedback there: when you ask for changes it reopens the
+  tasks that own them and merges again once they are done; when you are
+  happy it closes the plan, and you ship the plan's branch from its
+  worktree (`s`).
 
 Tick *Remember my choice* (off by default) to save the answer as
 `[planner] watcher` and stop being asked.
@@ -263,7 +277,8 @@ is created until you start it:
 - A task is finished when its agent ends a turn without needing you. A
   reply that ends with a question, or an approval card, keeps it working.
   Once every task has finished, the planner says so; review the worktrees
-  and merge them with `c`.
+  and merge them with `c`. (A plan the planner watches is merged for you;
+  see above.)
 
 **Groups.** Agents of tasks in the same group share a group chat; agents of
 isolated tasks don't get it at all. grove gives each grouped agent three
@@ -303,11 +318,21 @@ Worktrees stay grouped for as long as they exist, also after the plan is
 done.
 
 Press `t` on a group's header or one of its worktrees (or `ctrl+g` in a
-grouped agent's chat) to open the group chat. You see every message and can post too; start with
-`@branch` to address one agent. When a message arrives for an agent that
-isn't working, grove starts a turn so it can answer. To keep agents from
-waking each other forever, grove stops after `[planner] max_wakeups`
-(default 6) wake-ups in a row in a group and waits for you to post.
+grouped agent's chat) to open the group chat. You see every message and
+can post too; start with `@branch` to address one agent. When a message
+arrives for an agent that isn't working, grove starts a turn so it can
+answer. To keep agents from waking each other forever, grove stops after
+`[planner] max_wakeups` (default 6) wake-ups in a row in a group and waits
+for you to post.
+
+**Plan chat.** Every started plan also has a plan chat, for you, the
+planner and all of the plan's agents (each gets it as a second set of the
+same tools). It is where a watching planner talks to you, for example after
+merging the plan. Anything you post there goes to the planner; agents are
+only woken for messages addressed to them with `@branch`. Press `t` on an
+isolated task's worktree or the plan's merged worktree to open it,
+`ctrl+t` in a group chat to switch to it and back, or `ctrl+g` in the
+planner's chat.
 
 Plans, the planner's conversation and group chats are saved with the
 agents' conversations and survive restarts.
@@ -441,7 +466,7 @@ one. While the terminal is focused, the usual toasts are enough.
 | `n` | create a worktree (in the list) |
 | `a` | open the worktree's AI agent |
 | `P` | the planner: turn requirements into tasks and worktrees |
-| `t` | the group chat of a group, or of a grouped task's worktree |
+| `t` | the group chat of a group or a grouped task's worktree, or the plan chat of any other task or a plan's merged worktree |
 | `w` | overview of every worktree |
 | `s` | ship: commit, push, pull request, update from the base branch |
 | `c` | merge other worktrees' branches into this one |
