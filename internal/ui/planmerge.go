@@ -306,12 +306,14 @@ func (m *Model) onPlanMerged(msg planMergedMsg) tea.Cmd {
 	if len(msg.committedTasks) > 0 {
 		committed = " grove committed the uncommitted work of " + strings.Join(msg.committedTasks, ", ") + " first."
 	}
+	post := ""
 	switch {
 	case msg.err != nil:
 		text := fmt.Sprintf("Couldn't merge %s: %v", p.Title, msg.err)
 		m.plannerNote(roleError, text)
 		m.queueMerge(p, text+"."+committed)
-		cmds = append(cmds, m.notify(text, toastErr), m.alert(text), m.grovePost(p, text))
+		cmds = append(cmds, m.notify(text, toastErr), m.alert(text))
+		post = text
 	case msg.conflict != "":
 		t := planTask(p, msg.conflict)
 		if t == nil {
@@ -327,7 +329,8 @@ func (m *Model) onPlanMerged(msg planMergedMsg) tea.Cmd {
 		p.Merge.Fixing = t.Branch
 		t.Status, p.Status = plan.Working, plan.Running
 		path, planBranch, pid, tid := t.Path, p.Merge.Branch, p.ID, t.ID
-		cmds = append(cmds, m.grovePost(p, text), func() tea.Msg {
+		post = text
+		cmds = append(cmds, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(m.ctx, 2*time.Minute)
 			defer cancel()
 			paths, err := git.Merge(ctx, path, planBranch)
@@ -355,14 +358,19 @@ func (m *Model) onPlanMerged(msg planMergedMsg) tea.Cmd {
 		}
 		p.Merge.Tests = ""
 		if test := m.testCommand(p); test != "" {
-			cmds = append(cmds, m.grovePost(p, text+" Running the tests: `"+test+"`."), m.runPlanTests(p, test, ask))
+			post = text + " Running the tests: `" + test + "`."
+			cmds = append(cmds, m.runPlanTests(p, test, ask))
 			break
 		}
 		m.queueMerge(p, ask+" No test command is set ([planner] test in grove's config, or \"test\" in the plan): "+
 			"work out how this repository is built and tested, and run that in the worktree, without changing files. "+reviewAsk)
-		cmds = append(cmds, m.grovePost(p, text+" Try it there, then tell the planner here what to change."), m.waitForFeedback(p))
+		post = text + " Try it there, then tell the planner here what to change."
+		cmds = append(cmds, m.waitForFeedback(p))
 	}
-	return tea.Batch(append(cmds, m.orchestrate())...)
+	if post == "" {
+		return tea.Batch(append(cmds, m.orchestrate())...)
+	}
+	return tea.Batch(append(cmds, m.grovePost(p, post, m.orchestrate()))...)
 }
 
 func (m *Model) onFixStarted(msg fixStartedMsg) tea.Cmd {
@@ -471,17 +479,22 @@ func planTask(p *plan.Plan, branch string) *plan.Task {
 	return nil
 }
 
-// grovePost posts grove's own news in a plan's chat.
-func (m *Model) grovePost(p *plan.Plan, text string) tea.Cmd {
+// grovePost posts grove's own news in a plan's chat, then starts then, so
+// a planner turn started with it can't answer before the news is there.
+func (m *Model) grovePost(p *plan.Plan, text string, then ...tea.Cmd) tea.Cmd {
 	log, ok := m.groupLog(p, plan.ChatID)
 	if !ok {
-		return nil
+		return tea.Batch(then...)
 	}
 	return func() tea.Msg {
+		var posted tea.Msg = groupPostedMsg{}
 		if err := log.Post(group.Message{From: group.Grove, Text: text}); err != nil {
-			return actionMsg{err: fmt.Errorf("couldn't post in the plan chat: %w", err)}
+			posted = actionMsg{err: fmt.Errorf("couldn't post in the plan chat: %w", err)}
 		}
-		return groupPostedMsg{}
+		if len(then) == 0 {
+			return posted
+		}
+		return tea.BatchMsg(append([]tea.Cmd{func() tea.Msg { return posted }}, then...))
 	}
 }
 
@@ -535,8 +548,8 @@ func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
 		m.plannerNote(roleNote, "The tests passed.")
 		m.queueMerge(p, msg.report+" grove ran `"+msg.command+"` in that worktree and it passed. "+
 			"Check anything else the change needs, if you must, without changing files. "+reviewAsk)
-		return tea.Batch(m.savePlan(p), m.grovePost(p, "The tests passed. Try it there, then tell the planner here what to change."),
-			m.waitForFeedback(p), m.orchestrate())
+		return tea.Batch(m.savePlan(p), m.waitForFeedback(p),
+			m.grovePost(p, "The tests passed. Try it there, then tell the planner here what to change.", m.orchestrate()))
 	}
 	p.Merge.Tests = plan.TestsFailed
 	var why string
@@ -561,8 +574,8 @@ func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
 	}
 	post := fmt.Sprintf("The tests (`%s`) %s. The planner is getting the tasks' agents to fix it before asking you.\n\n```\n%s\n```",
 		msg.command, why, strings.Join(lines, "\n"))
-	return tea.Batch(m.savePlan(p), m.grovePost(p, post),
-		m.notify(p.Title+": the merged tests failed; the planner is sending the failures to the agents", toastInfo), m.orchestrate())
+	return tea.Batch(m.savePlan(p), m.notify(p.Title+": the merged tests failed; the planner is sending the failures to the agents", toastInfo),
+		m.grovePost(p, post, m.orchestrate()))
 }
 
 // waitForFeedback tells the user a merged plan is ready for them.
