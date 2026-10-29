@@ -37,6 +37,11 @@ from.
   down when it isn't, and refreshes the moment you come back. Background scans
   never take git's index lock, so they can't get in the way of your own git
   commands.
+- **Desktop notifications** while you're in another window: an agent
+  finished, needs you or failed, a plan is ready or done, or two worktrees
+  start to conflict. See *Notifications*.
+- **Every action one search away**: `ctrl+k` lists what you can do with
+  the selection, with each action's key. Type to find one and press `enter`.
 - Light and dark themes chosen from your terminal's background, mouse
   support, a fuzzy file filter (`/`), and a layout that adapts down to 50×12.
 
@@ -85,6 +90,9 @@ grove --base develop      # compare against a different branch
 grove --plain             # print a text summary instead of the UI
 ```
 
+In a repository with just one worktree, grove lists the first steps under
+it: a new worktree (`n`), a plan (`P`), an agent (`a`) and the keys (`?`).
+
 To start a feature, press `n` and type a branch name:
 
 ```
@@ -132,9 +140,9 @@ rescanned straight away. `↑` brings back earlier commands.
 
 Press `a` on a worktree to give it an agent: Claude Code or Codex, whichever
 is installed and signed in on your PC. grove never asks for an API key; it
-runs the tool you already use. If both are installed, grove asks once and
-remembers (`ctrl+a` switches later; it's saved as `[ai] agent` in the
-config).
+runs the tool you already use. If both are installed, grove asks which to
+use; tick *Remember my choice* (off by default) to stop it asking
+(`ctrl+a` switches later; it's saved as `[ai] agent` in the config).
 
 ```
 ╭─ ✦ feature/auth · Claude Code ─────────────────── $0.04 ─╮
@@ -155,7 +163,8 @@ config).
   the same time. The worktree's dot in the list shows what its agent is
   doing (spinning while it works, amber `✦` when it needs you), files it
   changed get a `✦`, and a toast tells you when an agent in another
-  worktree finishes or needs you.
+  worktree finishes or needs you. While you're in another window, a
+  desktop notification does (see *Notifications*).
 - **An agent edits only its own worktree.** It runs in that folder, is told
   the paths of the other worktrees and to keep out of them, and:
   - with Claude Code, edits inside the folder are accepted, while shell
@@ -177,10 +186,18 @@ config).
   Code uses whatever `/model` is set to in Claude Code itself. Your choice
   applies from the next message and is remembered for new chats
   (`[ai] claude_model` / `codex_model` in the config).
-- **Typing and copying.** The message box grows as you type or paste and
-  keeps pasted line breaks; `enter` sends, `shift+enter` (or `ctrl+j`)
-  starts a new line. `ctrl+y` copies the agent's last reply as it wrote it,
-  and dragging over the conversation copies those lines as plain text.
+- **Typing and copying.** The message box grows as you type or paste
+  (`ctrl+v`, or your terminal's own paste) and keeps pasted line breaks;
+  `enter` sends, `shift+enter` (or `ctrl+j`) starts a new line. `ctrl+y`
+  copies the agent's last reply as it wrote it, and dragging over the
+  conversation copies those lines as plain text.
+- **Replies are formatted.** Markdown in replies shows as styled text
+  without its marks: bold, italics, code, links, headings, quotes, bullets
+  and task boxes. Tables are laid out in columns that fit the pane; when
+  one is too wide even with its cells wrapped, each row is listed as
+  `Header: value` lines instead. Long lines in code blocks wrap, with `↪`
+  marking where a line continues; copying them by dragging joins them
+  back into one line.
 - `ctrl+x` stops a working agent. Quitting while agents work asks first.
 - **Conversations are kept.** Each agent's conversation, the commands you
   allowed and its undo checkpoint are saved in the repository's `.git/grove`
@@ -203,11 +220,32 @@ only read, never create or edit issues). It asks about anything unclear and
 then proposes a plan: tasks, each with a branch and a brief for its agent,
 and groups of tasks whose agents will need to coordinate.
 
+Before you plan, grove asks who will watch the plan's agents while it runs:
+
+- **You**: commands an agent was refused, questions it ends a turn with and
+  group chats all wait for you, as with any other agent.
+- **The planner**, as an orchestrator: grove sends it what would otherwise
+  wait for you, and it approves commands that are safe and needed for the
+  task (builds, tests, linters), denies destructive ones with a reason for
+  the agent, answers questions the plan and the code can answer, and
+  follows the group chats, posting when agents are stuck or disagree. What
+  it doesn't decide stays for you, and you can always answer first: an
+  approval card says the planner will decide unless you do. Its decisions
+  show in its chat and in each agent's chat. After `[planner]
+  max_decisions` (default 20) turns in a row it pauses until you say
+  something to it or to an agent.
+
+Tick *Remember my choice* (off by default) to save the answer as
+`[planner] watcher` and stop being asked.
+
 The plan opens for review (`ctrl+o` in the planner brings it back). Nothing
 is created until you start it:
 
 - `enter` edits a task's title, branch and brief, `g` moves it between
   groups (or makes it isolated), `r` renames its group and `d` removes it.
+  Start a group's name with an emoji (`🛒 Checkout`) to give it an icon in
+  the list. The planner may suggest one.
+- `o` switches who watches the plan between you and the planner.
 - `s` checks that no branch or folder already exists and starts the plan.
   grove creates a worktree per task (copying the `[new] copy` files), and
   starts each task's agent with its brief, at most `[planner] max_agents`
@@ -230,8 +268,32 @@ read-only permission for those folders, and every other worktree stays off
 limits. (Codex's sandbox can read anywhere, so with Codex this is by
 instruction only.)
 
-Press `t` on a grouped task's worktree (or `ctrl+g` in its agent chat) to
-open the group chat. You see every message and can post too; start with
+In the list, a group's worktrees sit together in a box under the group's
+name and icon:
+
+```
+╭─ ▾ 🛒 Checkout  2 worktrees  ✦ 1 working  ✓ 1/2 done ──── +131 −19 ─╮
+│ ▾ ● feature/cart-api  ◆ here                             +122 −16   │
+│     C:\src\shop-cart-api · 4 files · ↑4                             │
+│     M src/api/cart.ts                          ⚠   +20 −4    ■■···  │
+│                                                                     │
+│ ▸ ✦ feature/cart-ui                                         +9 −3   │
+╰─────────────────────────────────────────────────────────────────────╯
+```
+
+The header counts the group's worktrees, conflicts between them, agents
+that need you, are working or failed, finished tasks and chat messages. The
+border shows what most needs you: red when members will conflict, amber
+when an agent waits for you, the accent colour while agents work. `enter`
+or `←` folds the group to one line. Selecting the header shows a summary in
+the right pane: each member's task and agent, which members will conflict
+(with each other or with other worktrees), and the latest messages in the
+group chat. In a narrow list the box becomes a bar down the left side.
+Worktrees stay grouped for as long as they exist, also after the plan is
+done.
+
+Press `t` on a group's header or one of its worktrees (or `ctrl+g` in a
+grouped agent's chat) to open the group chat. You see every message and can post too; start with
 `@branch` to address one agent. When a message arrives for an agent that
 isn't working, grove starts a turn so it can answer. To keep agents from
 waking each other forever, grove stops after `[planner] max_wakeups`
@@ -242,16 +304,74 @@ agents' conversations and survive restarts.
 
 ### Overview of every worktree
 
-A summary above the list counts active and clean worktrees, commits ahead
-of and behind the base, working agents, and anything that needs you:
-agents waiting for approval or failed, unresolved merge conflicts,
-unreadable worktrees and overlapping files. Press `w` (or click the summary)
+A line above the list starts with anything that needs you (agents waiting
+for approval or failed, unresolved merge conflicts), then a running plan's
+progress, working and finished agents, active, clean and unreadable
+worktrees, and commits ahead of and behind the base, as many as fit. The
+header beside it counts worktrees, overlaps and conflicts. Selecting a
+worktree shows its plan task, what its agent is doing with the start of its
+latest reply, and its newest commits (`↑` for those not in the base branch
+yet). Press `w` (or click the summary line)
 for the full overview: running plans with their tasks' progress, a table of
 every worktree with its files, `+`/`−` lines, agent status, its plan task
 and group, commits ahead and behind, uncommitted edits,
 overlaps and last commit, and a list of what needs attention. `enter`
 jumps to the worktree in the list, `a` opens its agent and `c` merges into
 it.
+
+### Reviewing a worktree's changes
+
+Press `v` on a worktree, or any of its files, to read every change it made
+in one scroll, each file under its name. `v` again shows only what changed
+since its agent's last turn began (grove snapshots the worktree before each
+turn), and once more goes back to everything. `[` and `]` go from file to
+file, `n` and `N` from change to change; a bar in the gutter marks the
+current change. In any diff:
+
+- `/` searches; matches are highlighted, and `n` / `N` go from one to the
+  next until `esc` clears the search.
+- `x` puts the current change back, after showing it: its `+` lines are
+  taken out and its `−` lines put back in the file on disk, keeping the
+  file's line endings. On a new file that deletes it; on a deleted file it
+  brings it back.
+- `>` opens the worktree's agent with the change quoted, ready for you to
+  say what's wrong with it.
+
+### Finishing a feature
+
+Select a worktree and press `s` to ship it. The menu shows where it stands
+and what you can do:
+
+```
+ Ship feature/auth
+
+ c  Commit                2 files not committed yet
+ p  Push                  2 commits not pushed yet
+ r  Pull request          create one with gh
+ m  Merge origin/main in  1 commit behind
+ b  Rebase onto origin/main  1 commit behind · rewrites this branch's commits
+```
+
+- **Commit** opens a dialog with the message and every file with work not
+  committed yet, all ticked (`tab` to the files, `space` unticks one, `a`
+  ticks or unticks all). The message starts as the last commit message the
+  worktree's agent suggested, else its plan task's title. Only the ticked
+  files are committed; anything else you staged stays staged. During a
+  merge the whole merge is committed, with git's merge message.
+- **Push** pushes the branch, setting its upstream the first time.
+- **Pull request** opens the branch's pull request in the browser, or runs
+  `gh pr create` against the base branch if there is none. It needs the
+  [GitHub CLI](https://cli.github.com), signed in.
+- **Merge** and **Rebase** bring in the base branch, fetching it first when
+  it is a remote branch such as `origin/main`. Work not committed yet is
+  stashed and put back (`--autostash`). If a merge stops on conflicts,
+  press `c` on the worktree to resolve them; a rebase that stops is
+  finished with `: rebase --continue` or `: rebase --abort`.
+
+Each runs in the terminal like the `:` prompt, so hooks, commit signing,
+credential prompts and `gh`'s questions work as usual. A worktree's pull
+request (`#12 open`, `draft`, `merged`, `closed`) shows in the list and in
+its summary, refreshed every minute while `gh` works.
 
 ### Merging worktrees
 
@@ -277,33 +397,55 @@ uncommitted changes is only removed after you tick *Discard uncommitted
 changes*, and git double-checks, so a stale screen can't lose work. Locked
 worktrees work the same way. The main worktree can't be removed.
 
+### Notifications
+
+While grove's terminal isn't focused, grove shows a desktop notification
+when an agent finishes, needs you (a command to approve) or fails, when the
+planner proposes a plan or a plan is done, when the planner or a group chat
+pauses to wait for you, and when two worktrees start to conflict.
+Notifications that come within two seconds of each other are combined into
+one. While the terminal is focused, the usual toasts are enough.
+
+- Windows shows a toast (through Windows PowerShell, so it is listed as
+  coming from PowerShell), macOS uses Notification Center, and Linux
+  `notify-send`.
+- It needs a terminal that tells programs when it gains and loses focus:
+  Windows Terminal, iTerm2, WezTerm, kitty, Ghostty and most others do.
+- `[notify] desktop = false` turns them off; `bell = true` also rings the
+  terminal bell, which many terminals show by flashing the tab or taskbar
+  button (and which works over SSH).
+
 ### Keys
 
 | Key | Action |
 |---|---|
 | `↑` `↓` / `j` `k` | move |
-| `←` `→` / `h` `l` | fold / unfold a worktree |
-| `[` `]` | previous / next worktree |
+| `←` `→` / `h` `l` | fold / unfold a worktree or group |
+| `[` `]` | previous / next worktree or group |
 | `tab` | switch between the list and the diff |
 | `→` / `←` | into the diff from a file; back to the list from the diff's left edge |
-| `enter` | open the file (or fold a worktree) |
+| `enter` | open the file (or fold a worktree or group) |
 | `f` | show in Explorer / Finder |
 | `e` | open the worktree in your editor |
 | `y` | copy the path |
 | `n` | create a worktree (in the list) |
 | `a` | open the worktree's AI agent |
 | `P` | the planner: turn requirements into tasks and worktrees |
-| `t` | the group chat of a grouped task's worktree |
+| `t` | the group chat of a group, or of a grouped task's worktree |
 | `w` | overview of every worktree |
+| `s` | ship: commit, push, pull request, update from the base branch |
 | `c` | merge other worktrees' branches into this one |
 | `u` | undo everything the worktree's agent changed |
 | `d` | remove the worktree (asks first) |
 | `:` | run a git command in the selected worktree |
+| `ctrl+k` | find any action and run it |
 | `m` | toggle branch / uncommitted mode |
 | `o` | show only files changed in several worktrees |
 | `/` | filter files |
 | `r` | refresh now |
-| `n` `N` | next / previous hunk (diff pane) |
+| `n` `N` | next / previous hunk (diff pane), or search match |
+| `v` | every change in the worktree; again for its agent's last turn |
+| `/` `x` `>` | in the diff pane: search, put the current change back, ask the agent about it |
 | `?` | all shortcuts |
 | `q` | quit |
 
@@ -346,6 +488,16 @@ open_editor = false                                             # open new workt
 [ai]                 # the worktree agents (key a)
 agent = "claude"     # "claude" or "codex"; "" = ask when both are installed
 model = ""           # passed to the agent; "" = its default
+
+[planner]            # plans (key P)
+max_agents = 3       # task agents working at once; the rest wait
+max_wakeups = 6      # wake-ups in a row in a group chat before waiting for you
+max_decisions = 20   # turns in a row the planner takes for a plan it watches
+watcher = ""         # who watches a plan's agents: "you" or "planner"; "" = ask before each plan
+
+[notify]             # while grove's terminal isn't focused
+desktop = true       # desktop notifications
+bell = false         # also ring the terminal bell
 
 [open]               # per-extension override for `enter`
 ".log" = "notepad"

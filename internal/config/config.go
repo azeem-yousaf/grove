@@ -37,7 +37,24 @@ type Config struct {
 	Planner Planner `toml:"planner"`
 	// Conflicts configures predicting merge conflicts between worktrees.
 	Conflicts Conflicts `toml:"conflicts"`
+	// Notify configures telling the user about agents while grove's
+	// terminal isn't focused.
+	Notify Notify `toml:"notify"`
 }
+
+// Notify configures notifications sent while grove's terminal isn't
+// focused: an agent finished, needs the user or failed, a plan is ready or
+// done, or worktrees start to conflict.
+type Notify struct {
+	// Desktop shows a desktop notification. Unset means on.
+	Desktop *bool `toml:"desktop"`
+	// Bell also rings the terminal bell, which many terminals show by
+	// flashing the tab or the taskbar button.
+	Bell bool `toml:"bell"`
+}
+
+// DesktopOn is Desktop with the default applied.
+func (n Notify) DesktopOn() bool { return n.Desktop == nil || *n.Desktop }
 
 // Conflicts configures conflict prediction: test-merging worktrees that
 // change the same files to see whether they would really conflict.
@@ -58,7 +75,22 @@ type Planner struct {
 	// group to answer group messages before it waits for the user to post.
 	// 0 or less means the default, 6.
 	MaxWakeups int `toml:"max_wakeups"`
+	// MaxDecisions is how many turns in a row the planner may take for the
+	// plans it watches before it waits for the user to say something. 0 or
+	// less means the default, 20.
+	MaxDecisions int `toml:"max_decisions"`
+	// Watcher is who watches a running plan's agents and answers them:
+	// "you", or "planner" for the planner to approve their commands, answer
+	// their questions and follow their group chats. Empty means ask before
+	// each plan.
+	Watcher string `toml:"watcher"`
 }
+
+// Watchers are the values Planner.Watcher may take.
+const (
+	WatchYou     = "you"
+	WatchPlanner = "planner"
+)
 
 // Wakeups is MaxWakeups with the default applied.
 func (p Planner) Wakeups() int {
@@ -66,6 +98,14 @@ func (p Planner) Wakeups() int {
 		return 6
 	}
 	return p.MaxWakeups
+}
+
+// Decisions is MaxDecisions with the default applied.
+func (p Planner) Decisions() int {
+	if p.MaxDecisions <= 0 {
+		return 20
+	}
+	return p.MaxDecisions
 }
 
 // Slots is MaxAgents with the default applied.
@@ -200,7 +240,12 @@ func SaveAgent(agent string) error { return saveAI("agent", agent) }
 // same way.
 func SaveModel(agent, model string) error { return saveAI(agent+"_model", model) }
 
-func saveAI(key, value string) error {
+// SaveWatcher records who watches running plans under [planner] watcher.
+func SaveWatcher(watcher string) error { return saveKey("planner", "watcher", watcher) }
+
+func saveAI(key, value string) error { return saveKey("ai", key, value) }
+
+func saveKey(section, key, value string) error {
 	path, err := Path()
 	if err != nil {
 		return err
@@ -212,7 +257,7 @@ func saveAI(key, value string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(setKey(string(b), "ai", key, fmt.Sprintf("%q", value))), 0o644)
+	return os.WriteFile(path, []byte(setKey(string(b), section, key, fmt.Sprintf("%q", value))), 0o644)
 }
 
 // setKey sets key = value inside [section] of a TOML document, replacing an
@@ -306,6 +351,13 @@ max_agents = 3
 # How many times in a row grove wakes idle agents of a group to answer each
 # other before it waits for you to post in the group chat.
 max_wakeups = 6
+# How many turns in a row the planner may take for a plan it watches before
+# it waits for you to say something.
+max_decisions = 20
+# Who watches a running plan's agents and answers them: "you", or "planner"
+# to have the planner approve their commands, answer their questions and
+# follow their group chats. Empty = ask before each plan.
+watcher = ""
 
 # Files changed in more than one worktree are test-merged in git's object
 # store (nothing on disk changes) to show which would really conflict.
@@ -313,6 +365,16 @@ max_wakeups = 6
 [conflicts]
 # Set to false to turn it off, for example in very large repositories.
 predict = true
+
+# While grove's terminal isn't focused, tell you when an agent finishes,
+# needs you or fails, a plan is ready or done, or worktrees start to
+# conflict. Needs a terminal that reports focus (Windows Terminal, iTerm2,
+# WezTerm, kitty, Ghostty and most others).
+[notify]
+# A desktop notification (on Linux this needs notify-send).
+desktop = true
+# Also ring the terminal bell; many terminals flash the tab or taskbar.
+bell = false
 
 # Files open with their system default program (key: enter).
 # Override that per extension here. "default" means the system default.

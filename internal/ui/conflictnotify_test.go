@@ -180,7 +180,7 @@ func TestUngroupedTaskGetsConflictNoteWithNextTurn(t *testing.T) {
 	}
 
 	// Notes not yet given survive a restart.
-	if r := restore(s.saved(), true); len(r.notes) != 1 || r.notes[0] != s.notes[0] {
+	if r := restore(s.saved(), true, false); len(r.notes) != 1 || r.notes[0] != s.notes[0] {
 		t.Errorf("restored notes = %q", r.notes)
 	}
 }

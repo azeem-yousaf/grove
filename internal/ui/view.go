@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -96,6 +96,8 @@ func (m *Model) render() string {
 		return m.overlay(screen, m.createModal())
 	case m.picker != nil:
 		return m.overlay(screen, m.pickerModal())
+	case m.watchAsk != nil:
+		return m.overlay(screen, m.watchModal())
 	case m.undo != nil:
 		return m.overlay(screen, m.undoModal())
 	case m.conflicts != nil:
@@ -104,6 +106,14 @@ func (m *Model) render() string {
 		return m.overlay(screen, m.reviewModal())
 	case m.showHelp:
 		return m.overlay(screen, m.helpModal())
+	case m.actions != nil:
+		return m.overlay(screen, m.actionsModal())
+	case m.ship != nil:
+		return m.overlay(screen, m.shipModal())
+	case m.commit != nil:
+		return m.overlay(screen, m.commitModal())
+	case m.revert != nil:
+		return m.overlay(screen, m.revertModal())
 	}
 	return screen
 }
@@ -132,7 +142,8 @@ func (m *Model) overlay(screen, box string) string {
 func (m *Model) header() string {
 	st := m.st
 	logo := st.pillAccent.Render("grove")
-	left := " " + logo + " " + st.faint.Render(m.version) + "  " + st.bold.Render(m.repo.Name)
+	name := st.bold.Render(m.repo.Name)
+	version := " " + st.faint.Render(m.version)
 
 	mode := st.muted.Render("changes since ") + st.text.Render(m.baseLabel())
 	if m.mode == git.ModeUncommitted {
@@ -140,32 +151,53 @@ func (m *Model) header() string {
 	} else if m.base == "" && m.baseReady {
 		mode = st.muted.Render("uncommitted changes") + st.faint.Render(" (no base branch found)")
 	}
-	left += st.faint.Render("  ·  ") + mode
 
-	var right []string
+	var pills []string
+	count := ""
 	if m.snap != nil {
 		// Overlaps predicted to conflict count as conflicts, not overlaps.
 		if n := m.cleanOverlapCount(); n > 0 {
-			right = append(right, st.pillWarn.Render(fmt.Sprintf("⚠ %s", plural(n, "overlap"))))
+			pills = append(pills, st.pillWarn.Render(fmt.Sprintf("⚠ %s", plural(n, "overlap"))))
 		}
 		if n := m.conflictCount(); n > 0 {
-			right = append(right, st.pillConflict.Render(fmt.Sprintf("✗ %s", plural(n, "conflict"))))
+			pills = append(pills, st.pillConflict.Render(fmt.Sprintf("✗ %s", plural(n, "conflict"))))
 		}
-		right = append(right, st.muted.Render(plural(len(m.snap.States), "worktree")))
+		count = st.muted.Render(plural(len(m.snap.States), "worktree"))
 	}
+	// status and its short form, for when space runs out.
+	status, short := "", ""
+	spin := spinnerFrames[m.frame%len(spinnerFrames)]
 	switch {
 	case m.removing != nil:
-		right = append(right, st.del.Render(spinnerFrames[m.frame%len(spinnerFrames)])+st.muted.Render(" removing "+m.removing.st.Name()))
+		status, short = st.del.Render(spin)+st.muted.Render(" removing "+m.removing.st.Name()), st.del.Render(spin)
 	case m.scanning:
-		right = append(right, st.accent.Render(spinnerFrames[m.frame%len(spinnerFrames)])+st.muted.Render(" scanning"))
+		status, short = st.accent.Render(spin)+st.muted.Render(" scanning"), st.accent.Render(spin)
 	case m.scanErr != nil:
-		right = append(right, st.del.Render("✕ scan failed"))
+		status, short = st.del.Render("✕ scan failed"), st.del.Render("✕")
 	case !m.lastScan.IsZero() && !m.termFocused:
-		right = append(right, st.faint.Render("◌ paused"))
+		status, short = st.faint.Render("◌ paused"), st.faint.Render("◌")
 	case !m.lastScan.IsZero():
-		right = append(right, st.add.Render("●")+st.muted.Render(" live · "+ago(m.now, m.lastScan)))
+		status, short = st.add.Render("●")+st.muted.Render(" live · "+ago(m.now, m.lastScan)), st.add.Render("●")
 	}
-	return spread(left, strings.Join(right, st.faint.Render("  ·  "))+" ", m.width)
+
+	// What the user compares against matters more than the version, the
+	// worktree count (the list shows them) or how fresh the scan is, so
+	// those go first when the line is too narrow.
+	var left, right string
+	for _, v := range [][3]string{
+		{version, count, status},
+		{version, "", status},
+		{version, "", short},
+		{"", "", short},
+	} {
+		left = " " + logo + v[0] + "  " + name + st.faint.Render("  ·  ") + mode
+		parts := slices.DeleteFunc(append(slices.Clone(pills), v[1], v[2]), func(s string) bool { return s == "" })
+		right = strings.Join(parts, st.faint.Render("  ·  ")) + " "
+		if ansi.StringWidth(left)+ansi.StringWidth(right) < m.width {
+			break
+		}
+	}
+	return spread(left, right, m.width)
 }
 
 func (m *Model) footer() string {
@@ -184,6 +216,15 @@ func (m *Model) footer() string {
 		hint := count + m.hints([][2]string{{"enter", "done"}, {"esc", "clear"}})
 		return spread(" "+m.filter.View(), hint+" ", m.width)
 	}
+	if m.searchActive {
+		m.searchInput.SetWidth(max(m.width/2, 20))
+		status := ""
+		if m.searchQuery != "" {
+			status = st.muted.Render(m.searchStatus() + " · ")
+		}
+		hint := status + m.hints([][2]string{{"↑↓", "matches"}, {"enter", "done"}, {"esc", "clear"}})
+		return spread(" "+m.searchInput.View(), hint+" ", m.width)
+	}
 	if g := &m.gitCmd; g.active {
 		label := " " + st.pillAccent.Render(g.target.Name()) + " " + st.accent.Render("git ")
 		hint := m.hints([][2]string{{"enter", "run"}, {"↑", "history"}, {"esc", "cancel"}}) + " "
@@ -191,31 +232,68 @@ func (m *Model) footer() string {
 		return spread(label+g.input.View(), hint, m.width)
 	}
 
-	var pairs [][2]string
+	// pinned hints always show, after as many of pairs as fit: the way to
+	// every other key matters most when the footer is too narrow for them.
+	var pairs, pinned [][2]string
+	everything := [][2]string{{"ctrl+k", "actions"}, {"?", "help"}}
 	r, ok := m.selected()
+	_, _, onFile := m.selectedFile()
 	switch {
 	case m.confirm != nil:
 		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
 	case m.creating != nil:
 		pairs = [][2]string{{"enter", "create"}, {"tab", "next field"}, {"esc", "cancel"}}
-	case m.picker != nil, m.undo != nil, m.quitAsk:
+	case m.picker != nil, m.watchAsk != nil, m.undo != nil, m.quitAsk:
 		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
 	case m.conflicts != nil, m.review != nil:
 		pairs = [][2]string{{"esc", "close"}}
 	case m.showHelp:
 		pairs = [][2]string{{"esc", "close"}}
+	case m.actions != nil:
+		pairs = [][2]string{{"↑↓", "select"}, {"enter", "run"}, {"esc", "close"}}
+	case m.ship != nil:
+		pairs = [][2]string{{"c p r m b", "choose"}, {"esc", "close"}}
+	case m.commit != nil:
+		pairs = [][2]string{{"enter", "commit"}, {"tab", "files / message"}, {"esc", "cancel"}}
+	case m.revert != nil:
+		pairs = [][2]string{{"enter", "put it back"}, {"esc", "keep it"}}
 	case m.overview:
-		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"w", "close"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"↑↓", "select"}, {"enter", "show in list"}, {"a", "agent"}, {"c", "merge here"}, {"w", "close"}, {"r", "refresh"}, {"q", "quit"}}
+		pinned = [][2]string{{"?", "help"}}
 	case m.focus == focusChat:
-		pairs = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"tab", "list"}, {"ctrl+y", "copy reply"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
+		pairs = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"tab", "list"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"pgup/pgdn", "scroll"}, {"ctrl+x", "stop"}, {"ctrl+z", "undo"}, {"ctrl+a", "switch agent"}}
 	case m.focus == focusGroup:
 		pairs = [][2]string{{"enter", "post"}, {"@branch", "to one agent"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}}
+	case m.focus == focusDiff && (onFile || m.wtView != nil):
+		next := "hunk"
+		if m.searchQuery != "" {
+			next = "match"
+		}
+		view := "whole worktree"
+		if m.wtView != nil && !m.wtView.since {
+			view = "last turn"
+		} else if m.wtView != nil {
+			view = "all changes"
+		}
+		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", next}, {"x", "put back"}, {">", "ask agent"}, {"/", "search"}, {"v", view}, {"[ ]", "file"}, {"tab", "list"}}
+		pinned = everything
 	case m.focus == focusDiff:
-		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", "hunk"}, {"[ ]", "file"}, {"enter", "open"}, {"tab", "list"}, {"?", "help"}}
+		// A worktree or group summary: nothing to open, no hunks.
+		pairs = [][2]string{{"↑↓", "scroll"}, {"[ ]", "prev / next"}, {"tab", "list"}}
+		pinned = everything
+	case m.focus == focusList && m.groupSelected():
+		pairs = [][2]string{{"enter", "fold"}, {"t", "group chat"}, {"[ ]", "prev / next"}, {"w", "overview"}, {"n", "new"}, {"P", "planner"}, {"o", "overlaps"}, {"/", "filter"}, {"q", "quit"}}
+		pinned = everything
 	case ok && r.kind == rowFile:
-		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"q", "quit"}}
+		pinned = everything
+	case m.snap != nil && len(m.snap.States) == 1:
+		// Nothing to merge or remove yet: point at making more.
+		pairs = [][2]string{{"n", "new worktree"}, {"P", "planner"}, {"a", "agent"}, {"s", "ship"}, {":", "git"}, {"e", "editor"}, {"f", "folder"}, {"m", "mode"}, {"q", "quit"}}
+		pinned = everything
 	default:
-		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {"w", "overview"}, {":", "git"}, {"n", "new"}, {"c", "merge"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
+		pairs = [][2]string{{"enter", "fold"}, {"a", "agent"}, {"s", "ship"}, {"w", "overview"}, {":", "git"}, {"n", "new"}, {"c", "merge"}, {"e", "editor"}, {"f", "folder"}, {"d", "remove"}, {"o", "overlaps"}, {"m", "mode"}, {"/", "filter"}, {"q", "quit"}}
+		pinned = everything
 	}
 
 	right := ""
@@ -228,6 +306,8 @@ func (m *Model) footer() string {
 			sty, icon = st.del, "✕"
 		}
 		right = sty.Render(icon+" ") + st.text.Render(ansi.Truncate(m.toast.text, m.width/2, "…")) + " "
+	} else if m.searchQuery != "" && m.focus == focusDiff {
+		right = st.accent.Render("/"+m.searchQuery) + st.muted.Render(" "+m.searchStatus()) + st.faint.Render("  esc clears") + " "
 	} else if m.filtering() {
 		var parts []string
 		if m.filterQuery != "" {
@@ -243,6 +323,14 @@ func (m *Model) footer() string {
 	}
 
 	room := m.width - lipgloss.Width(right) - 2
+	tail := ""
+	if len(pinned) > 0 {
+		tail = st.faint.Render("  ") + m.hints(pinned)
+		if lipgloss.Width(" "+tail) > room {
+			tail = ""
+			pairs = append(pinned, pairs...) // too narrow to keep them apart
+		}
+	}
 	left := " "
 	for i, p := range pairs {
 		item := m.hints([][2]string{p})
@@ -250,12 +338,15 @@ func (m *Model) footer() string {
 		if i > 0 {
 			sep = st.faint.Render("  ")
 		}
-		if lipgloss.Width(left+sep+item) > room {
+		if lipgloss.Width(left+sep+item+tail) > room {
 			break
 		}
 		left += sep + item
 	}
-	return spread(left, right, m.width)
+	if left == " " {
+		tail = strings.TrimPrefix(tail, st.faint.Render("  "))
+	}
+	return spread(left+tail, right, m.width)
 }
 
 func (m *Model) hints(pairs [][2]string) string {
@@ -453,6 +544,24 @@ func (m *Model) diffHeader(width int) []string {
 func (m *Model) diffPane(w, h int) string {
 	focused := m.focus == focusDiff
 	inner := w - 2
+	if m.wtView != nil {
+		foot := ""
+		if m.diff.TotalLineCount() > m.diff.Height() {
+			foot = scrollLabel(m.diff.YOffset(), m.diff.TotalLineCount(), m.diff.Height())
+		}
+		if m.parsed.truncated {
+			foot = fmt.Sprintf("first %d lines · %s", maxWorktreeLines, foot)
+		}
+		return m.panel(m.wtView.name, m.wtTitle(), foot, strings.Split(m.diff.View(), "\n"), w, h, focused)
+	}
+	if cr, ok := m.cursorRow(); ok && cr.kind == rowGroup {
+		_, grp := m.groupPlan(cr.grp)
+		foot := ""
+		if m.diff.TotalLineCount() > m.diff.Height() {
+			foot = scrollLabel(m.diff.YOffset(), m.diff.TotalLineCount(), m.diff.Height())
+		}
+		return m.panel(groupTitle(grp), m.st.faint.Render("group"), foot, strings.Split(m.diff.View(), "\n"), w, h, focused)
+	}
 	r, ok := m.selected()
 	if !ok {
 		body := []string{}
@@ -500,6 +609,29 @@ func (m *Model) refreshDiffView() {
 	}
 	_, diffW, paneH := m.layout()
 	inner := diffW - 2
+	if m.wtView != nil {
+		m.refreshWorktreeView(inner, paneH)
+		return
+	}
+	if cr, ok := m.cursorRow(); ok && cr.kind == rowGroup {
+		m.diff.SetWidth(inner)
+		m.diff.SetHeight(max(paneH-2, 1))
+		// Redrawn every second: agents and the chat change all the time.
+		key := m.listGroups[cr.grp].key()
+		want := fmt.Sprintf("group|%s|%d|%t|%p|%p|%d", key, inner, m.dark, m.snap, m.predictions, m.now.Unix())
+		if want == m.renderedFor {
+			return
+		}
+		same := strings.HasPrefix(m.renderedFor, "group|"+key+"|")
+		m.renderedFor = want
+		m.shownKey = ""
+		m.diff.LeftGutterFunc = nil
+		m.diff.SetContentLines(m.groupSummaryLines(cr.grp, inner))
+		if !same {
+			m.diff.GotoTop()
+		}
+		return
+	}
 	r, ok := m.selected()
 	if !ok {
 		return
@@ -510,7 +642,8 @@ func (m *Model) refreshDiffView() {
 
 	if r.kind == rowTree {
 		s := m.snap.States[r.wt]
-		want := fmt.Sprintf("tree|%s|%d|%t|%p|%p|%d", s.Path, inner, m.dark, m.snap, m.predictions, m.now.Unix()/30)
+		// Redrawn every second: it shows the worktree's agent.
+		want := fmt.Sprintf("tree|%s|%d|%t|%p|%p|%d", s.Path, inner, m.dark, m.snap, m.predictions, m.now.Unix())
 		if want == m.renderedFor {
 			return
 		}
@@ -542,7 +675,7 @@ func (m *Model) refreshDiffView() {
 	// Predictions arriving change the highlighted hunks, so they are part of
 	// the key.
 	clash := m.conflictLines(r.wt, f.Path)
-	want := fmt.Sprintf("diff|%s|%d|%t|%d|%v", k, inner, m.dark, len(raw), clash)
+	want := fmt.Sprintf("diff|%s|%d|%t|%d|%v|%s", k, inner, m.dark, len(raw), clash, m.searchQuery)
 	if want == m.renderedFor && raw == m.shownRaw {
 		return
 	}
@@ -569,17 +702,12 @@ func (m *Model) refreshDiffView() {
 		m.diff.SetContentLines(m.placeholder("○", msg, inner))
 	default:
 		m.parsed = pd
-		content, gutter := renderDiff(pd, f.Path, inner, m.st, clash)
-		blank := strings.Repeat(" ", ansi.StringWidth(gutter[0]))
-		m.diff.LeftGutterFunc = func(c viewport.GutterContext) string {
-			if c.Index < len(gutter) && !c.Soft {
-				return gutter[c.Index]
-			}
-			return blank
-		}
+		content, gutter := renderDiff(pd, f.Path, inner, m.st, clash, m.searchQuery)
+		m.diff.LeftGutterFunc = m.diffGutter(gutter)
 		m.diff.SetContentLines(content)
 	}
 	if !sameFile {
+		m.curHunk = -1
 		m.diff.GotoTop()
 		m.diff.SetXOffset(0)
 	}
@@ -637,16 +765,10 @@ func (m *Model) summaryLines(wt, width int) []string {
 	if s.Base != "" && s.Branch != s.Base {
 		ab := st.accent.Render(fmt.Sprintf("↑ %d ahead", s.Ahead)) + st.faint.Render("   ") + st.warn.Render(fmt.Sprintf("↓ %d behind", s.Behind))
 		if s.Behind > 0 {
-			ab += st.faint.Render("  · rebase to catch up")
+			ab += st.faint.Render("  · s to catch up")
 		}
 		out = append(out, label("Commits")+ab)
 	}
-	if c := s.Last; c != nil {
-		line := st.accent.Render(c.Hash) + " " + st.text.Render(c.Subject)
-		out = append(out, label("Last commit")+ansi.Truncate(line, width-18, "…"))
-		out = append(out, label("")+st.faint.Render(c.Author+" · "+ago(m.now, c.When)))
-	}
-
 	if len(s.Files) == 0 {
 		out = append(out, label("Changes")+st.add.Render("✓ ")+st.muted.Render("none"))
 	} else {
@@ -670,6 +792,12 @@ func (m *Model) summaryLines(wt, width int) []string {
 			out = append(out, label("")+st.warn.Render(fmt.Sprintf("● %d not committed yet", uncommitted)))
 		}
 	}
+	if pr, ok := m.prs[s.Branch]; ok && s.Branch != "" {
+		out = append(out, label("Pull request")+prStyle(st, pr).Render(pr.Label())+st.faint.Render("  "+pr.URL))
+	}
+	out = append(out, m.taskLines(s, width)...)
+	out = append(out, m.agentLines(s, width)...)
+	out = append(out, m.commitLines(s, width)...)
 
 	// Files this worktree shares with others: the likely merge conflicts.
 	var shared []string
@@ -714,15 +842,122 @@ func (m *Model) summaryLines(wt, width int) []string {
 	if !s.Main && !s.Bare {
 		acts = append(acts, [2]string{"d", "remove"})
 	}
+	// As many as fit, rather than one cut in half.
+	for len(acts) > 1 && ansi.StringWidth(m.hints(acts)) > width-3 {
+		acts = acts[:len(acts)-1]
+	}
 	out = append(out, "", "  "+m.hints(acts))
 
 	if len(m.snap.States) == 1 {
+		out = append(out, "", "  "+st.bold.Render("Work on several features side by side"))
+		intro := "Each worktree is its own folder and branch, so switching between features never needs stashing, " +
+			"and each can have its own agent working on it while you review the others. grove shows what every " +
+			"worktree changed and warns when two touch the same file."
+		for _, l := range strings.Split(ansi.Wrap(intro, max(width-4, 10), ""), "\n") {
+			out = append(out, "  "+st.muted.Render(l))
+		}
 		out = append(out, "",
-			"  "+st.bold.Render("Work on a second feature side by side"),
-			"  "+st.muted.Render("Each worktree is its own folder and branch, so nothing needs stashing."),
-			"",
-			"    "+m.hints([][2]string{{"n", "create a worktree"}}),
-		)
+			"    "+m.hints([][2]string{{"n", "create a worktree"}, {"P", "plan a feature with the planner"}}))
+	}
+	return out
+}
+
+// summaryLabel starts a line of the worktree summary with a label column.
+func (m *Model) summaryLabel(l string) string {
+	return "  " + m.st.muted.Render(fmt.Sprintf("%-16s", l))
+}
+
+// summaryText wraps text into the summary's value column, at most most
+// lines, the last ending in … when some was left out.
+func (m *Model) summaryText(text string, width, most int, style lipgloss.Style) []string {
+	room := max(width-20, 10)
+	var lines []string
+	for _, l := range renderChatText(text, room, m.st, style) {
+		if strings.TrimSpace(ansi.Strip(l)) != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > most {
+		lines = lines[:most]
+		last := lines[most-1]
+		end := min(ansi.StringWidth(strings.TrimRight(ansi.Strip(last), " ")), room-1)
+		lines[most-1] = ansi.Truncate(last, end, "") + m.st.faint.Render("…")
+	}
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = m.summaryLabel("") + l
+	}
+	return out
+}
+
+// taskLines show the plan task a worktree was made for, if any.
+func (m *Model) taskLines(s git.State, width int) []string {
+	p, t := m.taskFor(s.Path)
+	if t == nil {
+		return nil
+	}
+	st := m.st
+	head := m.taskIcon(t) + " " + st.text.Render(t.Title) + st.faint.Render("  "+string(t.Status)+" · "+p.Title)
+	out := []string{"", m.summaryLabel("Task") + ansi.Truncate(head, max(width-20, 10), "…")}
+	if t.Status == plan.Failed && t.Error != "" {
+		return append(out, m.summaryText(t.Error, width, 2, st.del)...)
+	}
+	return append(out, m.summaryText(t.Brief, width, 2, st.faint)...)
+}
+
+// agentLines show what the worktree's agent is doing and the start of its
+// latest reply.
+func (m *Model) agentLines(s git.State, width int) []string {
+	ses := m.sessionFor(s.Path)
+	if ses == nil {
+		return nil
+	}
+	st := m.st
+	var state string
+	switch {
+	case ses.running:
+		state = st.accent.Render("✦ working")
+	case len(ses.pending) > 0:
+		state = st.warn.Bold(true).Render("✦ needs you")
+	case ses.failed:
+		state = st.del.Render("✦ stopped with an error")
+	case !ses.seen:
+		state = st.add.Render("✦ finished") + st.faint.Render(" · not looked at yet")
+	default:
+		state = st.muted.Render("idle")
+	}
+	out := []string{"", m.summaryLabel("Agent") + st.text.Render(ses.kind.Label()) + st.faint.Render(" · ") + state}
+	for i := len(ses.entries) - 1; i >= 0; i-- {
+		if ses.entries[i].role == roleAgent {
+			return append(out, m.summaryText(ses.entries[i].text, width, 3, st.muted)...)
+		}
+	}
+	return out
+}
+
+// commitLines list the newest commits, marking those not in the base
+// branch yet with ↑.
+func (m *Model) commitLines(s git.State, width int) []string {
+	commits := s.Recent
+	if len(commits) == 0 && s.Last != nil {
+		commits = []git.Commit{*s.Last}
+	}
+	if len(commits) == 0 {
+		return nil
+	}
+	st := m.st
+	out := []string{"", m.summaryLabel("Recent commits")}
+	out[1] = strings.TrimRight(out[1], " ")
+	for i, c := range commits {
+		ahead := s.Base != "" && s.Branch != s.Base && i < s.Ahead
+		mark, hash, subject := "  ", st.faint.Render(c.Hash), st.muted.Render(c.Subject)
+		if ahead {
+			mark, hash, subject = st.accent.Render("↑ "), st.accent.Render(c.Hash), st.text.Render(c.Subject)
+		}
+		when := st.faint.Render(ago(m.now, c.When))
+		left := "    " + mark + hash + " " + subject
+		room := width - ansi.StringWidth(when) - 3
+		out = append(out, spread(ansi.Truncate(left, room, "…"), when+" ", width))
 	}
 	return out
 }

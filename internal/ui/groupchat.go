@@ -150,6 +150,10 @@ func (m *Model) groupContext(p *plan.Plan, t *plan.Task) string {
 		"and whenever you need something from a groupmate. Post when you settle anything they depend on: APIs, types, names, file layout, decisions. " +
 		"Keep messages short and specific. The user can read and post in the chat too; their name is \"you\". " +
 		"grove itself posts as \"grove\", for example when your worktree starts conflicting with another.\n")
+	if watched(p) {
+		b.WriteString("The planner is watching this plan for the user and reads the chat; it posts as \"planner\". " +
+			"Post to everyone when you need a decision from it.\n")
+	}
 	return b.String()
 }
 
@@ -206,7 +210,8 @@ func (m *Model) onGroupsRead(msg groupsReadMsg) tea.Cmd {
 		}
 		g.msgs, g.unread = r.msgs, r.unread
 	}
-	return m.wakeGroups()
+	m.queueGroups()
+	return tea.Batch(m.wakeGroups(), m.orchestrate())
 }
 
 // wakeGroups starts a turn for each idle grouped agent with messages
@@ -231,7 +236,9 @@ func (m *Model) wakeGroups() tea.Cmd {
 				if g.wakeups >= m.cfg.Planner.Wakeups() {
 					if !g.paused {
 						g.paused = true
-						cmds = append(cmds, m.notify(fmt.Sprintf("⇄ %s: paused waking agents after %d messages in a row; post in the group chat (G) to go on", grp.Name, g.wakeups), toastInfo))
+						cmds = append(cmds,
+							m.notify(fmt.Sprintf("%s: paused waking agents after %d messages in a row; post in the group chat (t) to go on", groupTitle(grp), g.wakeups), toastInfo),
+							m.alert(groupTitle(grp)+": the group chat waits for you"))
 					}
 					continue
 				}
@@ -251,13 +258,18 @@ func (m *Model) openGroupChat(path string) tea.Cmd {
 	if t == nil || t.Group == "" {
 		return m.notify("That worktree isn't part of a group", toastInfo)
 	}
+	return m.openGroup(p.ID, t.Group)
+}
+
+// openGroup shows a plan group's chat.
+func (m *Model) openGroup(planID, groupID string) tea.Cmd {
 	if m.store == nil {
 		return nil
 	}
 	ta := newChatInput()
 	ta.Placeholder = "message the group; @branch to address one agent…"
 	ta.SetStyles(chatInputStyles(m.dark))
-	m.groupChat = &groupChat{plan: p.ID, group: t.Group, input: ta, view: viewport.New(), follow: true}
+	m.groupChat = &groupChat{plan: planID, group: groupID, input: ta, view: viewport.New(), follow: true}
 	m.focus = focusGroup
 	return tea.Batch(m.groupChat.input.Focus(), m.pollGroups())
 }
@@ -307,6 +319,7 @@ func (m *Model) postToGroup(text string) tea.Cmd {
 	if !ok {
 		return nil
 	}
+	m.userActed()
 	msg := group.Message{From: group.User, Text: text}
 	if name, rest, found := strings.Cut(text, " "); found && strings.HasPrefix(name, "@") {
 		for _, t := range p.Members(gc.group) {
@@ -394,7 +407,7 @@ func (m *Model) groupPane(w, h int) string {
 		gc.view.GotoBottom()
 	}
 	body := append(strings.Split(gc.view.View(), "\n"), bottom...)
-	return m.panel("⇄ "+g.Name+" · "+p.Title, st.faint.Render(plural(len(p.Members(gc.group)), "agent")), "", body, w, h, m.focus == focusGroup)
+	return m.panel(groupTitle(*g)+" · "+p.Title, st.faint.Render(plural(len(p.Members(gc.group)), "agent")), "", body, w, h, m.focus == focusGroup)
 }
 
 // groveExecutable is the program agents start for the group tools.

@@ -40,17 +40,21 @@ const (
 
 // Plan is one request turned into tasks.
 type Plan struct {
-	ID      string    `json:"id"`
-	Title   string    `json:"title"`
-	Request string    `json:"request"`          // what the user asked for, as typed
-	Source  string    `json:"source,omitempty"` // where it came from, e.g. "jira:SHOP-12"
-	Base    string    `json:"base,omitempty"`   // branch new worktrees start from
-	Agent   string    `json:"agent,omitempty"`  // "claude" or "codex", chosen when the plan starts
-	Status  Status    `json:"status"`
-	Created time.Time `json:"created"`
-	Updated time.Time `json:"updated"`
-	Groups  []Group   `json:"groups,omitempty"`
-	Tasks   []Task    `json:"tasks"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Request string `json:"request"`          // what the user asked for, as typed
+	Source  string `json:"source,omitempty"` // where it came from, e.g. "jira:SHOP-12"
+	Base    string `json:"base,omitempty"`   // branch new worktrees start from
+	Agent   string `json:"agent,omitempty"`  // "claude" or "codex", chosen when the plan starts
+	// Orchestrated plans are watched by the planner, which approves their
+	// agents' commands, answers their questions and follows their group
+	// chats; otherwise all of that waits for the user.
+	Orchestrated bool      `json:"orchestrated,omitempty"`
+	Status       Status    `json:"status"`
+	Created      time.Time `json:"created"`
+	Updated      time.Time `json:"updated"`
+	Groups       []Group   `json:"groups,omitempty"`
+	Tasks        []Task    `json:"tasks"`
 }
 
 // Group is a set of tasks whose agents share a group chat and may read
@@ -58,6 +62,7 @@ type Plan struct {
 type Group struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	Icon string `json:"icon,omitempty"` // an emoji shown before the name, if any
 }
 
 // Task is one piece of work for one agent in one worktree.
@@ -131,6 +136,7 @@ type proposal struct {
 	Groups []struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
+		Icon string `json:"icon"`
 	} `json:"groups"`
 	Tasks []struct {
 		ID     string `json:"id"`
@@ -166,7 +172,7 @@ func FromReply(reply, request string, now time.Time) (*Plan, error) {
 		Updated: now,
 	}
 	for _, g := range pr.Groups {
-		p.Groups = append(p.Groups, Group{ID: strings.TrimSpace(g.ID), Name: strings.TrimSpace(g.Name)})
+		p.Groups = append(p.Groups, Group{ID: strings.TrimSpace(g.ID), Name: strings.TrimSpace(g.Name), Icon: strings.TrimSpace(g.Icon)})
 	}
 	for i, t := range pr.Tasks {
 		id := strings.TrimSpace(t.ID)

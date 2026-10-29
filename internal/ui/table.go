@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"regexp"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -25,8 +26,11 @@ func isTableRow(l string) bool {
 	return strings.HasPrefix(strings.TrimSpace(l), "|")
 }
 
-// tableCells splits a row into its cells, without Markdown emphasis or
-// code marks, which would only take up room in a terminal.
+// cellLink is a Markdown link inside a table cell, shown as its text.
+var cellLink = regexp.MustCompile(`\[([^\]]+)\]\([^)\s]+\)`)
+
+// tableCells splits a row into its cells, without Markdown emphasis, code
+// marks or link targets, which would only take up room in a terminal.
 func tableCells(l string) []string {
 	l = strings.TrimSpace(l)
 	l = strings.TrimPrefix(l, "|")
@@ -37,7 +41,8 @@ func tableCells(l string) []string {
 	clean := strings.NewReplacer("\x00", "|", "**", "", "`", "")
 	var cells []string
 	for _, c := range strings.Split(l, "|") {
-		cells = append(cells, strings.TrimSpace(clean.Replace(c)))
+		c = cellLink.ReplaceAllString(clean.Replace(c), "$1")
+		cells = append(cells, strings.TrimSpace(c))
 	}
 	return cells
 }
@@ -67,8 +72,9 @@ func tableAligns(l string) []byte {
 }
 
 // renderTable draws a Markdown table (as measured by tableLen) in columns
-// that fit width, wrapping cells that don't. When even that won't fit,
-// each row becomes a short list of "header: value" lines.
+// that fit width, wrapping cells between words. When that can't fit
+// without splitting a word, each row becomes a short list of
+// "header: value" lines.
 func renderTable(lines []string, width int, st styles, style lipgloss.Style) []string {
 	header, aligns := tableCells(lines[0]), tableAligns(lines[1])
 	var body [][]string
@@ -86,9 +92,26 @@ func renderTable(lines []string, width int, st styles, style lipgloss.Style) []s
 		return ""
 	}
 
+	// Columns start as wide as their widest cell and can narrow to their
+	// longest word.
+	widths, words := make([]int, cols), make([]int, cols)
+	for _, r := range append([][]string{header}, body...) {
+		for j := range cols {
+			widths[j] = max(widths[j], ansi.StringWidth(cell(r, j)), 1)
+			for _, w := range strings.FieldsFunc(cell(r, j), func(c rune) bool { return c == ' ' || c == '/' || c == '-' }) {
+				words[j] = max(words[j], ansi.StringWidth(w)+1) // +1 for the / or - kept at a line end
+			}
+		}
+	}
+	least := 0
+	for j := range cols {
+		words[j] = min(words[j], widths[j])
+		least += words[j]
+	}
+
 	const sep = " │ "
 	room := width - len([]rune(sep))*(cols-1)
-	if room < cols*4 {
+	if room < least {
 		var out []string
 		for i, r := range body {
 			if i > 0 {
@@ -96,37 +119,41 @@ func renderTable(lines []string, width int, st styles, style lipgloss.Style) []s
 			}
 			for j := range cols {
 				line := style.Bold(true).Render(cell(header, j)+": ") + style.Render(cell(r, j))
-				out = append(out, strings.Split(ansi.Wrap(line, width, ""), "\n")...)
+				for k, l := range strings.Split(ansi.Wrap(line, max(width-2, 1), "/"), "\n") {
+					if k > 0 {
+						l = "  " + l // under the value, clear of the header
+					}
+					out = append(out, l)
+				}
 			}
 		}
 		return out
 	}
 
-	widths := make([]int, cols)
-	for _, r := range append([][]string{header}, body...) {
-		for j := range cols {
-			widths[j] = max(widths[j], ansi.StringWidth(cell(r, j)), 1)
-		}
-	}
-	// Narrow the widest column until the table fits.
+	// Narrow the widest column that is still wider than its longest word
+	// until the table fits, so no word is split.
 	for total := sum(widths); total > room; total-- {
-		w := 0
+		w := -1
 		for j := range widths {
-			if widths[j] > widths[w] {
+			if widths[j] > words[j] && (w < 0 || widths[j] > widths[w]) {
 				w = j
 			}
 		}
 		widths[w]--
 	}
 
-	var out []string
-	row := func(r []string, s lipgloss.Style) {
+	wrap := func(r []string) ([][]string, int) {
 		wrapped := make([][]string, cols)
 		height := 1
 		for j := range cols {
-			wrapped[j] = strings.Split(ansi.Wrap(cell(r, j), widths[j], ""), "\n")
+			wrapped[j] = strings.Split(ansi.Wrap(cell(r, j), widths[j], "/"), "\n")
 			height = max(height, len(wrapped[j]))
 		}
+		return wrapped, height
+	}
+	var out []string
+	row := func(r []string, s lipgloss.Style) {
+		wrapped, height := wrap(r)
 		for k := range height {
 			var b strings.Builder
 			for j := range cols {
@@ -146,13 +173,25 @@ func renderTable(lines []string, width int, st styles, style lipgloss.Style) []s
 			out = append(out, b.String())
 		}
 	}
-	row(header, style.Bold(true))
 	rule := make([]string, cols)
 	for j, w := range widths {
 		rule[j] = strings.Repeat("─", w)
 	}
-	out = append(out, st.faint.Render(strings.Join(rule, "─┼─")))
+	line := st.faint.Render(strings.Join(rule, "─┼─"))
+	// Once a cell takes more than one line, a rule between rows shows
+	// where each row ends.
+	ruled := false
 	for _, r := range body {
+		if _, h := wrap(r); h > 1 {
+			ruled = true
+		}
+	}
+	row(header, style.Bold(true))
+	out = append(out, line)
+	for i, r := range body {
+		if ruled && i > 0 {
+			out = append(out, line)
+		}
 		row(r, style)
 	}
 	return out

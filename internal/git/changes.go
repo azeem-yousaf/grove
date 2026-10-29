@@ -113,8 +113,9 @@ type State struct {
 	Files     []FileChange
 	Added     int
 	Deleted   int
-	Last      *Commit
-	Truncated bool // too many untracked files; the list is partial
+	Last      *Commit  // Recent[0]
+	Recent    []Commit // the newest few commits on HEAD, newest first
+	Truncated bool     // too many untracked files; the list is partial
 	Err       error
 }
 
@@ -154,7 +155,10 @@ func Inspect(ctx context.Context, wt Worktree, base string, mode Mode) State {
 	}()
 	go func() {
 		defer wg.Done()
-		st.Last = lastCommit(ctx, wt.Path)
+		st.Recent = recentCommits(ctx, wt.Path, recentCount)
+		if len(st.Recent) > 0 {
+			st.Last = &st.Recent[0]
+		}
 	}()
 
 	hasHead := wt.Head != "" && refExists(ctx, wt.Path, "HEAD")
@@ -393,15 +397,25 @@ func countLines(path string) (int, bool) {
 	return lines, false
 }
 
-func lastCommit(ctx context.Context, dir string) *Commit {
-	out, err := run(ctx, dir, "log", "-1", "--format=%h%x00%s%x00%an%x00%ct")
+// recentCount is how many commits State.Recent keeps.
+const recentCount = 5
+
+// recentCommits lists the newest n commits on HEAD, newest first. Each
+// record ends in NUL and its fields are split by 0x1f, which no subject or
+// name contains.
+func recentCommits(ctx context.Context, dir string, n int) []Commit {
+	out, err := run(ctx, dir, "log", "-"+strconv.Itoa(n), "--format=%h%x1f%s%x1f%an%x1f%ct%x00")
 	if err != nil {
 		return nil
 	}
-	f := strings.Split(strings.TrimSpace(string(out)), "\x00")
-	if len(f) != 4 {
-		return nil
+	var commits []Commit
+	for rec := range strings.SplitSeq(string(out), "\x00") {
+		f := strings.Split(strings.TrimLeft(rec, "\r\n"), "\x1f")
+		if len(f) != 4 {
+			continue
+		}
+		secs, _ := strconv.ParseInt(strings.TrimSpace(f[3]), 10, 64)
+		commits = append(commits, Commit{Hash: f[0], Subject: f[1], Author: f[2], When: time.Unix(secs, 0)})
 	}
-	secs, _ := strconv.ParseInt(f[3], 10, 64)
-	return &Commit{Hash: f[0], Subject: f[1], Author: f[2], When: time.Unix(secs, 0)}
+	return commits
 }

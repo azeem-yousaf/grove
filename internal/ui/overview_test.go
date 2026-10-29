@@ -40,7 +40,7 @@ func TestDashboardKeepsListClicksAligned(t *testing.T) {
 	}
 
 	// Clicking the summary opens the overview.
-	m.Update(tea.MouseClickMsg{X: 8, Y: 2, Button: tea.MouseLeft})
+	m.Update(tea.MouseClickMsg{X: 8, Y: 1, Button: tea.MouseLeft})
 	if !m.overview {
 		t.Error("clicking the summary should open the overview")
 	}

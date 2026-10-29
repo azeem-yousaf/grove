@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -88,8 +89,9 @@ func TestAgentPicker(t *testing.T) {
 	if m.picker == nil {
 		t.Fatal("with both installed and nothing chosen, a should ask")
 	}
-	if out := plain(m); !strings.Contains(out, "Choose an AI assistant") || !strings.Contains(out, "Remember my choice") {
-		t.Errorf("picker not shown:\n%s", out)
+	// Remembering is off until asked for.
+	if out := plain(m); !strings.Contains(out, "Choose an AI assistant") || !strings.Contains(out, "[ ] Remember my choice") {
+		t.Errorf("picker not shown, or remembering is on:\n%s", out)
 	}
 	_, cmd := m.Update(tea.KeyPressMsg{Code: '2', Text: "2"})
 	pump(t, m, cmd)
@@ -97,12 +99,25 @@ func TestAgentPicker(t *testing.T) {
 	if m.picker != nil || s == nil || s.kind != agent.Codex || m.focus != focusChat {
 		t.Fatalf("after choosing: picker=%v session=%+v focus=%v", m.picker, s, m.focus)
 	}
+	if m.cfg.AI.Agent != "" || len(saved) != 0 {
+		t.Errorf("choice remembered without asking: cfg=%q saved=%v", m.cfg.AI.Agent, saved)
+	}
+
+	// So the next worktree asks again; this time remember it.
+	press(m, "tab", "]", "a")
+	if m.picker == nil {
+		t.Fatal("an unremembered choice should be asked again")
+	}
+	press(m, "space")
+	_, cmd = m.Update(tea.KeyPressMsg{Code: '2', Text: "2"})
+	pump(t, m, cmd)
 	if m.cfg.AI.Agent != "codex" || len(saved) != 1 || saved[0] != "codex" {
 		t.Errorf("choice not remembered: cfg=%q saved=%v", m.cfg.AI.Agent, saved)
 	}
+	s = m.chatSession()
 
 	// Another worktree uses the remembered agent without asking.
-	press(m, "tab", "]", "a")
+	press(m, "tab", "[", "[", "a")
 	if m.picker != nil || m.chatSession().kind != agent.Codex || m.chatSession() == s {
 		t.Error("the remembered agent should be used for other worktrees")
 	}
@@ -551,6 +566,21 @@ func TestChatMarkdown(t *testing.T) {
 	if got := render("**Note** this", 40); got != "Note this" {
 		t.Errorf("bold start = %q", got)
 	}
+	// Italics, but not snake_case or a lone star; links keep a web
+	// address and drop a file path.
+	if got := render("*really* _sure_ my_var_name a * b", 80); got != "really sure my_var_name a * b" {
+		t.Errorf("italics = %q", got)
+	}
+	if got := render("see [the docs](https://x.dev/d) and [login.go](internal/login.go:12)", 80); got != "see the docs (https://x.dev/d) and login.go" {
+		t.Errorf("links = %q", got)
+	}
+	// Quotes keep their bar on every line; task items get a box.
+	if got := render("> a quote that wraps here", 16); got != "│ a quote that\n│ wraps here" {
+		t.Errorf("quote = %q", got)
+	}
+	if got := render("- [ ] todo\n- [x] done", 40); got != "○ todo\n✓ done" {
+		t.Errorf("tasks = %q", got)
+	}
 }
 
 func TestChatTable(t *testing.T) {
@@ -592,9 +622,65 @@ func TestChatTable(t *testing.T) {
 		t.Errorf("narrow table should wrap the cell within its column:\n%s", joined)
 	}
 
+	// A wrapped row is followed by a rule, so rows are told apart.
+	if !slices.Contains(narrow, "─────┼─"+strings.Repeat("─", 15)+"─┼─"+strings.Repeat("─", 5)) {
+		t.Errorf("narrow table should rule between rows:\n%s", strings.Join(narrow, "\n"))
+	}
+
 	// Too narrow for columns: header: value lines.
 	if joined := strings.Join(render(12), "\n"); !strings.Contains(joined, "File: a.go") || !strings.Contains(joined, "Lines: 7") {
 		t.Errorf("tiny table should list header: value:\n%s", joined)
+	}
+
+	// Paths break after a /, and a table that would split a word is
+	// listed instead.
+	paths := "| File | Lines |\n|---|---|\n| internal/auth/login_test.go | 40 |"
+	var lines []string
+	for _, l := range renderChatText(paths, 20, st, st.text) {
+		lines = append(lines, strings.TrimRight(ansi.Strip(l), " "))
+	}
+	if got := strings.Join(lines, "\n"); got != "File: internal/\n  auth/login_test.go\nLines: 40" {
+		t.Errorf("table that won't fit =\n%s", got)
+	}
+}
+
+func TestChatCodeWraps(t *testing.T) {
+	st := newStyles(true)
+	render := func(body string, width int) string {
+		var out []string
+		for _, l := range renderChatText(body, width, st, st.text) {
+			if ansi.StringWidth(l) > width {
+				t.Errorf("line wider than %d: %q", width, ansi.Strip(l))
+			}
+			out = append(out, strings.TrimRight(ansi.Strip(l), " "))
+		}
+		return strings.Join(out, "\n")
+	}
+	// A long line wraps between words; the rest keeps its indentation
+	// behind a ↪, and short lines are left alone.
+	body := "```go\nfunc main() {\n\tfmt.Println(\"hello, a long line of code\")\n}\n```"
+	want := "  func main() {\n      fmt.Println(\"hello,\n↪     a long line of\n↪     code\")\n  }"
+	if got := render(body, 26); got != want {
+		t.Errorf("code =\n%s\nwant\n%s", got, want)
+	}
+	// A word longer than the line is broken, and deep indentation that
+	// leaves no room is given up rather than overflowing.
+	got := render("```\n"+strings.Repeat(" ", 16)+"abcdefghijklmnopqrstuvwxyz\n```", 20)
+	for _, l := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "↪ ") {
+			t.Errorf("every line should start in the gutter: %q", l)
+		}
+	}
+	if joined := strings.NewReplacer("\n", "", "↪", "", " ", "").Replace(got); joined != "abcdefghijklmnopqrstuvwxyz" {
+		t.Errorf("nothing should be lost: %q", got)
+	}
+	// Copying the lines puts a wrapped line back together.
+	var lines []string
+	for _, l := range renderChatText(body, 26, st, st.text) {
+		lines = append(lines, strings.Repeat(" ", chatGutter)+l)
+	}
+	if got := selectedChatText(lines); got != "  func main() {\n      fmt.Println(\"hello, a long line of code\")\n  }" {
+		t.Errorf("copied code = %q", got)
 	}
 }
 

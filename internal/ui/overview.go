@@ -83,82 +83,74 @@ func conflictedFiles(s git.State) int {
 // when the pane is too short to spare it.
 func (m *Model) dashHeight() int {
 	_, _, paneH := m.layout()
-	if m.snap == nil || paneH < 18 {
+	if m.snap == nil || paneH < 14 {
 		return 0
 	}
-	return 5
+	return 1
 }
 
-// dashboardPane is the summary of every worktree above the list.
-func (m *Model) dashboardPane(w, h int) string {
+// dashboardPane is the one-line summary of every worktree above the list:
+// what needs the user first, then what is going on, then the counts, as
+// many as fit. The header already shows how many worktrees there are and
+// the overlap and conflict counts, so they aren't repeated here.
+func (m *Model) dashboardPane(w, _ int) string {
 	st := m.st
 	o := m.overviewStats()
-	sep := st.faint.Render(" · ")
 
-	counts := []string{st.text.Render(plural(o.worktrees, "worktree"))}
-	if o.active > 0 {
-		counts = append(counts, st.accent.Render(fmt.Sprintf("● %d active", o.active)))
-	}
-	if o.clean > 0 {
-		counts = append(counts, st.add.Render(fmt.Sprintf("○ %d clean", o.clean)))
-	}
-	if o.broken > 0 {
-		counts = append(counts, st.del.Render(fmt.Sprintf("✕ %d unreadable", o.broken)))
-	}
-
-	var work []string
-	if p := m.activePlan(); p != nil {
-		c := planCounts(p)
-		work = append(work, st.accent.Render(fmt.Sprintf("▸ %s %d/%d", ansi.Truncate(p.Title, 18, "…"), c[plan.Finished], len(p.Tasks))))
-	}
-	if o.ahead > 0 {
-		work = append(work, st.accent.Render(fmt.Sprintf("↑%d ahead", o.ahead)))
-	}
-	if o.behind > 0 {
-		work = append(work, st.warn.Render(fmt.Sprintf("↓%d behind", o.behind)))
-	}
-	if o.working > 0 {
-		work = append(work, st.accent.Render(fmt.Sprintf("✦ %d working", o.working)))
-	}
-	if o.done > 0 {
-		work = append(work, st.add.Render(fmt.Sprintf("✦ %d done", o.done)))
-	}
-	if len(work) == 0 {
-		work = append(work, st.faint.Render("no commits ahead, no agents working"))
-	}
-
-	attention := m.attentionCounts(o)
-	if len(attention) == 0 {
-		attention = []string{st.add.Render("✓ nothing needs you")}
-	}
-	body := []string{
-		" " + strings.Join(counts, sep),
-		" " + strings.Join(work, sep),
-		" " + strings.Join(attention, sep),
-	}
-	return m.panel("Overview", "", "w more", body, w, h, false)
-}
-
-// attentionCounts are the short "needs you" figures for the summary.
-func (m *Model) attentionCounts(o overviewStats) []string {
-	st := m.st
-	var out []string
+	var items []string
 	if o.conflicted > 0 {
-		out = append(out, st.del.Bold(true).Render(fmt.Sprintf("✕ %s in a merge", plural(o.conflicted, "worktree"))))
+		items = append(items, st.del.Bold(true).Render(fmt.Sprintf("✕ %s in a merge", plural(o.conflicted, "worktree"))))
 	}
 	if o.waiting > 0 {
-		out = append(out, st.warn.Bold(true).Render(fmt.Sprintf("✦ %s waiting", plural(o.waiting, "agent"))))
+		items = append(items, st.warn.Bold(true).Render(fmt.Sprintf("✦ %s waiting", plural(o.waiting, "agent"))))
 	}
 	if o.failed > 0 {
-		out = append(out, st.del.Render(fmt.Sprintf("✦ %s failed", plural(o.failed, "agent"))))
+		items = append(items, st.del.Render(fmt.Sprintf("✦ %s failed", plural(o.failed, "agent"))))
 	}
-	if o.conflicts > 0 {
-		out = append(out, st.conflict.Render(fmt.Sprintf("✗ %s", plural(o.conflicts, "conflict"))))
+	if len(items) == 0 && o.conflicts == 0 && o.overlaps == 0 {
+		items = append(items, st.add.Render("✓ nothing needs you"))
 	}
-	if o.overlaps > 0 {
-		out = append(out, st.warn.Render(fmt.Sprintf("⚠ %s", plural(o.overlaps, "overlap"))))
+	if p := m.activePlan(); p != nil {
+		c := planCounts(p)
+		items = append(items, st.accent.Render(fmt.Sprintf("▸ %s %d/%d", ansi.Truncate(p.Title, 18, "…"), c[plan.Finished], len(p.Tasks))))
 	}
-	return out
+	if o.working > 0 {
+		items = append(items, st.accent.Render(fmt.Sprintf("✦ %d working", o.working)))
+	}
+	if o.done > 0 {
+		items = append(items, st.add.Render(fmt.Sprintf("✦ %d done", o.done)))
+	}
+	if o.active > 0 {
+		items = append(items, st.accent.Render(fmt.Sprintf("● %d active", o.active)))
+	}
+	if o.clean > 0 {
+		items = append(items, st.muted.Render(fmt.Sprintf("○ %d clean", o.clean)))
+	}
+	if o.broken > 0 {
+		items = append(items, st.del.Render(fmt.Sprintf("✕ %d unreadable", o.broken)))
+	}
+	if o.ahead > 0 {
+		items = append(items, st.accent.Render(fmt.Sprintf("↑%d ahead", o.ahead)))
+	}
+	if o.behind > 0 {
+		items = append(items, st.warn.Render(fmt.Sprintf("↓%d behind", o.behind)))
+	}
+
+	more := st.faint.Render("w overview ")
+	room := w - ansi.StringWidth(more) - 2
+	sep := st.faint.Render(" · ")
+	line := ""
+	for _, it := range items {
+		next := it
+		if line != "" {
+			next = line + sep + it
+		}
+		if ansi.StringWidth(next) > room {
+			break
+		}
+		line = next
+	}
+	return spread(" "+line, more, w)
 }
 
 // attention is one thing in the overview that needs the user.
@@ -300,7 +292,7 @@ func (m *Model) ovSelect() {
 		return
 	}
 	path := m.snap.States[m.ovIndex()].Path
-	delete(m.collapsed, path)
+	m.unfold(path)
 	m.lastSel = path
 	m.focus = focusList
 	m.rebuildRows()

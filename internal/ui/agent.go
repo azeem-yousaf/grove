@@ -44,6 +44,7 @@ type session struct {
 	lastReply strings.Builder
 
 	checkpoint string          // tree of the worktree before the agent's first turn
+	turnTree   string          // tree of the worktree before its latest turn (v shows the change since)
 	touched    map[string]bool // repo-relative files the agent changed
 	allow      []string        // permission rules the user approved
 	pending    []pendingAction // approvals and suggested commands, oldest first
@@ -91,6 +92,7 @@ type (
 		planner    bool // for the planner rather than path's worktree agent
 		ev         agent.Event
 		checkpoint string
+		turnTree   string // taken before a later turn, for "since the last turn"
 		err        error
 		closed     bool
 	}
@@ -139,7 +141,7 @@ func (m *Model) withAgent(then func(agent.Kind) tea.Cmd) tea.Cmd {
 	if len(installed) == 1 {
 		return then(installed[0])
 	}
-	m.picker = &picker{kinds: installed, remember: true, then: then}
+	m.picker = &picker{kinds: installed, then: then}
 	return nil
 }
 
@@ -149,7 +151,7 @@ func (m *Model) chooseAgent(current agent.Kind, then func(agent.Kind) tea.Cmd) t
 	if len(installed) < 2 {
 		return m.notify("Only "+current.Label()+" is installed", toastInfo)
 	}
-	p := &picker{kinds: installed, remember: true, then: then}
+	p := &picker{kinds: installed, then: then}
 	for i, k := range installed {
 		if k == current {
 			p.cursor = i
@@ -262,6 +264,8 @@ func (m *Model) newSession(path, name string, k agent.Kind) *session {
 }
 
 func (m *Model) showChat(s *session) tea.Cmd {
+	draft := m.chatDraft
+	m.chatDraft = ""
 	m.chatPath, m.chatPlanner = s.path, s.planner
 	m.focus = focusChat
 	s.seen = true
@@ -271,7 +275,8 @@ func (m *Model) showChat(s *session) tea.Cmd {
 	if s.planner {
 		m.chatInput.Placeholder = "describe what to build, or name a Jira issue or epic…"
 	}
-	m.chatInput.SetValue("")
+	m.chatInput.SetValue(draft)
+	m.chatInput.MoveToEnd()
 	return tea.Batch(m.chatInput.Focus(), m.warm(s))
 }
 
@@ -369,6 +374,7 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 			return nil
 		}
 		m.chatInput.SetValue("")
+		m.userActed()
 		return m.send(s, text)
 	}
 	var cmd tea.Cmd
@@ -484,6 +490,7 @@ func (m *Model) setModel(s *session, model string) tea.Cmd {
 // onPendingKey handles the approval or suggested-command card.
 func (m *Model) onPendingKey(s *session, key string) tea.Cmd {
 	a := s.pending[0]
+	m.userActed()
 	next := func() tea.Cmd {
 		s.pending = s.pending[1:]
 		return m.afterPending(s)
@@ -586,7 +593,8 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	run := m.runAgent
 	go func() {
 		defer close(ch)
-		if needCheckpoint {
+		switch {
+		case needCheckpoint:
 			tree, err := git.Checkpoint(ctx, path)
 			if err == nil {
 				// Pinned so gc keeps it for undo after grove restarts. Undo
@@ -594,6 +602,12 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				_ = git.KeepCheckpoint(ctx, path, path, tree)
 			}
 			ch <- agentMsg{path: path, planner: planner, checkpoint: tree, err: err}
+		case !planner:
+			// Cheap: it starts from the real index, so only what changed
+			// is hashed. Without it, v can only show all the changes.
+			if tree, err := git.Checkpoint(ctx, path); err == nil {
+				ch <- agentMsg{path: path, turnTree: tree}
+			}
 		}
 		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, ev: ev} })
 	}()
@@ -650,11 +664,15 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 		return nil
 	}
 	next := listen(s.events)
+	if msg.turnTree != "" {
+		s.turnTree = msg.turnTree
+		return next
+	}
 	if msg.checkpoint != "" || msg.err != nil {
 		if msg.err != nil {
 			s.entries = append(s.entries, chatEntry{roleNote, "Couldn't take a checkpoint, so undo won't be available: " + msg.err.Error()})
 		}
-		s.checkpoint = msg.checkpoint
+		s.checkpoint, s.turnTree = msg.checkpoint, msg.checkpoint
 		return next
 	}
 	ev := msg.ev
@@ -725,20 +743,22 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	s.seen = viewing
 	cmds := []tea.Cmd{m.startScan()}
 	if s.planner {
-		cmds = append(cmds, m.onPlannerReply(s, reply))
+		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(reply), m.orchestrate())
 	} else {
 		cmds = append(cmds, m.onTaskTurn(s, ev))
 	}
-	if !viewing {
-		text, kind := "✦ "+s.name+": "+s.kind.Label()+" finished", toastOK
-		switch {
-		case ev.Err != nil:
-			text, kind = "✦ "+s.name+": "+ev.Err.Error(), toastErr
-		case len(s.pending) > 0:
-			text, kind = "✦ "+s.name+" needs you", toastInfo
-		}
-		cmds = append(cmds, m.notify(text, kind))
+	text, kind := s.name+": "+s.kind.Label()+" finished", toastOK
+	switch {
+	case ev.Err != nil:
+		text, kind = s.name+": "+ev.Err.Error(), toastErr
+	case len(s.pending) > 0:
+		text, kind = s.name+" needs you", toastInfo
 	}
+	if !viewing {
+		cmds = append(cmds, m.notify("✦ "+text, kind))
+	}
+	// Even the chat on screen goes unseen while the terminal isn't focused.
+	cmds = append(cmds, m.alert(text))
 	return tea.Batch(cmds...)
 }
 
@@ -1047,6 +1067,9 @@ func (m *Model) chatBottom(s *session, width int) []string {
 	if len(s.pending) > 0 {
 		a := s.pending[0]
 		head, keys := st.warn.Bold(true).Render(" "+s.kind.Label()+" wants to run"), [][2]string{{"enter", "allow"}, {"esc", "deny"}}
+		if a.kind == pendingApproval && m.watchedBy(s.path) && !m.orch.paused {
+			head += st.faint.Render("  · the planner will decide unless you do")
+		}
 		if a.kind == pendingCommand {
 			head, keys = st.accent.Bold(true).Render(" Suggested command"), [][2]string{{"enter", "run"}, {"e", "edit"}, {"esc", "skip"}}
 		}
@@ -1062,12 +1085,12 @@ func (m *Model) chatBottom(s *session, width int) []string {
 		}
 	}
 	m.chatInput.SetWidth(max(width-4, 10))
-	hint := [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"ctrl+z", "undo all"}, {"/model", "model"}}
+	hint := [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"tab", "list"}, {"ctrl+z", "undo all"}, {"/model", "model"}}
 	switch {
 	case s.running:
 		hint = [][2]string{{"ctrl+x", "stop"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"/model", "model"}}
 	case s.planner:
-		hint = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+o", "review plan"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"/model", "model"}}
+		hint = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+o", "review plan"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"tab", "list"}, {"/model", "model"}}
 	}
 	out := []string{rule}
 	for i, l := range strings.Split(m.chatInput.View(), "\n") {
@@ -1165,7 +1188,7 @@ func renderChatText(body string, width int, st styles, style lipgloss.Style) []s
 			if lang == "grove-run" {
 				code = st.warn.Bold(true)
 			}
-			out = append(out, code.Render(ansi.Truncate("  "+expandTabs(l), width, "…")))
+			out = append(out, codeLines(expandTabs(l), width, st, code)...)
 			continue
 		}
 		if n := tableLen(lines[i:]); n > 0 {
@@ -1181,6 +1204,36 @@ func renderChatText(body string, width int, st styles, style lipgloss.Style) []s
 	}
 	return out
 }
+
+// codeLines wraps one line of a code block to width, between words where
+// it can. The line keeps its indentation, and the lines it continues onto
+// start at the same place with a ↪ in the gutter, so they can't be read
+// as lines of their own (and copying joins them back, see
+// selectedChatText).
+func codeLines(l string, width int, st styles, code lipgloss.Style) []string {
+	if ansi.StringWidth(l) <= width-2 {
+		return []string{"  " + code.Render(l)}
+	}
+	body := strings.TrimLeft(l, " ")
+	indent := l[:len(l)-len(body)]
+	room := width - 2 - len(indent)
+	if room < 10 {
+		indent, room = "", width-2 // indented too deeply to keep it
+	}
+	parts := strings.Split(ansi.Wrap(body, max(room, 1), ""), "\n")
+	out := make([]string, len(parts))
+	for i, p := range parts {
+		gutter := "  "
+		if i > 0 {
+			gutter = st.faint.Render(codeWrap)
+		}
+		out[i] = gutter + code.Render(indent+p)
+	}
+	return out
+}
+
+// codeWrap starts each line a code line was wrapped onto.
+const codeWrap = "↪ "
 
 // pickerModal asks which agent to use, or explains how to get one.
 func (m *Model) pickerModal() string {

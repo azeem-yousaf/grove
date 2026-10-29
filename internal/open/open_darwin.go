@@ -11,6 +11,9 @@ const fileManager = "Finder"
 // Default opens path with its default application.
 func Default(path string) error { return start(exec.Command("open", path)) }
 
+// URL opens a web address in the default browser.
+func URL(url string) error { return Default(url) }
+
 // Reveal shows path selected in Finder.
 func Reveal(path string) error { return start(exec.Command("open", "-R", path)) }
 

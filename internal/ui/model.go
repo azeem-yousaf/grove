@@ -14,7 +14,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
+	"github.com/azeem-yousaf/grove/internal/gh"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/notify"
 	"github.com/azeem-yousaf/grove/internal/open"
 	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/azeem-yousaf/grove/internal/store"
@@ -60,6 +62,7 @@ type Model struct {
 	scanSeq  int
 
 	rows       []row
+	listGroups []listGroup // plan groups in the list, indexed by row.grp
 	cursor     int
 	lastSel    string
 	listOffset int
@@ -103,6 +106,10 @@ type Model struct {
 	animating   bool
 	termFocused bool
 
+	alerts       []string // queued for the next desktop notification (alert.go)
+	alertWaiting bool     // an alertFlushMsg is on its way
+	alertsBroken bool     // a notification failed, so grove stopped trying
+
 	lastClickRow int
 	lastClickAt  time.Time
 
@@ -133,16 +140,37 @@ type Model struct {
 	lastGroupPoll time.Time
 	conflictsTold map[string][]string // files each task's agent was told conflict with another worktree (conflictnotify.go)
 	chatInput     textarea.Model
+	chatDraft     string // put in the chat input when the chat next opens (> on a hunk)
 	chatView      viewport.Model
 	chatFollow    bool // keep the chat scrolled to the newest line
 	chatSel       chatSelection
 	picker        *picker
+	watchAsk      *watchAsk // who watches the next plan, asked before planning
+	planWatch     string    // the answer, config.WatchYou or config.WatchPlanner, until that plan starts
+	orch          orchestrator
 	undo          *undoAsk
 	quitAsk       bool
 	conflicts     *conflictReview // the merge review, while open
-	overview      bool            // the overview of every worktree, in place of both panes
-	ovPath        string          // worktree under the overview's cursor
-	ovStart       int             // first and past-last rows of the overview table on screen
+	wtView        *wtView         // the whole-worktree diff (v), while shown
+	revert        *revertAsk      // putting a hunk back (x), while asked
+	searchInput   textinput.Model // searching the diff pane (/)
+	searchActive  bool
+	searchQuery   string           // lower case
+	searchFrom    int              // line the search started from
+	searchAt      int              // line of the current match
+	curHunk       int              // the hunk x and > act on, index into parsed.hunks (wtdiff.go)
+	actions       *actionMenu      // the action palette (ctrl+k), while open
+	ship          *shipMenu        // the Ship menu (s), while open
+	commit        *commitDialog    // the commit dialog, while open
+	ghPath        string           // the GitHub CLI, "" when not installed
+	prs           map[string]gh.PR // pull requests by branch
+	prErr         error            // why the last PR poll failed
+	prOff         bool             // polling stopped after a failure
+	prPolling     bool
+	lastPRPoll    time.Time
+	overview      bool   // the overview of every worktree, in place of both panes
+	ovPath        string // worktree under the overview's cursor
+	ovStart       int    // first and past-last rows of the overview table on screen
 	ovEnd         int
 	ovRowsY       int // screen row of the first table row
 	mergeSeq      int
@@ -154,6 +182,9 @@ type Model struct {
 	stopAgent func(dir string) // waits until the folder is no longer in use
 	saveAgent func(string) error
 	saveModel func(agent, model string) error
+	saveWatch func(string) error
+	sendAlert func(title, body string) error
+	listPRs   func(ctx context.Context, dir string) (map[string]gh.PR, error)
 }
 
 type toastKind uint8
@@ -214,6 +245,8 @@ func New(ctx context.Context, o Options) *Model {
 		collapsed:    map[string]bool{},
 		hereIdx:      -1,
 		filter:       ti,
+		searchInput:  newSearchInput(),
+		curHunk:      -1,
 		diff:         viewport.New(),
 		diffCache:    map[string]string{},
 		diffErrs:     map[string]error{},
@@ -236,6 +269,10 @@ func New(ctx context.Context, o Options) *Model {
 		stopAgent:    agents.Stop,
 		saveAgent:    defaultSaveAgent,
 		saveModel:    config.SaveModel,
+		saveWatch:    config.SaveWatcher,
+		sendAlert:    notify.Send,
+		ghPath:       gh.Path(),
+		listPRs:      gh.List,
 	}
 	if o.Repo.CommonDir != "" {
 		m.store = store.Open(o.Repo.CommonDir)
@@ -339,6 +376,18 @@ func (m *Model) notify(text string, kind toastKind) tea.Cmd {
 // Update handles every message.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	cmd := m.update(msg)
+	// The worktree view and the search belong to the diff pane.
+	if _, ok := m.wtState(); m.focus != focusDiff || !ok {
+		m.wtView = nil
+	}
+	if m.focus != focusDiff && (m.searchActive || m.searchQuery != "") {
+		m.clearSearch()
+	}
+	if m.wtView != nil {
+		if c := m.loadWorktreeView(); c != nil {
+			cmd = tea.Batch(cmd, c)
+		}
+	}
 	m.ensureCursorVisible()
 	m.refreshDiffView()
 	return m, cmd
@@ -392,6 +441,9 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case clockMsg:
 		m.now = time.Time(msg)
 		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now)}
+		if m.termFocused {
+			cmds = append(cmds, m.pollPRs(false))
+		}
 		if m.baseReady && !m.scanning && m.now.Sub(m.lastScan) >= m.refreshInterval() {
 			cmds = append(cmds, m.startScan())
 		}
@@ -495,6 +547,24 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case mergeAbortMsg:
 		return m.onMergeAbort(msg)
 
+	case wtDiffMsg:
+		return m.onWorktreeDiff(msg)
+
+	case revertDoneMsg:
+		return m.onRevertDone(msg)
+
+	case shipLoadedMsg:
+		return m.onShipLoaded(msg)
+
+	case prsMsg:
+		return m.onPRs(msg)
+
+	case alertFlushMsg:
+		return m.flushAlerts()
+
+	case alertSentMsg:
+		return m.onAlertSent(msg)
+
 	case toastClearMsg:
 		if msg.id == m.toast.id {
 			m.toast = toast{}
@@ -549,8 +619,21 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 func (m *Model) onPaste(msg tea.PasteMsg) tea.Cmd {
 	var cmd tea.Cmd
 	switch {
-	case m.quitAsk, m.conflicts != nil, m.confirm != nil, m.picker != nil, m.undo != nil:
+	case m.quitAsk, m.conflicts != nil, m.confirm != nil, m.picker != nil, m.watchAsk != nil, m.undo != nil:
 		return nil
+	case m.actions != nil:
+		return m.actions.update(m, msg)
+	case m.ship != nil, m.revert != nil:
+		return nil
+	case m.searchActive:
+		m.searchInput, cmd = m.searchInput.Update(msg)
+		m.setSearch(m.searchInput.Value())
+		return cmd
+	case m.commit != nil:
+		if !m.commit.onFiles {
+			m.commit.message, cmd = m.commit.message.Update(msg)
+		}
+		return cmd
 	case m.review != nil:
 		if e := m.review.edit; e != nil {
 			return e.update(msg)
@@ -622,7 +705,7 @@ func (m *Model) onScan(msg scanMsg) tea.Cmd {
 		m.diffErrs = map[string]error{}
 		if m.selectPath != "" {
 			if i := m.snap.IndexOf(m.selectPath); i >= 0 {
-				delete(m.collapsed, m.snap.States[i].Path)
+				m.unfold(m.snap.States[i].Path)
 				m.lastSel = m.snap.States[i].Path
 				m.selectPath = ""
 			}
@@ -640,7 +723,18 @@ func (m *Model) onScan(msg scanMsg) tea.Cmd {
 }
 
 // selected returns the selected row, if any.
+// selected is the worktree or file under the cursor; a group header is
+// neither.
 func (m *Model) selected() (row, bool) {
+	r, ok := m.cursorRow()
+	if !ok || r.kind == rowGroup {
+		return row{}, false
+	}
+	return r, true
+}
+
+// cursorRow is the row under the cursor, group headers included.
+func (m *Model) cursorRow() (row, bool) {
 	if m.snap == nil || m.cursor < 0 || m.cursor >= len(m.rows) {
 		return row{}, false
 	}
@@ -724,10 +818,10 @@ func (m *Model) moveTo(i int) tea.Cmd {
 	return m.move(i - m.cursor)
 }
 
-// jumpTree moves to the next (dir > 0) or previous worktree header.
+// jumpTree moves to the next (dir > 0) or previous worktree or group header.
 func (m *Model) jumpTree(dir int) tea.Cmd {
 	for i := m.cursor + dir; i >= 0 && i < len(m.rows); i += dir {
-		if m.rows[i].kind == rowTree {
+		if m.rows[i].kind != rowFile {
 			return m.moveTo(i)
 		}
 	}
@@ -757,10 +851,22 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.onCreateKey(msg)
 	case m.picker != nil:
 		return m.onPickerKey(msg)
+	case m.watchAsk != nil:
+		return m.onWatchKey(msg)
 	case m.undo != nil:
 		return m.onUndoKey(msg)
 	case m.review != nil:
 		return m.onReviewKey(msg)
+	case m.actions != nil:
+		return m.onActionsKey(msg)
+	case m.ship != nil:
+		return m.onShipKey(msg)
+	case m.commit != nil:
+		return m.onCommitKey(msg)
+	case m.revert != nil:
+		return m.onRevertKey(msg)
+	case m.searchActive:
+		return m.onSearchKey(msg)
 	case m.gitCmd.active:
 		return m.onGitPromptKey(msg)
 	case m.focus == focusChat:
@@ -769,9 +875,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.onGroupKey(msg)
 	}
 	if m.showHelp {
-		if key.Matches(msg, k.Help, k.Back, k.Quit) || msg.String() == "enter" {
-			m.showHelp = false
-		}
+		// Any key closes it, as it says; the key does nothing else.
+		m.showHelp = false
 		if msg.String() == "ctrl+c" {
 			return m.quitNow()
 		}
@@ -820,22 +925,23 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Help):
 		m.showHelp = true
 		return nil
+	case key.Matches(msg, k.Actions):
+		return m.openActions()
+	case key.Matches(msg, k.Ship):
+		return m.openShip()
 	case key.Matches(msg, k.Refresh):
-		m.toastID++
-		return tea.Batch(m.startScan(), m.notify("Refreshing…", toastInfo))
+		return m.refreshNow()
 	case key.Matches(msg, k.Mode):
 		return m.toggleMode()
 	case key.Matches(msg, k.Overlaps):
 		return m.toggleOverlaps()
 	case key.Matches(msg, k.Filter):
-		if m.snap == nil {
-			return nil
+		if m.focus == focusDiff {
+			return m.startSearch()
 		}
-		m.filterActive = true
-		m.focus = focusList
-		m.filter.SetValue(m.filterQuery)
-		m.filter.CursorEnd()
-		return m.filter.Focus()
+		return m.startFilter()
+	case key.Matches(msg, k.Review):
+		return m.toggleWorktreeView()
 	case key.Matches(msg, k.SwitchPane):
 		if m.focus != focusList {
 			m.focus = focusList
@@ -849,6 +955,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case key.Matches(msg, k.Back):
 		switch {
+		case m.focus == focusDiff && m.searchQuery != "":
+			m.clearSearch()
 		case m.focus == focusDiff:
 			m.focus = focusList
 		case m.filtering():
@@ -875,16 +983,46 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Planner):
 		return m.openPlanner()
 	case key.Matches(msg, k.Group):
-		if r, ok := m.selected(); ok {
-			return m.openGroupChat(m.snap.States[r.wt].Path)
-		}
-		return nil
+		return m.openSelectedGroup()
 	}
 
 	if m.focus == focusDiff {
 		return m.onDiffKey(msg)
 	}
 	return m.onListKey(msg)
+}
+
+func (m *Model) refreshNow() tea.Cmd {
+	m.toastID++
+	if m.wtView != nil {
+		m.wtView.loaded = ""
+	}
+	return tea.Batch(m.startScan(), m.notify("Refreshing…", toastInfo))
+}
+
+func (m *Model) startFilter() tea.Cmd {
+	if m.snap == nil {
+		return nil
+	}
+	m.filterActive = true
+	m.focus = focusList
+	m.filter.SetValue(m.filterQuery)
+	m.filter.CursorEnd()
+	return m.filter.Focus()
+}
+
+// openSelectedGroup opens the group chat of the selected group header, or
+// of the selected worktree's group.
+func (m *Model) openSelectedGroup() tea.Cmd {
+	r, ok := m.cursorRow()
+	if !ok {
+		return nil
+	}
+	if r.kind == rowGroup {
+		g := m.listGroups[r.grp]
+		return m.openGroup(g.plan, g.id)
+	}
+	return m.openGroupChat(m.snap.States[r.wt].Path)
 }
 
 func (m *Model) onListKey(msg tea.KeyPressMsg) tea.Cmd {
@@ -911,6 +1049,9 @@ func (m *Model) onListKey(msg tea.KeyPressMsg) tea.Cmd {
 		// List only: in the diff pane n jumps to the next hunk.
 		return m.askCreate()
 	case !ok:
+		if cr, ok := m.cursorRow(); ok && cr.kind == rowGroup {
+			return m.onGroupRowKey(msg, cr)
+		}
 		return nil
 	case key.Matches(msg, k.Undo):
 		return m.askUndo(m.sessionFor(m.snap.States[r.wt].Path))
@@ -924,6 +1065,9 @@ func (m *Model) onListKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		if !m.collapsed[m.snap.States[r.wt].Path] {
 			return m.toggleCollapse(r.wt)
+		}
+		if r.grp >= 0 {
+			return m.moveTo(m.groupRow(r.grp))
 		}
 	case key.Matches(msg, k.Expand):
 		if r.kind == rowTree {
@@ -949,22 +1093,37 @@ func (m *Model) onDiffKey(msg tea.KeyPressMsg) tea.Cmd {
 			return m.openFile()
 		}
 		return nil
-	case "n":
-		m.jumpHunk(1)
+	case "n", "N", "p":
+		dir := 1
+		if msg.String() != "n" {
+			dir = -1
+		}
+		if m.searchQuery != "" {
+			m.jumpMatch(dir)
+		} else {
+			m.jumpHunk(dir)
+		}
 		return nil
-	case "N", "p":
-		m.jumpHunk(-1)
-		return nil
+	case "x":
+		return m.askRevert()
+	case ">":
+		return m.hunkToAgent()
 	case "g", "home":
 		m.diff.GotoTop()
 		return nil
 	case "G", "end":
 		m.diff.GotoBottom()
 		return nil
-	case "]":
-		return m.move(1)
-	case "[":
-		return m.move(-1)
+	case "]", "[":
+		dir := 1
+		if msg.String() == "[" {
+			dir = -1
+		}
+		if m.wtView != nil {
+			m.jumpFile(dir)
+			return nil
+		}
+		return m.move(dir)
 	case "left", "h":
 		// Already at the left edge: carry on into the file list.
 		if m.diff.XOffset() == 0 {
@@ -977,9 +1136,18 @@ func (m *Model) onDiffKey(msg tea.KeyPressMsg) tea.Cmd {
 	return cmd
 }
 
-// jumpHunk scrolls the diff to the next or previous hunk header.
+// jumpHunk makes the next or previous hunk the current one and scrolls to
+// it. Without hunks to act on, it scrolls to the next hunk header.
 func (m *Model) jumpHunk(dir int) {
 	if m.shownKey == "" {
+		return
+	}
+	if n := len(m.parsed.hunks); n > 0 {
+		target := m.currentHunkIndex() + dir
+		if m.currentHunkIndex() < 0 {
+			target = 0
+		}
+		m.setCurrentHunk(max(0, min(target, n-1)))
 		return
 	}
 	y := m.diff.YOffset()
@@ -1138,7 +1306,7 @@ func (m *Model) copyPath() tea.Cmd {
 }
 
 func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
-	if m.confirm != nil || m.creating != nil || m.picker != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil {
+	if m.confirm != nil || m.creating != nil || m.picker != nil || m.watchAsk != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil || m.actions != nil || m.ship != nil || m.commit != nil || m.revert != nil {
 		return nil
 	}
 	if m.showHelp {
@@ -1183,7 +1351,10 @@ func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
 	cmd := m.moveTo(ri)
 	if double {
 		m.lastClickRow = -1
-		if m.rows[ri].kind == rowTree {
+		switch m.rows[ri].kind {
+		case rowGroup:
+			return tea.Batch(cmd, m.toggleGroup(m.rows[ri].grp))
+		case rowTree:
 			return tea.Batch(cmd, m.toggleCollapse(m.rows[ri].wt))
 		}
 		return tea.Batch(cmd, m.openFile())
@@ -1273,7 +1444,7 @@ func (m *Model) ensureCursorVisible() {
 		last++
 	}
 	if first >= 0 {
-		if first > 0 && m.rows[m.cursor].kind == rowTree {
+		if first > 0 && m.rows[m.cursor].kind != rowFile {
 			first--
 		}
 		if first < m.listOffset {

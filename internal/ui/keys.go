@@ -8,8 +8,9 @@ type keyMap struct {
 	SwitchPane, Open, Reveal, Editor, Copy  key.Binding
 	Remove, Git, New, Agent, Undo           key.Binding
 	Mode, Overlaps, Filter, Refresh         key.Binding
-	Overview, Merge, Planner, Group         key.Binding
-	Help, Quit, Back                        key.Binding
+	Overview, Merge, Planner, Group, Ship   key.Binding
+	Review                                  key.Binding
+	Help, Actions, Quit, Back               key.Binding
 }
 
 func defaultKeys() keyMap {
@@ -43,9 +44,12 @@ func defaultKeys() keyMap {
 		Merge:      b("c", "merge branches into this worktree", "c"),
 		Planner:    b("P", "planner", "P"),
 		Group:      b("t", "group chat", "t"),
+		Ship:       b("s", "commit, push, pull request", "s"),
+		Review:     b("v", "every change in the worktree", "v"),
 		Filter:     b("/", "filter", "/"),
 		Refresh:    b("r", "refresh", "r"),
 		Help:       b("?", "help", "?"),
+		Actions:    b("ctrl+k", "actions", "ctrl+k"),
 		Quit:       b("q", "quit", "q", "ctrl+c"),
 		Back:       b("esc", "back", "esc"),
 	}
@@ -74,6 +78,8 @@ var helpSections = []helpSection{
 		{"n", "new worktree"},
 		{"d", "remove worktree"},
 		{":", "run a git command"},
+		{"s", "commit, push, PR, update"},
+		{"ctrl+k", "search all actions"},
 	}},
 	{"View", [][2]string{
 		{"m", "branch / uncommitted"},
@@ -87,7 +93,7 @@ var helpSections = []helpSection{
 	{"Agent", [][2]string{
 		{"a", "open worktree agent"},
 		{"P", "planner: plan tasks"},
-		{"t", "group chat of a task"},
+		{"t", "group chat"},
 		{"enter", "send / allow / run"},
 		{"esc", "deny or skip a card"},
 		{"ctrl+x", "stop the agent"},
@@ -100,6 +106,10 @@ var helpSections = []helpSection{
 		{"←", "back to list at edge"},
 		{"n N", "next / prev hunk"},
 		{"[ ]", "prev / next file"},
+		{"v", "whole worktree, last turn"},
+		{"/", "search; n N next"},
+		{"x", "put a change back"},
+		{">", "ask the agent about it"},
 		{"g G", "top / bottom"},
 	}},
 }

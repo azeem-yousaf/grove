@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
+	"github.com/azeem-yousaf/grove/internal/gh"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
@@ -73,11 +74,18 @@ func noAgents(m *Model) {
 	m.installed = func() []agent.Kind { return nil }
 	m.saveAgent = func(string) error { return nil }
 	m.saveModel = func(string, string) error { return nil }
+	m.saveWatch = func(string) error { return nil }
+	// As if the config answered who watches plans; tests of the question
+	// clear it.
+	m.cfg.Planner.Watcher = config.WatchYou
 	m.runAgent = func(_ context.Context, _ agent.Request, emit func(agent.Event)) {
 		emit(agent.Event{Kind: agent.EvDone, Err: fmt.Errorf("no agent in tests")})
 	}
 	m.warmAgent = func(agent.Request) {}
 	m.stopAgent = func(string) {}
+	m.sendAlert = func(string, string) error { return nil }
+	m.ghPath = ""
+	m.listPRs = func(context.Context, string) (map[string]gh.PR, error) { return nil, nil }
 }
 
 func press(m *Model, keys ...string) {
@@ -100,6 +108,8 @@ func press(m *Model, keys ...string) {
 			msg = tea.KeyPressMsg{Code: tea.KeyRight}
 		case "shift+tab":
 			msg = tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
+		case "ctrl+k":
+			msg = tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl}
 		default:
 			r := []rune(k)[0]
 			msg = tea.KeyPressMsg{Code: r, Text: k}
@@ -111,12 +121,36 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "overview-conflicts", "diff-conflicts"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "group-list", "watch", "overview-conflicts", "diff-conflicts", "actions", "actions-filtered", "ship", "commit", "worktree-view", "worktree-search", "revert"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
 			case "help":
 				press(m, "?")
+			case "actions":
+				m = fakeModel(t, size[0], size[1])
+				press(m, "ctrl+k")
+			case "actions-filtered":
+				typeText(m, "zzz")
+			case "ship":
+				m = fakeModel(t, size[0], size[1])
+				press(m, "s")
+				m.Update(shipLoadedMsg{path: m.ship.path, up: git.Upstream{Name: "origin/" + strings.Repeat("long-branch/", 8), Remote: "origin", Ahead: 3, Behind: 2}})
+			case "worktree-view":
+				m = fakeModel(t, size[0], size[1])
+				press(m, "v")
+				long := strings.Repeat("deep/", 30) + "file.ts"
+				raw := reviewDiff + "diff --git a/" + long + " b/" + long + "\n--- a/" + long + "\n+++ b/" + long +
+					"\n@@ -1 +1 @@\n-" + strings.Repeat("x", 300) + "\n+y\n"
+				m.Update(wtDiffMsg{key: m.wtView.loading, raw: raw})
+			case "worktree-search":
+				press(m, "/")
+				typeText(m, strings.Repeat("hello ", 30))
+			case "revert":
+				press(m, "esc", "x")
+			case "commit":
+				press(m, "c")
+				m.commit.message.SetValue(strings.Repeat("A long commit message line. ", 20))
 			case "remove":
 				m = fakeModel(t, size[0], size[1])
 				press(m, "d", "enter", "b")
@@ -200,6 +234,7 @@ func TestRenderFitsScreen(t *testing.T) {
 						{ID: "c", Branch: "feature/cart", Path: filepath.FromSlash("/src/shop-cart"), Group: "g", Status: plan.Finished},
 					}}
 				m.plans = []*plan.Plan{p}
+				m.rebuildRows()
 				log, _ := m.groupLog(p, "g")
 				for i := range 30 {
 					log.Post(group.Message{From: "feature/auth", To: "feature/cart", Text: fmt.Sprintf("%d %s", i, strings.Repeat("a long message ", 20))})
@@ -208,6 +243,15 @@ func TestRenderFitsScreen(t *testing.T) {
 				m.pollingGroups = false
 				m.Update(m.pollGroups()())
 				m.groups[log.Dir].paused = true
+			case "group-list":
+				press(m, "tab")
+				m.moveTo(m.groupRow(0))
+				m.refreshDiffView()
+			case "watch":
+				m = fakeModel(t, size[0], size[1])
+				m.cfg.Planner.Watcher = ""
+				m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude} }
+				press(m, "P", "down")
 			case "overview-conflicts":
 				m = fakeModel(t, size[0], size[1])
 				// Many pairs, so the Conflicts section has to stop early.
@@ -635,9 +679,9 @@ func TestGitRun(t *testing.T) {
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	run := func(args ...string) (*gitRun, string) {
+	runSteps := func(steps ...termStep) (*gitRun, string) {
 		var out strings.Builder
-		g := &gitRun{dir: dir, args: args, st: newStyles(true)}
+		g := &gitRun{dir: dir, steps: steps, st: newStyles(true)}
 		g.SetStdin(strings.NewReader("\n"))
 		g.SetStdout(&out)
 		g.SetStderr(&out)
@@ -646,12 +690,24 @@ func TestGitRun(t *testing.T) {
 		}
 		return g, ansi.Strip(out.String())
 	}
+	run := func(args ...string) (*gitRun, string) {
+		return runSteps(termStep{args: args, display: "git " + strings.Join(args, " ")})
+	}
 	g, out := run("status", "--short", "--branch")
 	if g.code != 0 || !strings.Contains(out, "##") || !strings.Contains(out, "press enter") {
 		t.Errorf("status: code %d, output:\n%s", g.code, out)
 	}
 	if g, out := run("not-a-command"); g.code == 0 || !strings.Contains(out, "exit") {
 		t.Errorf("bad command: code %d, output:\n%s", g.code, out)
+	}
+	// Steps stop at the first failure.
+	g, out = runSteps(
+		termStep{args: []string{"status", "--short"}, display: "git status --short"},
+		termStep{args: []string{"not-a-command"}, display: "git not-a-command"},
+		termStep{args: []string{"log"}, display: "git log"},
+	)
+	if g.code == 0 || !strings.Contains(out, "$ git status --short") || !strings.Contains(out, "$ git not-a-command") || strings.Contains(out, "$ git log") {
+		t.Errorf("steps: code %d, output:\n%s", g.code, out)
 	}
 }
 
@@ -669,7 +725,7 @@ func TestDiffRendering(t *testing.T) {
 	if del.hiEnd == 0 || add.text[add.hiStart:add.hiEnd] != "10000" {
 		t.Errorf("word highlight = %q", add.text[add.hiStart:add.hiEnd])
 	}
-	content, gutter := renderDiff(pd, "x.go", 80, newStyles(true), nil)
+	content, gutter := renderDiff(pd, "x.go", 80, newStyles(true), nil, "")
 	if len(content) != len(gutter) {
 		t.Fatal("gutter and content out of step")
 	}
