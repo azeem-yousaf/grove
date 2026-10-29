@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // Kind is a supported agent.
@@ -110,6 +112,10 @@ type Request struct {
 	// a grouped task's groupmates' worktrees (Claude). Codex's sandbox
 	// already lets it read anywhere.
 	ReadDirs []string
+	// SessionTotal is the last EvDone.SessionTotal of Session (Claude), for
+	// when this Runner hasn't run it yet; zero if unknown. Without it, a
+	// resumed session's turn is counted from result.usage alone, as Partial.
+	SessionTotal usage.Tokens
 }
 
 // ToolServer is an MCP server run over stdio by the agent's CLI.
@@ -137,7 +143,10 @@ const (
 	EvDelta                    // Text: more of the reply as it streams
 	EvText                     // Text: a complete message
 	EvTool                     // Tool, Detail, Path: the agent is doing something
-	EvDone                     // the turn ended: Denied, Cost, Err
+	EvDone                     // the turn ended: Denied, Cost, Tokens, TokenStatus, Err
+	// EvUsage: Tokens is what the turn has used so far, replacing the last
+	// EvUsage (a running total, not a delta). Sent only when it changes.
+	EvUsage
 )
 
 // Event is something the agent did.
@@ -149,8 +158,20 @@ type Event struct {
 	Detail  string // the command, file or pattern
 	Path    string // file being changed, for edits
 	Denied  []Denial
-	Cost    string // "$0.04" or "12.3k tokens"
-	Err     error
+	Cost    string // "$0.04" (Claude Code)
+	// Tokens is the turn's usage: so far for EvUsage, all of it for EvDone.
+	Tokens usage.Tokens
+	// TokenStatus says how far EvDone's Tokens can be trusted: Exact is the
+	// provider's own figure for the turn (also after an error or a stop),
+	// Partial what was counted before the turn was cut short, Unknown when
+	// nothing usable was reported. Figures are never estimated.
+	TokenStatus usage.Status
+	// SessionTotal is, on a Claude EvDone, everything the session has used
+	// since it began (Claude Code's modelUsage, which survives --resume).
+	// Pass it back as Request.SessionTotal after grove restarts so the next
+	// turn's figure can be Exact. Zero when unknown.
+	SessionTotal usage.Tokens
+	Err          error
 }
 
 // Denial is a tool call the agent wasn't allowed to make.
@@ -177,12 +198,32 @@ type Runner struct {
 	// Idle is how long a Claude process with nothing to do is kept.
 	Idle time.Duration
 
-	mu    sync.Mutex
-	procs map[string]*claudeProc // by Request.Dir
+	mu     sync.Mutex
+	procs  map[string]*claudeProc  // by Request.Dir
+	totals map[string]usage.Tokens // each Claude session's SessionTotal, by session id
 }
 
 func NewRunner() *Runner {
-	return &Runner{Idle: 10 * time.Minute, procs: map[string]*claudeProc{}}
+	return &Runner{Idle: 10 * time.Minute, procs: map[string]*claudeProc{}, totals: map[string]usage.Tokens{}}
+}
+
+// sessionBase is what req's session had used before this turn: nothing for
+// a new session, else the last total seen here or passed in. nil if
+// unknown.
+func (r *Runner) sessionBase(req Request) *usage.Tokens {
+	if req.Session == "" {
+		return &usage.Tokens{}
+	}
+	r.mu.Lock()
+	t, ok := r.totals[req.Session]
+	r.mu.Unlock()
+	if !ok {
+		if req.SessionTotal.IsZero() {
+			return nil
+		}
+		t = req.SessionTotal
+	}
+	return &t
 }
 
 func binFor(req Request) string {
@@ -207,8 +248,13 @@ func (r *Runner) Run(ctx context.Context, req Request, emit func(Event)) {
 			emit(Event{Kind: EvDone, Err: err})
 			return
 		}
-		ev := p.turn(ctx, req, emit)
+		ev := p.turn(ctx, req, r.sessionBase(req), emit)
 		r.release(procKey(req), p)
+		if ev.Session != "" && !ev.SessionTotal.IsZero() {
+			r.mu.Lock()
+			r.totals[ev.Session] = ev.SessionTotal
+			r.mu.Unlock()
+		}
 		emit(ev)
 	case Codex:
 		args, input := codexArgs(req)
