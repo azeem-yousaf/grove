@@ -99,6 +99,10 @@ type Request struct {
 	// its read-only sandbox. It gets its own process even in a folder that
 	// also has a worktree agent.
 	ReadOnly bool
+	// Commands lets a read-only agent run any shell command without asking:
+	// the planner while it runs a plan the user started. Claude still can't
+	// edit files with its own tools; Codex gets the workspace-write sandbox.
+	Commands bool
 	// Tools are MCP servers the agent's CLI starts for it, such as a
 	// grouped task's group chat.
 	Tools []ToolServer

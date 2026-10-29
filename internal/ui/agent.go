@@ -624,7 +624,8 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Model:    s.model,
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,
-		Tools:    m.groupTools(s),
+		Commands: s.planner && m.orchestrating(),
+		Tools:    append(m.groupTools(s), m.controlTools(s)...),
 		ReadDirs: m.groupmateDirs(s),
 	}
 }

@@ -228,12 +228,22 @@ Before you plan, grove asks who will watch the plan's agents while it runs:
   wait for you, and it approves commands that are safe and needed for the
   task (builds, tests, linters), denies destructive ones with a reason for
   the agent, answers questions the plan and the code can answer, and
-  follows the group chats, posting when agents are stuck or disagree. What
+  follows the group chats, posting when agents are stuck or disagree. When
+  a task's agent says it is done, or a task fails, the planner checks the
+  work and tells the agent what is missing, or marks the task failed. What
   it doesn't decide stays for you, and you can always answer first: an
   approval card says the planner will decide unless you do. Its decisions
   show in its chat and in each agent's chat. After `[planner]
   max_decisions` (default 20) turns in a row it pauses until you say
   something to it or to an agent.
+
+  While a plan it watches is running, the planner may run any shell command
+  without asking (to read a task's diff or run its tests), though it never
+  edits files itself, and it gets grove's control tools through a small MCP
+  server built into grove (`grove mcp-plan`): `tasks` (each task's status,
+  the end of its agent's last reply and the commands it waits on),
+  `message`, `approve`, `deny` and `mark`. It can act with these during a
+  turn as well as with its decisions block at the end.
 
 Tick *Remember my choice* (off by default) to save the answer as
 `[planner] watcher` and stop being asked.

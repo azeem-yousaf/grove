@@ -29,8 +29,9 @@ func TestPlannerDecidesRefusedCommands(t *testing.T) {
 		{Tool: "Bash", Detail: "npm test"}, {Tool: "Bash", Detail: "git push --force"},
 	}}))
 
-	if len(fake.reqs) != 2 {
-		t.Fatalf("want a planner turn and the agent resumed, got %d requests", len(fake.reqs))
+	// The resumed agent then finishes, and the planner checks its work.
+	if len(fake.reqs) != 3 || !strings.Contains(fake.reqs[2].Message, "feature/a (task \"Work on feature/a\") says it is done") {
+		t.Fatalf("want a planner turn, the agent resumed and the planner checking it, got %d requests", len(fake.reqs))
 	}
 	ask := fake.reqs[0]
 	if !ask.ReadOnly || !strings.Contains(ask.Message, "- `npm test`") || !strings.Contains(ask.Message, "```grove-orchestrate") {
@@ -65,7 +66,9 @@ func TestPlannerAnswersQuestionsAndLeavesTheRest(t *testing.T) {
 	m.planner.running = false
 	pump(t, m, m.orchestrate())
 
-	if len(fake.reqs) != 2 || !strings.Contains(fake.reqs[0].Message, "JSON or XML?") || !strings.Contains(fake.reqs[0].Message, "make deploy") {
+	// b then finishes, and the planner checks its work.
+	if len(fake.reqs) != 3 || !strings.Contains(fake.reqs[0].Message, "JSON or XML?") || !strings.Contains(fake.reqs[0].Message, "make deploy") ||
+		!strings.Contains(fake.reqs[2].Message, "feature/b (task \"Work on feature/b\") says it is done") {
 		t.Fatalf("one planner turn should cover both, got %d requests", len(fake.reqs))
 	}
 	if fake.reqs[1].Dir != b.path || fake.reqs[1].Message != "From the planner, who is watching this plan for the user: Use JSON." {

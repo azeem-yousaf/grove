@@ -419,11 +419,12 @@ func groveExecutable() string {
 	return p
 }
 
-// pollGroupsEvery keeps the group chats fresh while the clock ticks.
+// pollGroupsEvery keeps the group chats, and what the planner's tools see
+// of the watched plans, fresh while the clock ticks.
 func (m *Model) pollGroupsEvery(now time.Time) tea.Cmd {
 	if now.Sub(m.lastGroupPoll) < time.Second {
 		return nil
 	}
 	m.lastGroupPoll = now
-	return m.pollGroups()
+	return tea.Batch(m.pollGroups(), m.pollControl())
 }

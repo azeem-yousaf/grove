@@ -226,6 +226,20 @@ func TestReadOnlyArgs(t *testing.T) {
 	if args, _ := codexArgs(req); strings.Join(args, " ") != "exec --json --sandbox read-only -" {
 		t.Errorf("read-only codex args = %q", args)
 	}
+	if strings.Contains(joined, "--allowedTools Bash ") || strings.Contains(joined, " PowerShell ") {
+		t.Errorf("a read-only agent asks before running commands: %s", joined)
+	}
+
+	// The planner running a plan may run any command, but still not edit.
+	req.Commands = true
+	args = claudeArgs(req)
+	joined = strings.Join(args, " ")
+	if !strings.Contains(joined, " Bash PowerShell ") || !strings.Contains(joined, "--disallowedTools Edit") || args[len(args)-1] != "Bash(ls)" {
+		t.Errorf("claude args with commands: %s", joined)
+	}
+	if args, _ := codexArgs(req); strings.Join(args, " ") != "exec --json --sandbox workspace-write -" {
+		t.Errorf("codex args with commands = %q", args)
+	}
 	tools := []ToolServer{{Name: "grove", Command: `C:\bin\grove.exe`, Args: []string{"mcp-group", "--as", "feature/x"}, Allow: []string{"post", "read"}}}
 	args = claudeArgs(Request{Tools: tools, Allow: []string{"Bash(ls)"}})
 	joined = strings.Join(args, " ")

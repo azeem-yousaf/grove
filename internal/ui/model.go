@@ -121,59 +121,61 @@ type Model struct {
 	creating   *creation // the new-worktree dialog, while open
 	selectPath string    // worktree to select once the next scan shows it
 
-	sessions      map[string]*session    // worktree agents by folder
-	store         *store.Store           // saved sessions and plans; nil without a git dir
-	savedJSON     map[string][]byte      // each session as last written, by folder
-	persistErr    string                 // the last save error shown
-	chatPath      string                 // worktree whose agent the chat pane shows
-	chatPlanner   bool                   // the chat pane shows the planner instead
-	planner       *session               // the planner's conversation, once started
-	plans         []*plan.Plan           // saved plans, newest first
-	review        *planReview            // the plan being reviewed, while open
-	creatingTask  map[string]bool        // plan tasks whose worktree is being made, by plan+task ID
-	branchNames   []string               // existing branches, for the planner's briefing
-	planBranches  git.Branches           // branches when the last plan started, for creating its worktrees
-	groveBin      string                 // this program, which agents start for group tools
-	groups        map[string]*groupState // group chats by folder
-	groupChat     *groupChat             // the group chat pane
-	pollingGroups bool
-	lastGroupPoll time.Time
-	conflictsTold map[string][]string // files each task's agent was told conflict with another worktree (conflictnotify.go)
-	chatInput     textarea.Model
-	chatDraft     string // put in the chat input when the chat next opens (> on a hunk)
-	chatView      viewport.Model
-	chatFollow    bool // keep the chat scrolled to the newest line
-	chatSel       chatSelection
-	picker        *picker
-	watchAsk      *watchAsk // who watches the next plan, asked before planning
-	planWatch     string    // the answer, config.WatchYou or config.WatchPlanner, until that plan starts
-	orch          orchestrator
-	undo          *undoAsk
-	quitAsk       bool
-	conflicts     *conflictReview // the merge review, while open
-	wtView        *wtView         // the whole-worktree diff (v), while shown
-	revert        *revertAsk      // putting a hunk back (x), while asked
-	searchInput   textinput.Model // searching the diff pane (/)
-	searchActive  bool
-	searchQuery   string           // lower case
-	searchFrom    int              // line the search started from
-	searchAt      int              // line of the current match
-	curHunk       int              // the hunk x and > act on, index into parsed.hunks (wtdiff.go)
-	actions       *actionMenu      // the action palette (ctrl+k), while open
-	ship          *shipMenu        // the Ship menu (s), while open
-	commit        *commitDialog    // the commit dialog, while open
-	ghPath        string           // the GitHub CLI, "" when not installed
-	prs           map[string]gh.PR // pull requests by branch
-	prErr         error            // why the last PR poll failed
-	prOff         bool             // polling stopped after a failure
-	prPolling     bool
-	lastPRPoll    time.Time
-	overview      bool   // the overview of every worktree, in place of both panes
-	ovPath        string // worktree under the overview's cursor
-	ovStart       int    // first and past-last rows of the overview table on screen
-	ovEnd         int
-	ovRowsY       int // screen row of the first table row
-	mergeSeq      int
+	sessions       map[string]*session    // worktree agents by folder
+	store          *store.Store           // saved sessions and plans; nil without a git dir
+	savedJSON      map[string][]byte      // each session as last written, by folder
+	persistErr     string                 // the last save error shown
+	chatPath       string                 // worktree whose agent the chat pane shows
+	chatPlanner    bool                   // the chat pane shows the planner instead
+	planner        *session               // the planner's conversation, once started
+	plans          []*plan.Plan           // saved plans, newest first
+	review         *planReview            // the plan being reviewed, while open
+	creatingTask   map[string]bool        // plan tasks whose worktree is being made, by plan+task ID
+	branchNames    []string               // existing branches, for the planner's briefing
+	planBranches   git.Branches           // branches when the last plan started, for creating its worktrees
+	groveBin       string                 // this program, which agents start for group tools
+	groups         map[string]*groupState // group chats by folder
+	groupChat      *groupChat             // the group chat pane
+	pollingGroups  bool
+	lastGroupPoll  time.Time
+	conflictsTold  map[string][]string // files each task's agent was told conflict with another worktree (conflictnotify.go)
+	chatInput      textarea.Model
+	chatDraft      string // put in the chat input when the chat next opens (> on a hunk)
+	chatView       viewport.Model
+	chatFollow     bool // keep the chat scrolled to the newest line
+	chatSel        chatSelection
+	picker         *picker
+	watchAsk       *watchAsk // who watches the next plan, asked before planning
+	planWatch      string    // the answer, config.WatchYou or config.WatchPlanner, until that plan starts
+	orch           orchestrator
+	controlJSON    []byte // control/state.json as last written
+	pollingControl bool
+	undo           *undoAsk
+	quitAsk        bool
+	conflicts      *conflictReview // the merge review, while open
+	wtView         *wtView         // the whole-worktree diff (v), while shown
+	revert         *revertAsk      // putting a hunk back (x), while asked
+	searchInput    textinput.Model // searching the diff pane (/)
+	searchActive   bool
+	searchQuery    string           // lower case
+	searchFrom     int              // line the search started from
+	searchAt       int              // line of the current match
+	curHunk        int              // the hunk x and > act on, index into parsed.hunks (wtdiff.go)
+	actions        *actionMenu      // the action palette (ctrl+k), while open
+	ship           *shipMenu        // the Ship menu (s), while open
+	commit         *commitDialog    // the commit dialog, while open
+	ghPath         string           // the GitHub CLI, "" when not installed
+	prs            map[string]gh.PR // pull requests by branch
+	prErr          error            // why the last PR poll failed
+	prOff          bool             // polling stopped after a failure
+	prPolling      bool
+	lastPRPoll     time.Time
+	overview       bool   // the overview of every worktree, in place of both panes
+	ovPath         string // worktree under the overview's cursor
+	ovStart        int    // first and past-last rows of the overview table on screen
+	ovEnd          int
+	ovRowsY        int // screen row of the first table row
+	mergeSeq       int
 
 	// Hooks for the agent, replaced in tests.
 	installed func() []agent.Kind
@@ -437,6 +439,9 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case mergePlanMsg:
 		return m.onMergePlan(msg)
+
+	case controlMsg:
+		return m.onControl(msg)
 
 	case clockMsg:
 		m.now = time.Time(msg)

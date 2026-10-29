@@ -30,7 +30,8 @@ var shells = []string{"Bash", "PowerShell"}
 //
 // A read-only agent (the planner) runs in the default permission mode with
 // the editing tools removed, so it can only read; it may also use the
-// read-only tools of Claude's Atlassian connector to look at Jira.
+// read-only tools of Claude's Atlassian connector to look at Jira. While it
+// runs a plan (Commands), it may run any shell command without asking.
 func claudeArgs(req Request) []string {
 	mode := "acceptEdits"
 	if req.ReadOnly {
@@ -63,6 +64,9 @@ func claudeArgs(req Request) []string {
 		for _, c := range readOnlyGit {
 			args = append(args, ClaudeRule(shell, "git "+c), ClaudeRule(shell, "git "+c+" *"))
 		}
+	}
+	if req.Commands {
+		args = append(args, shells...)
 	}
 	if req.ReadOnly {
 		for _, t := range jiraReadTools {
@@ -157,6 +161,7 @@ type claudeProc struct {
 	// process.
 	bin, model string
 	allow      []string
+	commands   bool     // Commands it was started with
 	tools      string   // mcpConfig it was started with
 	readDirs   []string // ReadDirs it was started with
 
@@ -182,6 +187,7 @@ func startClaude(bin string, req Request) (*claudeProc, error) {
 		bin:      bin,
 		model:    req.Model,
 		allow:    slices.Clone(req.Allow),
+		commands: req.Commands,
 		tools:    mcpConfig(req.Tools),
 		readDirs: slices.Clone(req.ReadDirs),
 		session:  req.Session,
@@ -230,7 +236,7 @@ func (p *claudeProc) read(out io.Reader) {
 }
 
 func (p *claudeProc) fits(bin string, req Request) bool {
-	return !p.ended() && p.bin == bin && p.model == req.Model && p.session == req.Session && slices.Equal(p.allow, req.Allow) && p.tools == mcpConfig(req.Tools) && slices.Equal(p.readDirs, req.ReadDirs)
+	return !p.ended() && p.bin == bin && p.model == req.Model && p.session == req.Session && slices.Equal(p.allow, req.Allow) && p.commands == req.Commands && p.tools == mcpConfig(req.Tools) && slices.Equal(p.readDirs, req.ReadDirs)
 }
 
 func (p *claudeProc) ended() bool {

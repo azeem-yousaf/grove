@@ -14,7 +14,7 @@ import (
 // in the prompt, which works on every Codex version.
 func codexArgs(req Request) (args []string, input string) {
 	sandbox := "workspace-write"
-	if req.ReadOnly {
+	if req.ReadOnly && !req.Commands {
 		sandbox = "read-only"
 	}
 	args = []string{"exec", "--json", "--sandbox", sandbox}

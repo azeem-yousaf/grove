@@ -13,10 +13,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/azeem-yousaf/grove/internal/fslock"
 )
 
 // User is the From of messages the user posts.
@@ -82,38 +83,14 @@ func (l Log) cursorFile(member string) string {
 	return filepath.Join(l.Dir, "read-"+safe)
 }
 
-// lock serialises writers across processes with a lock file. A lock older
-// than staleLock was left by a process that died, and is taken over.
+// lock serialises writers across processes with a lock file.
 func (l Log) lock() (func(), error) {
-	p := filepath.Join(l.Dir, "lock")
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err == nil {
-			f.Close()
-			return func() { os.Remove(p) }, nil
-		}
-		// Windows answers "access denied" while another writer's lock is
-		// being deleted, so that is a busy lock too until the deadline.
-		denied := runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission)
-		if !errors.Is(err, os.ErrExist) && !denied {
-			return nil, err
-		}
-		if fi, serr := os.Stat(p); serr == nil && time.Since(fi.ModTime()) > staleLock {
-			os.Remove(p)
-			continue
-		}
-		if time.Now().After(deadline) {
-			if denied {
-				return nil, err
-			}
-			return nil, errors.New("the group chat is locked by another program")
-		}
-		time.Sleep(20 * time.Millisecond)
+	unlock, err := fslock.Lock(filepath.Join(l.Dir, "lock"))
+	if errors.Is(err, fslock.ErrBusy) {
+		return nil, errors.New("the group chat is locked by another program")
 	}
+	return unlock, err
 }
-
-const staleLock = 10 * time.Second
 
 // Post appends a message.
 func (l Log) Post(m Message) error {

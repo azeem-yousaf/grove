@@ -39,6 +39,8 @@ const (
 	orchApproval orchKind = iota // commands a task's agent was refused
 	orchQuestion                 // a task's turn ended with a question
 	orchGroup                    // new group chat messages
+	orchFinished                 // a task's agent says it is done
+	orchFailed                   // a task failed
 )
 
 // orchItem is one thing waiting for the planner.
@@ -214,6 +216,11 @@ func (m *Model) queueTurn(s *session) {
 			reply = "…" + string(r[len(r)-2000:])
 		}
 		m.orch.queue = append(m.orch.queue, orchItem{kind: orchQuestion, plan: p.ID, branch: t.Branch, lines: []string{reply}, urgent: true})
+	case t.Status == plan.Failed:
+		m.orch.queue = append(m.orch.queue, orchItem{kind: orchFailed, plan: p.ID, branch: t.Branch, lines: []string{t.Error}, urgent: true})
+	case t.Status == plan.Finished:
+		// The planner checks the work before the user merges it.
+		m.orch.queue = append(m.orch.queue, orchItem{kind: orchFinished, plan: p.ID, branch: t.Branch, lines: []string{tail(reply, 2000)}, urgent: true})
 	}
 }
 
@@ -279,7 +286,9 @@ func (m *Model) liveItems(items []orchItem) []orchItem {
 					continue
 				}
 			}
-			if it.kind == orchQuestion && t.Status != plan.Working {
+			if it.kind == orchQuestion && t.Status != plan.Working ||
+				it.kind == orchFinished && t.Status != plan.Finished ||
+				it.kind == orchFailed && t.Status != plan.Failed {
 				continue
 			}
 		}
@@ -351,6 +360,15 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
 				_, t, _ := m.watchedTask(it.branch)
 				fmt.Fprintf(&b, "\n%s (task %q) finished its turn with this, and is waiting for an answer:\n\n%s\n", it.branch, t.Title, quoteText(it.lines[0]))
 				what = append(what, it.branch+" asked a question")
+			case orchFinished:
+				_, t, _ := m.watchedTask(it.branch)
+				fmt.Fprintf(&b, "\n%s (task %q) says it is done:\n\n%s\n\nCheck its work, such as its diff and tests, before the user merges it. "+
+					"If something is missing, reply to tell it what; if it can't be done as planned, mark it failed.\n", it.branch, t.Title, quoteText(it.lines[0]))
+				what = append(what, it.branch+" finished")
+			case orchFailed:
+				_, t, _ := m.watchedTask(it.branch)
+				fmt.Fprintf(&b, "\n%s (task %q) failed: %s\nReply to it to try again another way, or leave it for the user.\n", it.branch, t.Title, it.lines[0])
+				what = append(what, it.branch+" failed")
 			case orchGroup:
 				name := it.group
 				if g, ok := p.Group(it.group); ok {
@@ -369,8 +387,14 @@ func (m *Model) orchPrompt(items []orchItem) (string, string) {
   "approve": [{"branch": "feature/api", "command": "npm test"}],
   "deny": [{"branch": "feature/api", "command": "git push --force", "reason": "what the agent should do instead"}],
   "reply": [{"branch": "feature/ui", "message": "your answer to its question"}],
-  "post": [{"group": "checkout", "to": "", "message": "to everyone, or set to a member's branch"}]
+  "post": [{"group": "checkout", "to": "", "message": "to everyone, or set to a member's branch"}],
+  "mark": [{"branch": "feature/docs", "status": "failed", "note": "why, for the user"}]
 }` + "\n```\n\n")
+	if len(m.controlTools(m.planner)) > 0 {
+		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark) instead of the block, " +
+			"and you may run shell commands without asking, for example to read a task's diff or run its tests in its worktree. " +
+			"Don't change any files yourself; the task agents do the work.\n\n")
+	}
 	b.WriteString("Approve a command only when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for. " +
 		"Deny anything destructive, anything that reaches outside the worktree, and pushing or publishing. When unsure, leave it out so the user decides. " +
 		"Reply to a question only when the plan and the code answer it; leave questions about what the user wants for the user. " +
@@ -394,12 +418,14 @@ func quoteText(s string) string {
 
 var orchBlock = regexp.MustCompile("(?s)```grove-orchestrate[ \\t]*\\r?\\n(.*?)```")
 
-// decisions is the planner's grove-orchestrate block.
+// decisions is the planner's grove-orchestrate block, or the orders its
+// control tools queued.
 type decisions struct {
 	Approve []struct{ Branch, Command string }
 	Deny    []struct{ Branch, Command, Reason string }
 	Reply   []struct{ Branch, Message string }
 	Post    []struct{ Group, To, Message string }
+	Mark    []struct{ Branch, Status, Note string }
 }
 
 // applyDecisions carries out the last grove-orchestrate block in a planner
@@ -415,6 +441,11 @@ func (m *Model) applyDecisions(reply string) tea.Cmd {
 		m.plannerNote(roleError, "Couldn't read the planner's decisions: "+err.Error())
 		return nil
 	}
+	return m.decide(d)
+}
+
+// decide carries out the planner's decisions on watched plans' tasks.
+func (m *Model) decide(d decisions) tea.Cmd {
 	var answered []*session
 	denied := map[*session][]string{}
 	for _, a := range d.Approve {
@@ -465,9 +496,34 @@ func (m *Model) applyDecisions(reply string) tea.Cmd {
 		cmds = append(cmds, m.tell(s, strings.Join(parts, " ")+" Then carry on with your task."))
 	}
 	for _, r := range d.Reply {
-		if _, _, s := m.watchedTask(r.Branch); s != nil && strings.TrimSpace(r.Message) != "" {
+		if p, t, s := m.watchedTask(r.Branch); s != nil && strings.TrimSpace(r.Message) != "" {
+			// More to do: a finished or failed task works again.
+			if t.Status != plan.Working {
+				t.Status, t.Error, p.Status = plan.Working, "", plan.Running
+				cmds = append(cmds, m.savePlan(p))
+			}
 			cmds = append(cmds, m.tell(s, "From the planner, who is watching this plan for the user: "+strings.TrimSpace(r.Message)))
 		}
+	}
+	for _, mk := range d.Mark {
+		p, t, _ := m.watchedTask(mk.Branch)
+		if t == nil {
+			continue
+		}
+		switch mk.Status {
+		case "finished":
+			t.Status, t.Error = plan.Finished, ""
+		case "failed":
+			t.Status, t.Error = plan.Failed, strings.TrimSpace(mk.Note)
+		default:
+			continue
+		}
+		text := "The planner marked " + t.Title + " " + mk.Status
+		if n := strings.TrimSpace(mk.Note); n != "" {
+			text += ": " + n
+		}
+		m.plannerNote(roleNote, text+".")
+		cmds = append(cmds, m.finishIfSettled(p), m.savePlan(p), m.schedule())
 	}
 	for _, p := range d.Post {
 		cmds = append(cmds, m.plannerPost(p.Group, p.To, p.Message))

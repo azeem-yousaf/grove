@@ -19,6 +19,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/azeem-yousaf/grove/internal/config"
+	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/ui"
@@ -84,6 +85,9 @@ func run() error {
 	version = buildVersion()
 	if len(os.Args) > 1 && os.Args[1] == "mcp-group" {
 		return mcpGroup(os.Args[2:])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "mcp-plan" {
+		return mcpPlan(os.Args[2:])
 	}
 	var (
 		base       = flag.String("base", "", "branch to compare worktrees against (default: auto-detect)")
@@ -309,4 +313,18 @@ func mcpGroup(args []string) error {
 		return errors.New("mcp-group needs --dir and --as")
 	}
 	return group.Serve(os.Stdin, os.Stdout, group.Log{Dir: *dir}, *as, version)
+}
+
+// mcpPlan is the tool server grove gives the planner while a plan runs:
+// `grove mcp-plan --dir <control folder>`. The agent's CLI starts it.
+func mcpPlan(args []string) error {
+	fs := flag.NewFlagSet("mcp-plan", flag.ContinueOnError)
+	dir := fs.String("dir", "", "grove's plan control folder")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dir == "" {
+		return errors.New("mcp-plan needs --dir")
+	}
+	return control.Serve(os.Stdin, os.Stdout, *dir, version)
 }
