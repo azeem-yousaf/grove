@@ -67,6 +67,9 @@ type session struct {
 	crewPlan, crewGroup string
 	crew                plannerState // its state as an orchestrator
 
+	// rulesKey of the orchestrating rules its conversation (id) last got.
+	rulesSent string
+
 	// Token usage (usage.go).
 	uid      string       // grove's id for this agent in the usage ledger
 	created  time.Time    // when it was created
@@ -807,6 +810,7 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	}
 	if ev.Err != nil {
 		s.failed = true
+		s.rulesSent = "" // the conversation may not have taken them in
 		s.entries = append(s.entries, chatEntry{roleError, ev.Err.Error()})
 	}
 	recordErr := m.endTurn(s, ev)

@@ -2,6 +2,8 @@ package ui
 
 import (
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -9,6 +11,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/group"
@@ -415,7 +418,9 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	}
 	s.nextPlan = planIDs(items)[0]
 	st.reports = nil
+	rules, _ := m.rulesFor(s)
 	cmd := m.send(s, text)
+	s.rulesSent = rulesKey(rules)
 	// The chat shows a line about it, not the whole request.
 	s.entries[len(s.entries)-1] = chatEntry{roleNote, summary}
 	return cmd, true
@@ -517,7 +522,35 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 			b.WriteString("- " + r + "\n")
 		}
 	}
-	b.WriteString("\nAnswer with one fenced code block whose language is grove-orchestrate, containing JSON; leave out the lists you don't need. " +
+	if rules, full := m.rulesFor(s); full {
+		b.WriteString("\n" + rules)
+	} else {
+		b.WriteString("\nAnswer with a grove-orchestrate block as before (or grove's tools), following the rules you were given.\n")
+	}
+	return b.String(), "Asked to decide: " + strings.Join(what, "; ")
+}
+
+// rulesFor is the planner's standing instructions for deciding, and whether
+// its request needs them: Claude keeps the conversation, so it gets them
+// again only when they changed since it last did; Codex starts fresh every
+// turn.
+func (m *Model) rulesFor(s *session) (string, bool) {
+	rules := m.orchRules(s)
+	return rules, s.id == "" || s.kind == agent.Codex || s.rulesSent != rulesKey(rules)
+}
+
+// rulesKey fingerprints standing instructions, to tell whether a
+// conversation already has them.
+func rulesKey(rules string) string {
+	sum := sha256.Sum256([]byte(rules))
+	return hex.EncodeToString(sum[:8])
+}
+
+// orchRules is what doesn't change from one decision to the next: the
+// block's format, the control tools and the rules for approvals.
+func (m *Model) orchRules(s *session) string {
+	var b strings.Builder
+	b.WriteString("Answer with one fenced code block whose language is grove-orchestrate, containing JSON; leave out the lists you don't need. " +
 		"Name commands by their id:\n\n")
 	b.WriteString("```grove-orchestrate\n" + `{
   "approve": [{"branch": "feature/api", "id": "3fa2c1-1"}],
@@ -543,7 +576,7 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 		"run the commands it needs there yourself, and tell it exactly what to do next. Don't edit files yourself; the agents do. " +
 		"Post in a group chat to settle anything the agents are stuck on or disagree about. " +
 		"Answer the user in the plan chat (group \"plan\"), not in your reply: they read the plan chat. Keep messages short.\n")
-	return b.String(), "Asked to decide: " + strings.Join(what, "; ")
+	return b.String()
 }
 
 func planIDs(items []orchItem) []string {

@@ -53,10 +53,14 @@ func (m *Model) usageFailed(err error) tea.Cmd {
 }
 
 // setSessionID notes the agent's own session; the session total it reported
-// belongs to the old one.
+// belongs to the old one, and so do the planner's rules unless this is the
+// conversation they started.
 func (s *session) setSessionID(id string) {
 	if id != s.id {
 		s.sessionTotal = usage.Tokens{}
+		if s.id != "" {
+			s.rulesSent = ""
+		}
 	}
 	s.id = id
 }
