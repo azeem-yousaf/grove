@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -136,7 +137,8 @@ func (m *Model) overlay(screen, box string) string {
 func (m *Model) header() string {
 	st := m.st
 	logo := st.pillAccent.Render("grove")
-	left := " " + logo + " " + st.faint.Render(m.version) + "  " + st.bold.Render(m.repo.Name)
+	name := st.bold.Render(m.repo.Name)
+	version := " " + st.faint.Render(m.version)
 
 	mode := st.muted.Render("changes since ") + st.text.Render(m.baseLabel())
 	if m.mode == git.ModeUncommitted {
@@ -144,32 +146,53 @@ func (m *Model) header() string {
 	} else if m.base == "" && m.baseReady {
 		mode = st.muted.Render("uncommitted changes") + st.faint.Render(" (no base branch found)")
 	}
-	left += st.faint.Render("  ·  ") + mode
 
-	var right []string
+	var pills []string
+	count := ""
 	if m.snap != nil {
 		// Overlaps predicted to conflict count as conflicts, not overlaps.
 		if n := m.cleanOverlapCount(); n > 0 {
-			right = append(right, st.pillWarn.Render(fmt.Sprintf("⚠ %s", plural(n, "overlap"))))
+			pills = append(pills, st.pillWarn.Render(fmt.Sprintf("⚠ %s", plural(n, "overlap"))))
 		}
 		if n := m.conflictCount(); n > 0 {
-			right = append(right, st.pillConflict.Render(fmt.Sprintf("✗ %s", plural(n, "conflict"))))
+			pills = append(pills, st.pillConflict.Render(fmt.Sprintf("✗ %s", plural(n, "conflict"))))
 		}
-		right = append(right, st.muted.Render(plural(len(m.snap.States), "worktree")))
+		count = st.muted.Render(plural(len(m.snap.States), "worktree"))
 	}
+	// status and its short form, for when space runs out.
+	status, short := "", ""
+	spin := spinnerFrames[m.frame%len(spinnerFrames)]
 	switch {
 	case m.removing != nil:
-		right = append(right, st.del.Render(spinnerFrames[m.frame%len(spinnerFrames)])+st.muted.Render(" removing "+m.removing.st.Name()))
+		status, short = st.del.Render(spin)+st.muted.Render(" removing "+m.removing.st.Name()), st.del.Render(spin)
 	case m.scanning:
-		right = append(right, st.accent.Render(spinnerFrames[m.frame%len(spinnerFrames)])+st.muted.Render(" scanning"))
+		status, short = st.accent.Render(spin)+st.muted.Render(" scanning"), st.accent.Render(spin)
 	case m.scanErr != nil:
-		right = append(right, st.del.Render("✕ scan failed"))
+		status, short = st.del.Render("✕ scan failed"), st.del.Render("✕")
 	case !m.lastScan.IsZero() && !m.termFocused:
-		right = append(right, st.faint.Render("◌ paused"))
+		status, short = st.faint.Render("◌ paused"), st.faint.Render("◌")
 	case !m.lastScan.IsZero():
-		right = append(right, st.add.Render("●")+st.muted.Render(" live · "+ago(m.now, m.lastScan)))
+		status, short = st.add.Render("●")+st.muted.Render(" live · "+ago(m.now, m.lastScan)), st.add.Render("●")
 	}
-	return spread(left, strings.Join(right, st.faint.Render("  ·  "))+" ", m.width)
+
+	// What the user compares against matters more than the version, the
+	// worktree count (the list shows them) or how fresh the scan is, so
+	// those go first when the line is too narrow.
+	var left, right string
+	for _, v := range [][3]string{
+		{version, count, status},
+		{version, "", status},
+		{version, "", short},
+		{"", "", short},
+	} {
+		left = " " + logo + v[0] + "  " + name + st.faint.Render("  ·  ") + mode
+		parts := slices.DeleteFunc(append(slices.Clone(pills), v[1], v[2]), func(s string) bool { return s == "" })
+		right = strings.Join(parts, st.faint.Render("  ·  ")) + " "
+		if ansi.StringWidth(left)+ansi.StringWidth(right) < m.width {
+			break
+		}
+	}
+	return spread(left, right, m.width)
 }
 
 func (m *Model) footer() string {
@@ -569,7 +592,8 @@ func (m *Model) refreshDiffView() {
 
 	if r.kind == rowTree {
 		s := m.snap.States[r.wt]
-		want := fmt.Sprintf("tree|%s|%d|%t|%p|%p|%d", s.Path, inner, m.dark, m.snap, m.predictions, m.now.Unix()/30)
+		// Redrawn every second: it shows the worktree's agent.
+		want := fmt.Sprintf("tree|%s|%d|%t|%p|%p|%d", s.Path, inner, m.dark, m.snap, m.predictions, m.now.Unix())
 		if want == m.renderedFor {
 			return
 		}
@@ -700,12 +724,6 @@ func (m *Model) summaryLines(wt, width int) []string {
 		}
 		out = append(out, label("Commits")+ab)
 	}
-	if c := s.Last; c != nil {
-		line := st.accent.Render(c.Hash) + " " + st.text.Render(c.Subject)
-		out = append(out, label("Last commit")+ansi.Truncate(line, width-18, "…"))
-		out = append(out, label("")+st.faint.Render(c.Author+" · "+ago(m.now, c.When)))
-	}
-
 	if len(s.Files) == 0 {
 		out = append(out, label("Changes")+st.add.Render("✓ ")+st.muted.Render("none"))
 	} else {
@@ -729,6 +747,9 @@ func (m *Model) summaryLines(wt, width int) []string {
 			out = append(out, label("")+st.warn.Render(fmt.Sprintf("● %d not committed yet", uncommitted)))
 		}
 	}
+	out = append(out, m.taskLines(s, width)...)
+	out = append(out, m.agentLines(s, width)...)
+	out = append(out, m.commitLines(s, width)...)
 
 	// Files this worktree shares with others: the likely merge conflicts.
 	var shared []string
@@ -773,6 +794,10 @@ func (m *Model) summaryLines(wt, width int) []string {
 	if !s.Main && !s.Bare {
 		acts = append(acts, [2]string{"d", "remove"})
 	}
+	// As many as fit, rather than one cut in half.
+	for len(acts) > 1 && ansi.StringWidth(m.hints(acts)) > width-3 {
+		acts = acts[:len(acts)-1]
+	}
 	out = append(out, "", "  "+m.hints(acts))
 
 	if len(m.snap.States) == 1 {
@@ -782,6 +807,106 @@ func (m *Model) summaryLines(wt, width int) []string {
 			"",
 			"    "+m.hints([][2]string{{"n", "create a worktree"}}),
 		)
+	}
+	return out
+}
+
+// summaryLabel starts a line of the worktree summary with a label column.
+func (m *Model) summaryLabel(l string) string {
+	return "  " + m.st.muted.Render(fmt.Sprintf("%-16s", l))
+}
+
+// summaryText wraps text into the summary's value column, at most most
+// lines, the last ending in … when some was left out.
+func (m *Model) summaryText(text string, width, most int, style lipgloss.Style) []string {
+	room := max(width-20, 10)
+	var lines []string
+	for _, l := range renderChatText(text, room, m.st, style) {
+		if strings.TrimSpace(ansi.Strip(l)) != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > most {
+		lines = lines[:most]
+		last := lines[most-1]
+		end := min(ansi.StringWidth(strings.TrimRight(ansi.Strip(last), " ")), room-1)
+		lines[most-1] = ansi.Truncate(last, end, "") + m.st.faint.Render("…")
+	}
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = m.summaryLabel("") + l
+	}
+	return out
+}
+
+// taskLines show the plan task a worktree was made for, if any.
+func (m *Model) taskLines(s git.State, width int) []string {
+	p, t := m.taskFor(s.Path)
+	if t == nil {
+		return nil
+	}
+	st := m.st
+	head := m.taskIcon(t) + " " + st.text.Render(t.Title) + st.faint.Render("  "+string(t.Status)+" · "+p.Title)
+	out := []string{"", m.summaryLabel("Task") + ansi.Truncate(head, max(width-20, 10), "…")}
+	if t.Status == plan.Failed && t.Error != "" {
+		return append(out, m.summaryText(t.Error, width, 2, st.del)...)
+	}
+	return append(out, m.summaryText(t.Brief, width, 2, st.faint)...)
+}
+
+// agentLines show what the worktree's agent is doing and the start of its
+// latest reply.
+func (m *Model) agentLines(s git.State, width int) []string {
+	ses := m.sessionFor(s.Path)
+	if ses == nil {
+		return nil
+	}
+	st := m.st
+	var state string
+	switch {
+	case ses.running:
+		state = st.accent.Render("✦ working")
+	case len(ses.pending) > 0:
+		state = st.warn.Bold(true).Render("✦ needs you")
+	case ses.failed:
+		state = st.del.Render("✦ stopped with an error")
+	case !ses.seen:
+		state = st.add.Render("✦ finished") + st.faint.Render(" · not looked at yet")
+	default:
+		state = st.muted.Render("idle")
+	}
+	out := []string{"", m.summaryLabel("Agent") + st.text.Render(ses.kind.Label()) + st.faint.Render(" · ") + state}
+	for i := len(ses.entries) - 1; i >= 0; i-- {
+		if ses.entries[i].role == roleAgent {
+			return append(out, m.summaryText(ses.entries[i].text, width, 3, st.muted)...)
+		}
+	}
+	return out
+}
+
+// commitLines list the newest commits, marking those not in the base
+// branch yet with ↑.
+func (m *Model) commitLines(s git.State, width int) []string {
+	commits := s.Recent
+	if len(commits) == 0 && s.Last != nil {
+		commits = []git.Commit{*s.Last}
+	}
+	if len(commits) == 0 {
+		return nil
+	}
+	st := m.st
+	out := []string{"", m.summaryLabel("Recent commits")}
+	out[1] = strings.TrimRight(out[1], " ")
+	for i, c := range commits {
+		ahead := s.Base != "" && s.Branch != s.Base && i < s.Ahead
+		mark, hash, subject := "  ", st.faint.Render(c.Hash), st.muted.Render(c.Subject)
+		if ahead {
+			mark, hash, subject = st.accent.Render("↑ "), st.accent.Render(c.Hash), st.text.Render(c.Subject)
+		}
+		when := st.faint.Render(ago(m.now, c.When))
+		left := "    " + mark + hash + " " + subject
+		room := width - ansi.StringWidth(when) - 3
+		out = append(out, spread(ansi.Truncate(left, room, "…"), when+" ", width))
 	}
 	return out
 }

@@ -158,6 +158,10 @@ func TestScanBranchMode(t *testing.T) {
 	if a.Ahead != 1 || a.Behind != 0 {
 		t.Errorf("feature/a ahead/behind = %d/%d, want 1/0", a.Ahead, a.Behind)
 	}
+	if len(a.Recent) != 2 || a.Recent[0].Subject != "edit shared" || a.Recent[1].Subject != "initial" ||
+		a.Recent[0].Author != "t" || a.Recent[0].When.IsZero() || a.Last == nil || *a.Last != a.Recent[0] {
+		t.Errorf("feature/a recent commits = %+v, last = %+v", a.Recent, a.Last)
+	}
 	shared := find(t, a.Files, "shared.txt")
 	if shared.Status != Modified || shared.Added != 2 || shared.Deleted != 1 || shared.Uncommitted {
 		t.Errorf("feature/a shared.txt = %+v", shared)

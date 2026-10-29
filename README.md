@@ -301,10 +301,14 @@ agents' conversations and survive restarts.
 
 ### Overview of every worktree
 
-A summary above the list counts active and clean worktrees, commits ahead
-of and behind the base, working agents, and anything that needs you:
-agents waiting for approval or failed, unresolved merge conflicts,
-unreadable worktrees and overlapping files. Press `w` (or click the summary)
+A line above the list starts with anything that needs you (agents waiting
+for approval or failed, unresolved merge conflicts), then a running plan's
+progress, working and finished agents, active, clean and unreadable
+worktrees, and commits ahead of and behind the base, as many as fit. The
+header beside it counts worktrees, overlaps and conflicts. Selecting a
+worktree shows its plan task, what its agent is doing with the start of its
+latest reply, and its newest commits (`↑` for those not in the base branch
+yet). Press `w` (or click the summary line)
 for the full overview: running plans with their tasks' progress, a table of
 every worktree with its files, `+`/`−` lines, agent status, its plan task
 and group, commits ahead and behind, uncommitted edits,
