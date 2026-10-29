@@ -169,13 +169,19 @@ func (l Log) Unread(member string) ([]Message, error) {
 	if err != nil {
 		return nil, err
 	}
+	return UnreadIn(all, l.Cursor(member), member), nil
+}
+
+// UnreadIn picks member's messages from all after the first cursor, which
+// were read already.
+func UnreadIn(all []Message, cursor int, member string) []Message {
 	var out []Message
-	for _, m := range all[min(l.Cursor(member), len(all)):] {
+	for _, m := range all[min(cursor, len(all)):] {
 		if m.For(member) {
 			out = append(out, m)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // Read returns member's unread messages and marks everything so far read.
@@ -187,12 +193,7 @@ func (l Log) Read(member string, wait time.Duration) ([]Message, error) {
 		if err != nil {
 			return nil, err
 		}
-		var out []Message
-		for _, m := range all[min(l.Cursor(member), len(all)):] {
-			if m.For(member) {
-				out = append(out, m)
-			}
-		}
+		out := UnreadIn(all, l.Cursor(member), member)
 		if len(out) > 0 || !time.Now().Before(deadline) {
 			return out, l.setCursor(member, len(all))
 		}

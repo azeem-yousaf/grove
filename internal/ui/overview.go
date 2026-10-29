@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"slices"
 	"strings"
 	"time"
 
@@ -242,11 +243,21 @@ func (m *Model) attentionItems() []attention {
 	return append(urgent, later...)
 }
 
+// sortAttention orders a by icon, then text. There can be thousands (one
+// per overlapping file) and it runs every frame, so each key is worked out
+// once.
 func sortAttention(a []attention) {
-	for i := 1; i < len(a); i++ {
-		for j := i; j > 0 && ansi.Strip(a[j].icon)+a[j].text < ansi.Strip(a[j-1].icon)+a[j-1].text; j-- {
-			a[j], a[j-1] = a[j-1], a[j]
-		}
+	type keyed struct {
+		key string
+		a   attention
+	}
+	k := make([]keyed, len(a))
+	for i, x := range a {
+		k[i] = keyed{ansi.Strip(x.icon) + x.text, x}
+	}
+	slices.SortStableFunc(k, func(x, y keyed) int { return strings.Compare(x.key, y.key) })
+	for i := range k {
+		a[i] = k[i].a
 	}
 }
 

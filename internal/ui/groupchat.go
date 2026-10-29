@@ -35,6 +35,15 @@ type groupChat struct {
 	input       textarea.Model
 	view        viewport.Model
 	follow      bool
+
+	// The messages rendered so far, for the width and theme they were
+	// rendered at. Messages are only ever appended, so each frame renders
+	// just the new ones.
+	rendered     []string
+	renderedN    int
+	renderedW    int
+	renderedDark bool
+	shown        uint64 // linesKey of what the viewport holds
 }
 
 type groupsReadMsg struct {
@@ -192,9 +201,8 @@ func (m *Model) pollGroups() tea.Cmd {
 			out[l.Dir] = groupRead{msgs: msgs, unread: map[string]int{}}
 		}
 		for _, mb := range members {
-			if n, err := mb.log.Unread(mb.name); err == nil {
-				out[mb.log.Dir].unread[mb.name] = len(n)
-			}
+			r := out[mb.log.Dir]
+			r.unread[mb.name] = len(group.UnreadIn(r.msgs, mb.log.Cursor(mb.name), mb.name))
 		}
 		return groupsReadMsg{out}
 	}
@@ -368,23 +376,7 @@ func (m *Model) groupPane(w, h int) string {
 		lines = append(lines, "", "  "+st.muted.Render("No messages yet. The agents post here when they need each"),
 			"  "+st.muted.Render("other; you can post too, or @branch to address one agent."))
 	} else {
-		for _, msg := range state.msgs {
-			name := st.bold.Render(msg.From)
-			switch msg.From {
-			case group.User:
-				name = st.accent.Bold(true).Render("you")
-			case group.Grove:
-				name = st.warn.Bold(true).Render("grove")
-			}
-			head := " " + st.faint.Render(msg.Time.Local().Format("15:04")) + " " + name
-			if msg.To != "" {
-				head += st.faint.Render(" → " + msg.To)
-			}
-			lines = append(lines, "", head)
-			for _, l := range renderChatText(msg.Text, max(inner-4, 10), st, st.text) {
-				lines = append(lines, "   "+l)
-			}
-		}
+		lines = append(lines, m.groupMessageLines(gc, state.msgs, inner)...)
 	}
 	if state != nil && state.paused {
 		lines = append(lines, "", " "+st.warn.Render(ansi.Truncate(fmt.Sprintf("Paused: agents were woken %d times in a row. Post to let them go on.", state.wakeups), inner-2, "…")))
@@ -402,12 +394,44 @@ func (m *Model) groupPane(w, h int) string {
 	bottom = append(bottom, " "+ansi.Truncate(m.hints([][2]string{{"enter", "post"}, {"@branch", "to one"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}}), inner-1, ""))
 	gc.view.SetWidth(inner)
 	gc.view.SetHeight(max(h-2-len(bottom), 1))
-	gc.view.SetContentLines(lines)
+	// The viewport measures every line it is given, so only hand it new
+	// content.
+	if shown := linesKey(inner, lines); shown != gc.shown {
+		gc.view.SetContentLines(lines)
+		gc.shown = shown
+	}
 	if gc.follow {
 		gc.view.GotoBottom()
 	}
 	body := append(strings.Split(gc.view.View(), "\n"), bottom...)
 	return m.panel(groupTitle(*g)+" · "+p.Title, st.faint.Render(plural(len(p.Members(gc.group)), "agent")), "", body, w, h, m.focus == focusGroup)
+}
+
+// groupMessageLines renders msgs, reusing what earlier frames rendered.
+func (m *Model) groupMessageLines(gc *groupChat, msgs []group.Message, inner int) []string {
+	st := m.st
+	if gc.renderedW != inner || gc.renderedDark != m.dark || gc.renderedN > len(msgs) {
+		gc.rendered, gc.renderedN, gc.renderedW, gc.renderedDark = nil, 0, inner, m.dark
+	}
+	for _, msg := range msgs[gc.renderedN:] {
+		name := st.bold.Render(msg.From)
+		switch msg.From {
+		case group.User:
+			name = st.accent.Bold(true).Render("you")
+		case group.Grove:
+			name = st.warn.Bold(true).Render("grove")
+		}
+		head := " " + st.faint.Render(msg.Time.Local().Format("15:04")) + " " + name
+		if msg.To != "" {
+			head += st.faint.Render(" → " + msg.To)
+		}
+		gc.rendered = append(gc.rendered, "", head)
+		for _, l := range renderChatText(msg.Text, max(inner-4, 10), st, st.text) {
+			gc.rendered = append(gc.rendered, "   "+l)
+		}
+	}
+	gc.renderedN = len(msgs)
+	return gc.rendered
 }
 
 // groveExecutable is the program agents start for the group tools.

@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"hash/maphash"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -54,6 +55,22 @@ type session struct {
 	failed     bool
 	seen       bool // the user has looked since it last finished
 	planner    bool // the planner: reads the repository, never edits it
+
+	rendered chatCache // entries as the chat pane last drew them
+}
+
+// chatCache is a session's entries rendered for one width and theme.
+// Entries are only ever appended (or replaced wholesale, which changes the
+// first), so each frame renders just the new ones.
+type chatCache struct {
+	width int
+	dark  bool
+	first chatEntry
+	n     int
+	lines []string
+
+	stream      string // the reply arriving, as streamLines shows it
+	streamLines []string
 }
 
 type chatRole uint8
@@ -1030,9 +1047,20 @@ func (m *Model) chatPane(w, h int) string {
 	}
 
 	bottom := m.chatBottom(s, inner)
+	if s.running {
+		// Below the conversation rather than in it, so the spinner turning
+		// doesn't change what the viewport holds.
+		bottom = append([]string{"      " + st.accent.Render(spinnerFrames[m.frame%len(spinnerFrames)]) + st.faint.Render(" "+s.kind.Label()+" is working…")}, bottom...)
+	}
 	m.chatView.SetWidth(inner)
 	m.chatView.SetHeight(max(h-2-len(bottom), 1))
-	m.chatView.SetContentLines(m.highlightChat(m.chatLines(s, inner), inner))
+	// The viewport measures every line it is given, which is slow for a
+	// long conversation, so it only gets new content when that changed.
+	lines := m.highlightChat(m.chatLines(s, inner), inner)
+	if key := linesKey(inner, lines); key != m.chatShown {
+		m.chatView.SetContentLines(lines)
+		m.chatShown = key
+	}
 	if m.chatFollow {
 		m.chatView.GotoBottom()
 	}
@@ -1131,17 +1159,32 @@ func (m *Model) chatLines(s *session, width int) []string {
 			"  "+st.muted.Render("Model: "+modelName(s.model)+". Type /model to change it."))
 		return out
 	}
-	add := func(prefix lipgloss.Style, label string, body string, style lipgloss.Style) {
-		lines := renderChatText(body, max(width-7, 10), st, style) // a column clear of the border
-		for i, l := range lines {
-			p := "      "
-			if i == 0 {
-				p = " " + prefix.Render(fmt.Sprintf("%-5s", label))
-			}
-			out = append(out, p+l)
+	// Full slice, so appending below copies instead of writing into the
+	// cache.
+	out = m.entryLines(s, width)
+	out = out[:len(out):len(out)]
+	if s.stream != "" {
+		// Spinner frames come faster than the reply does.
+		if c := &s.rendered; c.stream != s.stream {
+			c.stream, c.streamLines = s.stream, appendChatText(nil, st.add.Bold(true), "✦", s.stream, st.text, width, st)
 		}
+		out = append(append(out, ""), s.rendered.streamLines...)
 	}
-	for _, e := range s.entries {
+	return out
+}
+
+// entryLines renders s's entries, reusing what earlier frames rendered.
+func (m *Model) entryLines(s *session, width int) []string {
+	c := &s.rendered
+	if c.width != width || c.dark != m.dark || c.n > len(s.entries) || c.n > 0 && c.first != s.entries[0] {
+		*c = chatCache{width: width, dark: m.dark}
+	}
+	st := m.st
+	out := c.lines
+	add := func(prefix lipgloss.Style, label string, body string, style lipgloss.Style) {
+		out = appendChatText(out, prefix, label, body, style, width, st)
+	}
+	for _, e := range s.entries[c.n:] {
 		switch e.role {
 		case roleUser:
 			out = append(out, "")
@@ -1157,12 +1200,37 @@ func (m *Model) chatLines(s *session, width int) []string {
 			add(st.del.Bold(true), "✕", e.text, st.del)
 		}
 	}
-	if s.stream != "" {
-		out = append(out, "")
-		add(st.add.Bold(true), "✦", s.stream, st.text)
+	if len(s.entries) > 0 {
+		c.first = s.entries[0]
 	}
-	if s.running {
-		out = append(out, "", "      "+st.accent.Render(spinnerFrames[m.frame%len(spinnerFrames)])+st.faint.Render(" "+s.kind.Label()+" is working…"))
+	c.lines, c.n = out, len(s.entries)
+	return out
+}
+
+// linesKey identifies content for a viewport of width, to tell whether it
+// changed. Hashing is far cheaper than the viewport measuring each line.
+func linesKey(width int, lines []string) uint64 {
+	var h maphash.Hash
+	h.SetSeed(linesSeed)
+	fmt.Fprint(&h, width)
+	for _, l := range lines {
+		h.WriteString(l)
+		h.WriteByte('\n')
+	}
+	return h.Sum64()
+}
+
+var linesSeed = maphash.MakeSeed()
+
+// appendChatText adds one message to out under a label, wrapped to width
+// with a column clear of the border.
+func appendChatText(out []string, prefix lipgloss.Style, label, body string, style lipgloss.Style, width int, st styles) []string {
+	for i, l := range renderChatText(body, max(width-7, 10), st, style) {
+		p := "      "
+		if i == 0 {
+			p = " " + prefix.Render(fmt.Sprintf("%-5s", label))
+		}
+		out = append(out, p+l)
 	}
 	return out
 }

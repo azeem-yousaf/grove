@@ -692,3 +692,33 @@ func TestSuggestedCommands(t *testing.T) {
 		t.Errorf("suggestedCommands = %q, want %q", got, want)
 	}
 }
+
+func TestChatRenderCacheFollowsChanges(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	s := m.newSession("/src/shop", "main", agent.Claude)
+	s.entries = []chatEntry{{roleAgent, "first reply"}}
+	lines := func(w int) string { return ansi.Strip(strings.Join(m.chatLines(s, w), "\n")) }
+	if !strings.Contains(lines(60), "first reply") {
+		t.Fatal("entry not rendered")
+	}
+	s.entries = append(s.entries, chatEntry{roleUser, "and then"})
+	if out := lines(60); !strings.Contains(out, "first reply") || !strings.Contains(out, "and then") {
+		t.Errorf("appended entry missing:\n%s", out)
+	}
+	// Switching agents replaces the conversation, maybe with as many entries.
+	s.entries = []chatEntry{{roleNote, "Switched"}, {roleNote, "fresh"}}
+	if out := lines(60); strings.Contains(out, "first reply") || !strings.Contains(out, "fresh") {
+		t.Errorf("replaced conversation shows the old one:\n%s", out)
+	}
+	// A narrower pane wraps again.
+	s.entries = []chatEntry{{roleAgent, strings.Repeat("word ", 30)}}
+	wide, narrow := len(m.chatLines(s, 120)), len(m.chatLines(s, 40))
+	if narrow <= wide {
+		t.Errorf("narrow pane should wrap to more lines: %d vs %d", narrow, wide)
+	}
+	s.stream = "partial"
+	s.stream += " more"
+	if out := lines(40); !strings.Contains(out, "partial more") {
+		t.Errorf("stream not refreshed:\n%s", out)
+	}
+}

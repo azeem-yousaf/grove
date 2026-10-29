@@ -142,7 +142,8 @@ type Model struct {
 	chatInput      textarea.Model
 	chatDraft      string // put in the chat input when the chat next opens (> on a hunk)
 	chatView       viewport.Model
-	chatFollow     bool // keep the chat scrolled to the newest line
+	chatShown      uint64 // linesKey of what chatView holds
+	chatFollow     bool   // keep the chat scrolled to the newest line
 	chatSel        chatSelection
 	picker         *picker
 	watchAsk       *watchAsk // who watches the next plan, asked before planning
