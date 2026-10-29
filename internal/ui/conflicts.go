@@ -93,6 +93,19 @@ type (
 	}
 )
 
+// mergeConflicts test-merges two branches; tests replace it to see whether
+// the merge review asked git or used the prediction cache.
+var mergeConflicts = git.MergeConflicts
+
+// cachedConflicts is the predictor's answer for merging source into target,
+// if it has one.
+func cachedConflicts(ctx context.Context, p *git.Predictor, dir, target, source string) ([]string, bool) {
+	if p == nil {
+		return nil, false
+	}
+	return p.Cached(ctx, dir, target, source)
+}
+
 func (m *Model) openConflictReview() tea.Cmd {
 	if m.snap == nil {
 		return nil
@@ -122,7 +135,7 @@ func (m *Model) openConflictReview() tea.Cmd {
 		}
 		sources = append(sources, source{s.Name(), s.Branch, hasUncommitted(s)})
 	}
-	seq, dir, into := c.seq, c.path, c.branch
+	seq, dir, into, predictor := c.seq, c.path, c.branch, m.predictor
 	return tea.Batch(m.startAnimating(), func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 60*time.Second)
 		defer cancel()
@@ -138,7 +151,12 @@ func (m *Model) openConflictReview() tea.Cmd {
 			c := mergeCheck{name: s.name, branch: s.branch, dirty: s.dirty}
 			c.commits, c.err = git.CommitsBetween(ctx, dir, into, s.branch)
 			if c.err == nil && c.commits > 0 {
-				_, c.paths, c.err = git.MergeConflicts(ctx, dir, into, s.branch)
+				// The last prediction may already have merged these two.
+				if paths, ok := cachedConflicts(ctx, predictor, dir, into, s.branch); ok {
+					c.paths = paths
+				} else {
+					_, c.paths, c.err = mergeConflicts(ctx, dir, into, s.branch)
+				}
 			}
 			checks = append(checks, c)
 		}

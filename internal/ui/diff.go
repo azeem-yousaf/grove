@@ -10,6 +10,7 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	chromastyles "github.com/alecthomas/chroma/v2/styles"
+	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -256,12 +257,55 @@ func (h *highlighter) line(text string, bg, hiBg color.Color, hiStart, hiEnd int
 	return b.String()
 }
 
+// clashingHunks marks every line of each hunk whose changed lines fall in
+// clash, the lines predicted to conflict with another worktree. A removed
+// line counts as the new-side line before it, the way the prediction places
+// a pure deletion.
+func clashingHunks(lines []diffLine, clash []git.LineRange) []bool {
+	marked := make([]bool, len(lines))
+	if len(clash) == 0 {
+		return marked
+	}
+	in := func(n int) bool {
+		for _, r := range clash {
+			if n >= r.Start && n <= r.End {
+				return true
+			}
+		}
+		return false
+	}
+	start, next, hit := 0, 1, false
+	flush := func(end int) {
+		for i := start; i < end; i++ {
+			marked[i] = hit
+		}
+	}
+	for i, l := range lines {
+		switch l.kind {
+		case lineHunk:
+			flush(i)
+			start, next, hit = i, l.new, false
+		case lineAdd:
+			hit = hit || in(l.new)
+			next = l.new + 1
+		case lineContext:
+			next = l.new + 1
+		case lineDel:
+			hit = hit || in(max(next-1, 1))
+		}
+	}
+	flush(len(lines))
+	return marked
+}
+
 // renderDiff draws a parsed diff to width columns. It returns the content
 // lines and a matching gutter of line numbers, which stays put while the
-// content scrolls sideways.
-func renderDiff(pd parsedDiff, filename string, width int, st styles) (content, gutter []string) {
+// content scrolls sideways. Hunks touching clash get a bar in the gutter and
+// a tinted header.
+func renderDiff(pd parsedDiff, filename string, width int, st styles, clash []git.LineRange) (content, gutter []string) {
 	p := st.p
 	h := newHighlighter(filename, p)
+	marked := clashingHunks(pd.lines, clash)
 	nw := max(len(strconv.Itoa(pd.maxLineNo)), 3)
 	gutterWidth := nw*2 + 4
 	codeWidth := max(width-gutterWidth, 10)
@@ -284,18 +328,27 @@ func renderDiff(pd parsedDiff, filename string, width int, st styles) (content, 
 	}
 
 	muted := st.faint
-	sep := st.faint.Render("│") + " "
-	for _, l := range pd.lines {
+	plainSep := st.faint.Render("│") + " "
+	clashSep := st.conflict.Render("┃") + " "
+	for i, l := range pd.lines {
 		text := expandTabs(l.text)
+		sep := plainSep
+		if marked[i] {
+			sep = clashSep
+		}
 		switch l.kind {
 		case lineHunk:
 			label := "⋯"
 			if l.text != "" {
 				label = "⋯ " + l.text
 			}
-			hs := lipgloss.NewStyle().Foreground(p.accentAlt).Background(p.hunkBg)
-			gutter = append(gutter, lipgloss.NewStyle().Background(p.hunkBg).Render(strings.Repeat(" ", gutterWidth)))
-			content = append(content, pad(hs.Render(" "+ansi.Truncate(label, codeWidth-2, "…")), p.hunkBg))
+			bg, hs := p.hunkBg, lipgloss.NewStyle().Foreground(p.accentAlt).Background(p.hunkBg)
+			if marked[i] {
+				label = "✗ conflicts " + label
+				bg, hs = p.conflictBg, lipgloss.NewStyle().Foreground(p.conflict).Background(p.conflictBg).Bold(true)
+			}
+			gutter = append(gutter, lipgloss.NewStyle().Background(bg).Render(strings.Repeat(" ", gutterWidth)))
+			content = append(content, pad(hs.Render(" "+ansi.Truncate(label, codeWidth-2, "…")), bg))
 		case lineAdd:
 			gutter = append(gutter, num(0, muted)+" "+num(l.new, st.add)+" "+sep)
 			content = append(content, pad(st.add.Background(p.addBg).Render("+ ")+h.line(text, p.addBg, p.addBgHi, tabShift(l.text, l.hiStart), tabShift(l.text, l.hiEnd)), p.addBg))
