@@ -357,6 +357,11 @@ func (m *Model) groupSummaryLines(gi, width int) []string {
 	if len(agents) > 0 {
 		out = append(out, label("Agents")+strings.Join(agents, st.faint.Render(" · ")))
 	}
+	if p != nil {
+		if u := m.groupUsage(p, grp.ID); u != "" {
+			out = append(out, label("Tokens")+u+st.faint.Render("  T for details"))
+		}
+	}
 
 	// Members, including tasks whose worktree isn't made yet.
 	out = append(out, "", "  "+st.bold.Render("Members"))

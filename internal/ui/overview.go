@@ -407,6 +407,9 @@ func (m *Model) overviewPane(w, h int) string {
 	if o.uncommitted > 0 {
 		totals = append(totals, st.warn.Render(fmt.Sprintf("● %d with uncommitted work", o.uncommitted)))
 	}
+	if u := m.totalUsage(); u != "" {
+		totals = append(totals, u+st.faint.Render(" (T)"))
+	}
 
 	cols := m.overviewColumns(inner)
 	header := "  "
@@ -719,8 +722,12 @@ func (m *Model) planLines(width, most int) []string {
 		if len(p.Groups) > 0 {
 			groups = st.faint.Render(" · ") + st.warn.Render(plural(len(p.Groups), "group"))
 		}
+		tokens := ""
+		if u := m.planUsage(p); u != "" {
+			tokens = st.faint.Render(" · ") + u
+		}
 		line := " " + st.bold.Render("▸ "+p.Title) + st.faint.Render(" · ") + status + st.faint.Render(fmt.Sprintf(" · %d tasks: ", len(p.Tasks))) +
-			strings.Join(parts, st.faint.Render(", ")) + groups
+			strings.Join(parts, st.faint.Render(", ")) + groups + tokens
 		out = append(out, ansi.Truncate(line, width, "…"))
 	}
 	return out
