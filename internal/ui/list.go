@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -16,15 +17,17 @@ import (
 type rowKind uint8
 
 const (
-	rowTree rowKind = iota // a worktree header
-	rowFile                // a changed file
+	rowTree  rowKind = iota // a worktree header
+	rowFile                 // a changed file
+	rowGroup                // a plan group's header, above its worktrees
 )
 
 // row is one selectable item in the worktree list.
 type row struct {
 	kind rowKind
-	wt   int // index into snapshot States
+	wt   int // index into snapshot States; -1 for rowGroup
 	file int // index into that state's Files, for rowFile
+	grp  int // index into m.listGroups, or -1 outside every group
 }
 
 // listLine is one rendered line of the list. Several lines can belong to
@@ -37,6 +40,9 @@ type listLine struct {
 // selKey identifies a row across refreshes so the selection stays put while
 // the data underneath it changes.
 func (m *Model) selKey(r row) string {
+	if r.kind == rowGroup {
+		return m.listGroups[r.grp].key()
+	}
 	st := m.snap.States[r.wt]
 	if r.kind == rowTree {
 		return st.Path
@@ -69,24 +75,62 @@ func (m *Model) visibleFiles(wt int) []int {
 func (m *Model) filtering() bool { return m.filterQuery != "" || m.overlapView != overlapsOff }
 
 // rebuildRows recomputes the selectable rows and restores the selection.
+// A group's worktrees follow its header, where the first of them would be.
 func (m *Model) rebuildRows() {
 	key := m.lastSel
 	m.rows = m.rows[:0]
-	for i, st := range m.snap.States {
-		files := m.visibleFiles(i)
-		if m.filtering() && len(files) == 0 {
+	m.listGroups = m.findGroups()
+	groupOf := map[int]int{}
+	for gi, g := range m.listGroups {
+		for _, wt := range g.members {
+			groupOf[wt] = gi
+		}
+	}
+	added := map[int]bool{}
+	for i := range m.snap.States {
+		gi, grouped := groupOf[i]
+		if !grouped {
+			m.addTree(i, -1)
 			continue
 		}
-		m.rows = append(m.rows, row{kind: rowTree, wt: i})
-		if m.collapsed[st.Path] {
+		if added[gi] {
 			continue
 		}
-		for _, f := range files {
-			m.rows = append(m.rows, row{kind: rowFile, wt: i, file: f})
+		added[gi] = true
+		g := m.listGroups[gi]
+		start := len(m.rows)
+		m.rows = append(m.rows, row{kind: rowGroup, wt: -1, grp: gi})
+		if m.collapsed[g.key()] {
+			if m.filtering() && !slices.ContainsFunc(g.members, func(wt int) bool { return len(m.visibleFiles(wt)) > 0 }) {
+				m.rows = m.rows[:start]
+			}
+			continue
+		}
+		for _, wt := range g.members {
+			m.addTree(wt, gi)
+		}
+		if len(m.rows) == start+1 && m.filtering() {
+			m.rows = m.rows[:start]
 		}
 	}
 	m.cursor = m.findRow(key)
 	m.syncSel()
+}
+
+// addTree adds a worktree and its visible files, unless a filter leaves it
+// nothing to show.
+func (m *Model) addTree(wt, grp int) {
+	files := m.visibleFiles(wt)
+	if m.filtering() && len(files) == 0 {
+		return
+	}
+	m.rows = append(m.rows, row{kind: rowTree, wt: wt, grp: grp})
+	if m.collapsed[m.snap.States[wt].Path] {
+		return
+	}
+	for _, f := range files {
+		m.rows = append(m.rows, row{kind: rowFile, wt: wt, file: f, grp: grp})
+	}
 }
 
 // syncSel remembers the key of the selected row.
@@ -106,7 +150,7 @@ func (m *Model) findRow(key string) int {
 	}
 	if key == "" {
 		for i, r := range m.rows {
-			if r.wt == m.hereIdx {
+			if r.kind != rowGroup && r.wt == m.hereIdx {
 				return i
 			}
 		}
@@ -127,6 +171,14 @@ func (m *Model) findRow(key string) int {
 			return i
 		}
 	}
+	// A worktree folded away inside its group: select the group.
+	for i, r := range m.rows {
+		if r.kind == rowGroup && slices.ContainsFunc(m.listGroups[r.grp].members, func(wt int) bool {
+			return git.SamePath(m.snap.States[wt].Path, wtPath)
+		}) {
+			return i
+		}
+	}
 	return min(m.cursor, len(m.rows)-1)
 }
 
@@ -134,24 +186,57 @@ func (m *Model) findRow(key string) int {
 func (m *Model) listLines(width int) []listLine {
 	st := m.st
 	var lines []listLine
+	stats := make([]*groupStats, len(m.listGroups))
+	statsOf := func(gi int) groupStats {
+		if stats[gi] == nil {
+			o := m.groupStats(gi)
+			stats[gi] = &o
+		}
+		return *stats[gi]
+	}
+	open := -1 // the group whose box is open
+	closeBox := func() {
+		if open >= 0 && width >= groupBoxWidth {
+			lines = append(lines, listLine{row: -1, text: m.groupBottom(m.groupColor(open, statsOf(open)), width)})
+		}
+		open = -1
+	}
 	for ri, r := range m.rows {
 		selected := ri == m.cursor
+		if r.grp != open {
+			closeBox()
+		}
+		// Rows inside a group are drawn narrower and framed by its border.
+		w, side := width, func(s string) string { return s }
+		if r.grp >= 0 && r.kind != rowGroup {
+			w, side = m.groupSide(m.groupColor(r.grp, statsOf(r.grp)), width)
+		}
 		switch r.kind {
-		case rowTree:
+		case rowGroup:
 			if len(lines) > 0 {
 				lines = append(lines, listLine{row: -1})
 			}
-			head, meta := m.treeLines(r.wt, width, selected)
-			lines = append(lines, listLine{row: ri, text: head}, listLine{row: ri, text: meta})
+			lines = append(lines, listLine{row: ri, text: m.groupHeader(r.grp, statsOf(r.grp), width, selected)})
+			if !m.collapsed[m.listGroups[r.grp].key()] {
+				open = r.grp
+			}
+		case rowTree:
+			// The first worktree of a group sits right under its header.
+			if len(lines) > 0 && (r.grp < 0 || m.rows[ri-1].kind != rowGroup) {
+				lines = append(lines, listLine{row: -1, text: side("")})
+			}
+			head, meta := m.treeLines(r.wt, w, selected)
+			lines = append(lines, listLine{row: ri, text: side(head)}, listLine{row: ri, text: side(meta)})
 			if !m.collapsed[m.snap.States[r.wt].Path] {
-				if note := m.treeNote(r.wt, width); note != "" {
-					lines = append(lines, listLine{row: -1, text: note})
+				if note := m.treeNote(r.wt, w); note != "" {
+					lines = append(lines, listLine{row: -1, text: side(note)})
 				}
 			}
 		case rowFile:
-			lines = append(lines, listLine{row: ri, text: m.fileLine(r, width, selected)})
+			lines = append(lines, listLine{row: ri, text: side(m.fileLine(r, w, selected))})
 		}
 	}
+	closeBox()
 	if len(m.rows) == 0 {
 		msg := "No worktrees"
 		if m.filtering() {

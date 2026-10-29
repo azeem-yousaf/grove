@@ -139,7 +139,7 @@ func (m *Model) withAgent(then func(agent.Kind) tea.Cmd) tea.Cmd {
 	if len(installed) == 1 {
 		return then(installed[0])
 	}
-	m.picker = &picker{kinds: installed, remember: true, then: then}
+	m.picker = &picker{kinds: installed, then: then}
 	return nil
 }
 
@@ -149,7 +149,7 @@ func (m *Model) chooseAgent(current agent.Kind, then func(agent.Kind) tea.Cmd) t
 	if len(installed) < 2 {
 		return m.notify("Only "+current.Label()+" is installed", toastInfo)
 	}
-	p := &picker{kinds: installed, remember: true, then: then}
+	p := &picker{kinds: installed, then: then}
 	for i, k := range installed {
 		if k == current {
 			p.cursor = i
@@ -369,6 +369,7 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 			return nil
 		}
 		m.chatInput.SetValue("")
+		m.userActed()
 		return m.send(s, text)
 	}
 	var cmd tea.Cmd
@@ -484,6 +485,7 @@ func (m *Model) setModel(s *session, model string) tea.Cmd {
 // onPendingKey handles the approval or suggested-command card.
 func (m *Model) onPendingKey(s *session, key string) tea.Cmd {
 	a := s.pending[0]
+	m.userActed()
 	next := func() tea.Cmd {
 		s.pending = s.pending[1:]
 		return m.afterPending(s)
@@ -725,7 +727,7 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	s.seen = viewing
 	cmds := []tea.Cmd{m.startScan()}
 	if s.planner {
-		cmds = append(cmds, m.onPlannerReply(s, reply))
+		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(reply), m.orchestrate())
 	} else {
 		cmds = append(cmds, m.onTaskTurn(s, ev))
 	}
@@ -1047,6 +1049,9 @@ func (m *Model) chatBottom(s *session, width int) []string {
 	if len(s.pending) > 0 {
 		a := s.pending[0]
 		head, keys := st.warn.Bold(true).Render(" "+s.kind.Label()+" wants to run"), [][2]string{{"enter", "allow"}, {"esc", "deny"}}
+		if a.kind == pendingApproval && m.watchedBy(s.path) && !m.orch.paused {
+			head += st.faint.Render("  · the planner will decide unless you do")
+		}
 		if a.kind == pendingCommand {
 			head, keys = st.accent.Bold(true).Render(" Suggested command"), [][2]string{{"enter", "run"}, {"e", "edit"}, {"esc", "skip"}}
 		}

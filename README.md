@@ -132,9 +132,9 @@ rescanned straight away. `↑` brings back earlier commands.
 
 Press `a` on a worktree to give it an agent: Claude Code or Codex, whichever
 is installed and signed in on your PC. grove never asks for an API key; it
-runs the tool you already use. If both are installed, grove asks once and
-remembers (`ctrl+a` switches later; it's saved as `[ai] agent` in the
-config).
+runs the tool you already use. If both are installed, grove asks which to
+use; tick *Remember my choice* (off by default) to stop it asking
+(`ctrl+a` switches later; it's saved as `[ai] agent` in the config).
 
 ```
 ╭─ ✦ feature/auth · Claude Code ─────────────────── $0.04 ─╮
@@ -203,11 +203,32 @@ only read, never create or edit issues). It asks about anything unclear and
 then proposes a plan: tasks, each with a branch and a brief for its agent,
 and groups of tasks whose agents will need to coordinate.
 
+Before you plan, grove asks who will watch the plan's agents while it runs:
+
+- **You**: commands an agent was refused, questions it ends a turn with and
+  group chats all wait for you, as with any other agent.
+- **The planner**, as an orchestrator: grove sends it what would otherwise
+  wait for you, and it approves commands that are safe and needed for the
+  task (builds, tests, linters), denies destructive ones with a reason for
+  the agent, answers questions the plan and the code can answer, and
+  follows the group chats, posting when agents are stuck or disagree. What
+  it doesn't decide stays for you, and you can always answer first: an
+  approval card says the planner will decide unless you do. Its decisions
+  show in its chat and in each agent's chat. After `[planner]
+  max_decisions` (default 20) turns in a row it pauses until you say
+  something to it or to an agent.
+
+Tick *Remember my choice* (off by default) to save the answer as
+`[planner] watcher` and stop being asked.
+
 The plan opens for review (`ctrl+o` in the planner brings it back). Nothing
 is created until you start it:
 
 - `enter` edits a task's title, branch and brief, `g` moves it between
   groups (or makes it isolated), `r` renames its group and `d` removes it.
+  Start a group's name with an emoji (`🛒 Checkout`) to give it an icon in
+  the list. The planner may suggest one.
+- `o` switches who watches the plan between you and the planner.
 - `s` checks that no branch or folder already exists and starts the plan.
   grove creates a worktree per task (copying the `[new] copy` files), and
   starts each task's agent with its brief, at most `[planner] max_agents`
@@ -230,8 +251,32 @@ read-only permission for those folders, and every other worktree stays off
 limits. (Codex's sandbox can read anywhere, so with Codex this is by
 instruction only.)
 
-Press `t` on a grouped task's worktree (or `ctrl+g` in its agent chat) to
-open the group chat. You see every message and can post too; start with
+In the list, a group's worktrees sit together in a box under the group's
+name and icon:
+
+```
+╭─ ▾ 🛒 Checkout  2 worktrees  ✦ 1 working  ✓ 1/2 done ──── +131 −19 ─╮
+│ ▾ ● feature/cart-api  ◆ here                             +122 −16   │
+│     C:\src\shop-cart-api · 4 files · ↑4                             │
+│     M src/api/cart.ts                          ⚠   +20 −4    ■■···  │
+│                                                                     │
+│ ▸ ✦ feature/cart-ui                                         +9 −3   │
+╰─────────────────────────────────────────────────────────────────────╯
+```
+
+The header counts the group's worktrees, conflicts between them, agents
+that need you, are working or failed, finished tasks and chat messages. The
+border shows what most needs you: red when members will conflict, amber
+when an agent waits for you, the accent colour while agents work. `enter`
+or `←` folds the group to one line. Selecting the header shows a summary in
+the right pane: each member's task and agent, which members will conflict
+(with each other or with other worktrees), and the latest messages in the
+group chat. In a narrow list the box becomes a bar down the left side.
+Worktrees stay grouped for as long as they exist, also after the plan is
+done.
+
+Press `t` on a group's header or one of its worktrees (or `ctrl+g` in a
+grouped agent's chat) to open the group chat. You see every message and can post too; start with
 `@branch` to address one agent. When a message arrives for an agent that
 isn't working, grove starts a turn so it can answer. To keep agents from
 waking each other forever, grove stops after `[planner] max_wakeups`
@@ -282,18 +327,18 @@ worktrees work the same way. The main worktree can't be removed.
 | Key | Action |
 |---|---|
 | `↑` `↓` / `j` `k` | move |
-| `←` `→` / `h` `l` | fold / unfold a worktree |
-| `[` `]` | previous / next worktree |
+| `←` `→` / `h` `l` | fold / unfold a worktree or group |
+| `[` `]` | previous / next worktree or group |
 | `tab` | switch between the list and the diff |
 | `→` / `←` | into the diff from a file; back to the list from the diff's left edge |
-| `enter` | open the file (or fold a worktree) |
+| `enter` | open the file (or fold a worktree or group) |
 | `f` | show in Explorer / Finder |
 | `e` | open the worktree in your editor |
 | `y` | copy the path |
 | `n` | create a worktree (in the list) |
 | `a` | open the worktree's AI agent |
 | `P` | the planner: turn requirements into tasks and worktrees |
-| `t` | the group chat of a grouped task's worktree |
+| `t` | the group chat of a group, or of a grouped task's worktree |
 | `w` | overview of every worktree |
 | `c` | merge other worktrees' branches into this one |
 | `u` | undo everything the worktree's agent changed |
@@ -346,6 +391,12 @@ open_editor = false                                             # open new workt
 [ai]                 # the worktree agents (key a)
 agent = "claude"     # "claude" or "codex"; "" = ask when both are installed
 model = ""           # passed to the agent; "" = its default
+
+[planner]            # plans (key P)
+max_agents = 3       # task agents working at once; the rest wait
+max_wakeups = 6      # wake-ups in a row in a group chat before waiting for you
+max_decisions = 20   # turns in a row the planner takes for a plan it watches
+watcher = ""         # who watches a plan's agents: "you" or "planner"; "" = ask before each plan
 
 [open]               # per-extension override for `enter`
 ".log" = "notepad"

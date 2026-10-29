@@ -87,7 +87,7 @@ var helpSections = []helpSection{
 	{"Agent", [][2]string{
 		{"a", "open worktree agent"},
 		{"P", "planner: plan tasks"},
-		{"t", "group chat of a task"},
+		{"t", "group chat"},
 		{"enter", "send / allow / run"},
 		{"esc", "deny or skip a card"},
 		{"ctrl+x", "stop the agent"},

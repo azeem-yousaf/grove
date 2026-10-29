@@ -13,7 +13,7 @@ import (
 const reply = "Here's how I'd split it.\n\n" +
 	"```grove-plan\n" + `{
   "title": "Guest checkout",
-  "groups": [{"id": "checkout", "name": "Checkout flow"}, {"id": "lonely", "name": "Nobody"}],
+  "groups": [{"id": "checkout", "name": "Checkout flow", "icon": "🛒"}, {"id": "lonely", "name": "Nobody"}],
   "tasks": [
     {"id": "api", "title": "Checkout API", "brief": "Add POST /checkout/guest.", "branch": "feature/guest-api", "group": "checkout"},
     {"id": "ui", "title": "Checkout page", "brief": "Add the guest form.", "branch": "feature/guest-ui", "group": "checkout"},
@@ -34,7 +34,7 @@ func TestFromReply(t *testing.T) {
 		t.Fatalf("tasks = %+v", p.Tasks)
 	}
 	// A group of one has nobody to talk to, so its task becomes isolated.
-	if len(p.Groups) != 1 || p.Groups[0].ID != "checkout" || p.Tasks[2].Group != "" {
+	if len(p.Groups) != 1 || p.Groups[0].ID != "checkout" || p.Groups[0].Icon != "🛒" || p.Tasks[2].Group != "" {
 		t.Errorf("groups = %+v, docs group %q", p.Groups, p.Tasks[2].Group)
 	}
 	if m := p.Members("checkout"); len(m) != 2 || m[1].ID != "ui" {

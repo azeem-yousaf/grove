@@ -300,7 +300,7 @@ func (m *Model) ovSelect() {
 		return
 	}
 	path := m.snap.States[m.ovIndex()].Path
-	delete(m.collapsed, path)
+	m.unfold(path)
 	m.lastSel = path
 	m.focus = focusList
 	m.rebuildRows()

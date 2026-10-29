@@ -96,6 +96,8 @@ func (m *Model) render() string {
 		return m.overlay(screen, m.createModal())
 	case m.picker != nil:
 		return m.overlay(screen, m.pickerModal())
+	case m.watchAsk != nil:
+		return m.overlay(screen, m.watchModal())
 	case m.undo != nil:
 		return m.overlay(screen, m.undoModal())
 	case m.conflicts != nil:
@@ -198,7 +200,7 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
 	case m.creating != nil:
 		pairs = [][2]string{{"enter", "create"}, {"tab", "next field"}, {"esc", "cancel"}}
-	case m.picker != nil, m.undo != nil, m.quitAsk:
+	case m.picker != nil, m.watchAsk != nil, m.undo != nil, m.quitAsk:
 		pairs = [][2]string{{"enter", "confirm"}, {"esc", "cancel"}}
 	case m.conflicts != nil, m.review != nil:
 		pairs = [][2]string{{"esc", "close"}}
@@ -212,6 +214,8 @@ func (m *Model) footer() string {
 		pairs = [][2]string{{"enter", "post"}, {"@branch", "to one agent"}, {"tab", "list"}, {"pgup/pgdn", "scroll"}}
 	case m.focus == focusDiff:
 		pairs = [][2]string{{"↑↓", "scroll"}, {"n/N", "hunk"}, {"[ ]", "file"}, {"enter", "open"}, {"tab", "list"}, {"?", "help"}}
+	case m.focus == focusList && m.groupSelected():
+		pairs = [][2]string{{"enter", "fold"}, {"t", "group chat"}, {"[ ]", "prev / next"}, {"w", "overview"}, {"n", "new"}, {"P", "planner"}, {"o", "overlaps"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	case ok && r.kind == rowFile:
 		pairs = [][2]string{{"enter", "open"}, {"f", "folder"}, {"y", "copy"}, {"e", "editor"}, {":", "git"}, {"tab", "diff"}, {"m", "mode"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}}
 	default:
@@ -453,6 +457,14 @@ func (m *Model) diffHeader(width int) []string {
 func (m *Model) diffPane(w, h int) string {
 	focused := m.focus == focusDiff
 	inner := w - 2
+	if cr, ok := m.cursorRow(); ok && cr.kind == rowGroup {
+		_, grp := m.groupPlan(cr.grp)
+		foot := ""
+		if m.diff.TotalLineCount() > m.diff.Height() {
+			foot = scrollLabel(m.diff.YOffset(), m.diff.TotalLineCount(), m.diff.Height())
+		}
+		return m.panel(groupTitle(grp), m.st.faint.Render("group"), foot, strings.Split(m.diff.View(), "\n"), w, h, focused)
+	}
 	r, ok := m.selected()
 	if !ok {
 		body := []string{}
@@ -500,6 +512,25 @@ func (m *Model) refreshDiffView() {
 	}
 	_, diffW, paneH := m.layout()
 	inner := diffW - 2
+	if cr, ok := m.cursorRow(); ok && cr.kind == rowGroup {
+		m.diff.SetWidth(inner)
+		m.diff.SetHeight(max(paneH-2, 1))
+		// Redrawn every second: agents and the chat change all the time.
+		key := m.listGroups[cr.grp].key()
+		want := fmt.Sprintf("group|%s|%d|%t|%p|%p|%d", key, inner, m.dark, m.snap, m.predictions, m.now.Unix())
+		if want == m.renderedFor {
+			return
+		}
+		same := strings.HasPrefix(m.renderedFor, "group|"+key+"|")
+		m.renderedFor = want
+		m.shownKey = ""
+		m.diff.LeftGutterFunc = nil
+		m.diff.SetContentLines(m.groupSummaryLines(cr.grp, inner))
+		if !same {
+			m.diff.GotoTop()
+		}
+		return
+	}
 	r, ok := m.selected()
 	if !ok {
 		return

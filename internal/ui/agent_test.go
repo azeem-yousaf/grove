@@ -88,8 +88,9 @@ func TestAgentPicker(t *testing.T) {
 	if m.picker == nil {
 		t.Fatal("with both installed and nothing chosen, a should ask")
 	}
-	if out := plain(m); !strings.Contains(out, "Choose an AI assistant") || !strings.Contains(out, "Remember my choice") {
-		t.Errorf("picker not shown:\n%s", out)
+	// Remembering is off until asked for.
+	if out := plain(m); !strings.Contains(out, "Choose an AI assistant") || !strings.Contains(out, "[ ] Remember my choice") {
+		t.Errorf("picker not shown, or remembering is on:\n%s", out)
 	}
 	_, cmd := m.Update(tea.KeyPressMsg{Code: '2', Text: "2"})
 	pump(t, m, cmd)
@@ -97,12 +98,25 @@ func TestAgentPicker(t *testing.T) {
 	if m.picker != nil || s == nil || s.kind != agent.Codex || m.focus != focusChat {
 		t.Fatalf("after choosing: picker=%v session=%+v focus=%v", m.picker, s, m.focus)
 	}
+	if m.cfg.AI.Agent != "" || len(saved) != 0 {
+		t.Errorf("choice remembered without asking: cfg=%q saved=%v", m.cfg.AI.Agent, saved)
+	}
+
+	// So the next worktree asks again; this time remember it.
+	press(m, "tab", "]", "a")
+	if m.picker == nil {
+		t.Fatal("an unremembered choice should be asked again")
+	}
+	press(m, "space")
+	_, cmd = m.Update(tea.KeyPressMsg{Code: '2', Text: "2"})
+	pump(t, m, cmd)
 	if m.cfg.AI.Agent != "codex" || len(saved) != 1 || saved[0] != "codex" {
 		t.Errorf("choice not remembered: cfg=%q saved=%v", m.cfg.AI.Agent, saved)
 	}
+	s = m.chatSession()
 
 	// Another worktree uses the remembered agent without asking.
-	press(m, "tab", "]", "a")
+	press(m, "tab", "[", "[", "a")
 	if m.picker != nil || m.chatSession().kind != agent.Codex || m.chatSession() == s {
 		t.Error("the remembered agent should be used for other worktrees")
 	}

@@ -25,6 +25,9 @@ const User = "you"
 // a member's worktree now conflicts with another.
 const Grove = "grove"
 
+// Planner is the From of messages the planner posts while it watches a plan.
+const Planner = "planner"
+
 // Message is one post to a group.
 type Message struct {
 	Time time.Time `json:"time"`

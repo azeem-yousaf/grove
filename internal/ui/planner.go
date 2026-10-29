@@ -12,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
+	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/plan"
 )
@@ -66,10 +67,12 @@ func (m *Model) newPlanner(dir string, k agent.Kind) *session {
 	return &session{kind: k, path: dir, name: "planner", model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true, planner: true}
 }
 
-// openPlanner shows the planner, starting one if needed.
+// openPlanner shows the planner, starting one if needed. Before the next
+// plan is made it asks who will watch that plan's agents.
 func (m *Model) openPlanner() tea.Cmd {
+	show := func() tea.Cmd { return tea.Batch(m.showChat(m.planner), m.loadBranchNames()) }
 	if m.planner != nil {
-		return tea.Batch(m.showChat(m.planner), m.loadBranchNames())
+		return m.askWatcher(show)
 	}
 	dir := m.plannerDir()
 	if dir == "" {
@@ -77,7 +80,7 @@ func (m *Model) openPlanner() tea.Cmd {
 	}
 	return m.withAgent(func(k agent.Kind) tea.Cmd {
 		m.planner = m.newPlanner(dir, k)
-		return tea.Batch(m.showChat(m.planner), m.loadBranchNames())
+		return m.askWatcher(show)
 	})
 }
 
@@ -150,14 +153,14 @@ func (m *Model) plannerContext() string {
 	b.WriteString("\n## Writing the plan\n\nWhen you are ready, write the whole plan as one fenced code block whose language is grove-plan, containing JSON:\n\n")
 	b.WriteString("```grove-plan\n" + `{
   "title": "Guest checkout",
-  "groups": [{"id": "checkout", "name": "Checkout flow"}],
+  "groups": [{"id": "checkout", "name": "Checkout flow", "icon": "🛒"}],
   "tasks": [
     {"id": "api", "title": "Guest checkout API", "branch": "feature/guest-checkout-api", "group": "checkout", "brief": "..."},
     {"id": "ui", "title": "Guest checkout page", "branch": "feature/guest-checkout-ui", "group": "checkout", "brief": "..."},
     {"id": "docs", "title": "Document guest checkout", "branch": "docs/guest-checkout", "brief": "..."}
   ]
 }` + "\n```\n\n")
-	b.WriteString("Leave \"group\" out for isolated tasks. Outside the block, say in a sentence or two how you split the work. " +
+	b.WriteString("Leave \"group\" out for isolated tasks. A group's \"icon\" is optional: one emoji shown next to its name. Outside the block, say in a sentence or two how you split the work. " +
 		"The user reviews and edits the plan in grove before anything is created; if they ask for changes, write the whole plan again.\n")
 	return b.String()
 }
@@ -186,6 +189,7 @@ func (m *Model) onPlannerReply(s *session, reply string) tea.Cmd {
 		return nil
 	}
 	p.Base = m.base
+	p.Orchestrated = m.planWatch == config.WatchPlanner
 	var cmds []tea.Cmd
 	kept := m.plans[:0]
 	for _, old := range m.plans {
@@ -279,6 +283,10 @@ func (m *Model) onPlansLoaded(msg plansLoadedMsg) tea.Cmd {
 			}
 		}
 	}
+	if m.snap != nil {
+		// Their groups gather worktrees in the list.
+		m.rebuildRows()
+	}
 	cmds := []tea.Cmd{m.schedule()}
 	if msg.err != nil {
 		cmds = append(cmds, m.notify("Couldn't read some saved plans: "+msg.err.Error(), toastErr))
@@ -344,8 +352,13 @@ func (m *Model) startPlan(p *plan.Plan, k agent.Kind, branches git.Branches) tea
 	}
 	m.review = nil
 	m.planBranches = branches
+	m.planWatch = "" // asked again before the next plan
+	watcher := "you watch its agents"
+	if p.Orchestrated {
+		watcher = "the planner watches its agents for you"
+	}
 	if m.planner != nil {
-		m.planner.entries = append(m.planner.entries, chatEntry{roleNote, fmt.Sprintf("Started %s: %s, up to %d at a time.", p.Title, plural(len(p.Tasks), "task"), m.cfg.Planner.Slots())})
+		m.planner.entries = append(m.planner.entries, chatEntry{roleNote, fmt.Sprintf("Started %s: %s, up to %d at a time; %s.", p.Title, plural(len(p.Tasks), "task"), m.cfg.Planner.Slots(), watcher)})
 	}
 	return tea.Batch(
 		m.notify(fmt.Sprintf("Started %s · %s", p.Title, plural(len(p.Tasks), "task")), toastOK),
@@ -485,7 +498,8 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 			t.Status, t.Error = plan.Finished, ""
 		}
 	}
-	return tea.Batch(m.finishIfSettled(p), m.savePlan(p), m.schedule())
+	m.queueTurn(s)
+	return tea.Batch(m.finishIfSettled(p), m.savePlan(p), m.schedule(), m.orchestrate())
 }
 
 func endsWithQuestion(reply string) bool {

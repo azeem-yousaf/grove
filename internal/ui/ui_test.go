@@ -73,6 +73,10 @@ func noAgents(m *Model) {
 	m.installed = func() []agent.Kind { return nil }
 	m.saveAgent = func(string) error { return nil }
 	m.saveModel = func(string, string) error { return nil }
+	m.saveWatch = func(string) error { return nil }
+	// As if the config answered who watches plans; tests of the question
+	// clear it.
+	m.cfg.Planner.Watcher = config.WatchYou
 	m.runAgent = func(_ context.Context, _ agent.Request, emit func(agent.Event)) {
 		emit(agent.Event{Kind: agent.EvDone, Err: fmt.Errorf("no agent in tests")})
 	}
@@ -111,7 +115,7 @@ func press(m *Model, keys ...string) {
 func TestRenderFitsScreen(t *testing.T) {
 	for _, size := range [][2]int{{160, 40}, {120, 30}, {100, 24}, {80, 24}, {60, 14}, {40, 10}} {
 		m := fakeModel(t, size[0], size[1])
-		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "overview-conflicts", "diff-conflicts"} {
+		for _, screen := range []string{"list", "diff", "help", "remove", "create", "agent", "model", "picker", "overview", "merge", "merge-plan", "merge-conflict", "planner", "review", "review-edit", "review-problems", "group", "group-list", "watch", "overview-conflicts", "diff-conflicts"} {
 			switch screen {
 			case "diff":
 				press(m, "down", "tab")
@@ -200,6 +204,7 @@ func TestRenderFitsScreen(t *testing.T) {
 						{ID: "c", Branch: "feature/cart", Path: filepath.FromSlash("/src/shop-cart"), Group: "g", Status: plan.Finished},
 					}}
 				m.plans = []*plan.Plan{p}
+				m.rebuildRows()
 				log, _ := m.groupLog(p, "g")
 				for i := range 30 {
 					log.Post(group.Message{From: "feature/auth", To: "feature/cart", Text: fmt.Sprintf("%d %s", i, strings.Repeat("a long message ", 20))})
@@ -208,6 +213,15 @@ func TestRenderFitsScreen(t *testing.T) {
 				m.pollingGroups = false
 				m.Update(m.pollGroups()())
 				m.groups[log.Dir].paused = true
+			case "group-list":
+				press(m, "tab")
+				m.moveTo(m.groupRow(0))
+				m.refreshDiffView()
+			case "watch":
+				m = fakeModel(t, size[0], size[1])
+				m.cfg.Planner.Watcher = ""
+				m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude} }
+				press(m, "P", "down")
 			case "overview-conflicts":
 				m = fakeModel(t, size[0], size[1])
 				// Many pairs, so the Conflicts section has to stop early.

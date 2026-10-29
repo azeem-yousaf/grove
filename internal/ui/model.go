@@ -60,6 +60,7 @@ type Model struct {
 	scanSeq  int
 
 	rows       []row
+	listGroups []listGroup // plan groups in the list, indexed by row.grp
 	cursor     int
 	lastSel    string
 	listOffset int
@@ -137,6 +138,9 @@ type Model struct {
 	chatFollow    bool // keep the chat scrolled to the newest line
 	chatSel       chatSelection
 	picker        *picker
+	watchAsk      *watchAsk // who watches the next plan, asked before planning
+	planWatch     string    // the answer, config.WatchYou or config.WatchPlanner, until that plan starts
+	orch          orchestrator
 	undo          *undoAsk
 	quitAsk       bool
 	conflicts     *conflictReview // the merge review, while open
@@ -154,6 +158,7 @@ type Model struct {
 	stopAgent func(dir string) // waits until the folder is no longer in use
 	saveAgent func(string) error
 	saveModel func(agent, model string) error
+	saveWatch func(string) error
 }
 
 type toastKind uint8
@@ -236,6 +241,7 @@ func New(ctx context.Context, o Options) *Model {
 		stopAgent:    agents.Stop,
 		saveAgent:    defaultSaveAgent,
 		saveModel:    config.SaveModel,
+		saveWatch:    config.SaveWatcher,
 	}
 	if o.Repo.CommonDir != "" {
 		m.store = store.Open(o.Repo.CommonDir)
@@ -549,7 +555,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 func (m *Model) onPaste(msg tea.PasteMsg) tea.Cmd {
 	var cmd tea.Cmd
 	switch {
-	case m.quitAsk, m.conflicts != nil, m.confirm != nil, m.picker != nil, m.undo != nil:
+	case m.quitAsk, m.conflicts != nil, m.confirm != nil, m.picker != nil, m.watchAsk != nil, m.undo != nil:
 		return nil
 	case m.review != nil:
 		if e := m.review.edit; e != nil {
@@ -622,7 +628,7 @@ func (m *Model) onScan(msg scanMsg) tea.Cmd {
 		m.diffErrs = map[string]error{}
 		if m.selectPath != "" {
 			if i := m.snap.IndexOf(m.selectPath); i >= 0 {
-				delete(m.collapsed, m.snap.States[i].Path)
+				m.unfold(m.snap.States[i].Path)
 				m.lastSel = m.snap.States[i].Path
 				m.selectPath = ""
 			}
@@ -640,7 +646,18 @@ func (m *Model) onScan(msg scanMsg) tea.Cmd {
 }
 
 // selected returns the selected row, if any.
+// selected is the worktree or file under the cursor; a group header is
+// neither.
 func (m *Model) selected() (row, bool) {
+	r, ok := m.cursorRow()
+	if !ok || r.kind == rowGroup {
+		return row{}, false
+	}
+	return r, true
+}
+
+// cursorRow is the row under the cursor, group headers included.
+func (m *Model) cursorRow() (row, bool) {
 	if m.snap == nil || m.cursor < 0 || m.cursor >= len(m.rows) {
 		return row{}, false
 	}
@@ -724,10 +741,10 @@ func (m *Model) moveTo(i int) tea.Cmd {
 	return m.move(i - m.cursor)
 }
 
-// jumpTree moves to the next (dir > 0) or previous worktree header.
+// jumpTree moves to the next (dir > 0) or previous worktree or group header.
 func (m *Model) jumpTree(dir int) tea.Cmd {
 	for i := m.cursor + dir; i >= 0 && i < len(m.rows); i += dir {
-		if m.rows[i].kind == rowTree {
+		if m.rows[i].kind != rowFile {
 			return m.moveTo(i)
 		}
 	}
@@ -757,6 +774,8 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.onCreateKey(msg)
 	case m.picker != nil:
 		return m.onPickerKey(msg)
+	case m.watchAsk != nil:
+		return m.onWatchKey(msg)
 	case m.undo != nil:
 		return m.onUndoKey(msg)
 	case m.review != nil:
@@ -875,7 +894,11 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Planner):
 		return m.openPlanner()
 	case key.Matches(msg, k.Group):
-		if r, ok := m.selected(); ok {
+		if r, ok := m.cursorRow(); ok {
+			if r.kind == rowGroup {
+				g := m.listGroups[r.grp]
+				return m.openGroup(g.plan, g.id)
+			}
 			return m.openGroupChat(m.snap.States[r.wt].Path)
 		}
 		return nil
@@ -911,6 +934,9 @@ func (m *Model) onListKey(msg tea.KeyPressMsg) tea.Cmd {
 		// List only: in the diff pane n jumps to the next hunk.
 		return m.askCreate()
 	case !ok:
+		if cr, ok := m.cursorRow(); ok && cr.kind == rowGroup {
+			return m.onGroupRowKey(msg, cr)
+		}
 		return nil
 	case key.Matches(msg, k.Undo):
 		return m.askUndo(m.sessionFor(m.snap.States[r.wt].Path))
@@ -924,6 +950,9 @@ func (m *Model) onListKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		if !m.collapsed[m.snap.States[r.wt].Path] {
 			return m.toggleCollapse(r.wt)
+		}
+		if r.grp >= 0 {
+			return m.moveTo(m.groupRow(r.grp))
 		}
 	case key.Matches(msg, k.Expand):
 		if r.kind == rowTree {
@@ -1138,7 +1167,7 @@ func (m *Model) copyPath() tea.Cmd {
 }
 
 func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
-	if m.confirm != nil || m.creating != nil || m.picker != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil {
+	if m.confirm != nil || m.creating != nil || m.picker != nil || m.watchAsk != nil || m.undo != nil || m.quitAsk || m.conflicts != nil || m.review != nil {
 		return nil
 	}
 	if m.showHelp {
@@ -1183,7 +1212,10 @@ func (m *Model) onClick(msg tea.MouseClickMsg) tea.Cmd {
 	cmd := m.moveTo(ri)
 	if double {
 		m.lastClickRow = -1
-		if m.rows[ri].kind == rowTree {
+		switch m.rows[ri].kind {
+		case rowGroup:
+			return tea.Batch(cmd, m.toggleGroup(m.rows[ri].grp))
+		case rowTree:
 			return tea.Batch(cmd, m.toggleCollapse(m.rows[ri].wt))
 		}
 		return tea.Batch(cmd, m.openFile())
@@ -1273,7 +1305,7 @@ func (m *Model) ensureCursorVisible() {
 		last++
 	}
 	if first >= 0 {
-		if first > 0 && m.rows[m.cursor].kind == rowTree {
+		if first > 0 && m.rows[m.cursor].kind != rowFile {
 			first--
 		}
 		if first < m.listOffset {
