@@ -71,6 +71,11 @@ type session struct {
 	agentKey string       // kind, model and branch last given to the ledger
 	drafting []string     // the planner's turns with no plan since its last draft
 
+	// Ledger writes not done yet (flushUsage), kept and saved until they are.
+	unrecorded []usage.Turn
+	unassigned []usage.Assignment
+	writing    bool // a flush is running
+
 	// Claude's figures for its whole session so far, passed back each turn
 	// so the next turn's own share can be worked out.
 	sessionTotal usage.Tokens
@@ -750,9 +755,6 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	s.running, s.cancel, s.stream = false, nil, ""
 	if ev.Session != "" {
 		s.setSessionID(ev.Session)
-	}
-	if !ev.SessionTotal.IsZero() {
-		s.sessionTotal = ev.SessionTotal
 	}
 	if ev.Cost != "" {
 		s.cost = ev.Cost

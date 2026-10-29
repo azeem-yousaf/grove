@@ -458,7 +458,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case clockMsg:
 		m.now = time.Time(msg)
-		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick()}
+		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick(), m.retryUsage()}
 		if m.termFocused {
 			cmds = append(cmds, m.pollPRs(false))
 		}
@@ -549,6 +549,9 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case persistMsg:
 		return m.onPersisted(msg)
+
+	case usageWrittenMsg:
+		return m.onUsageWritten(msg)
 
 	case agentSavedMsg:
 		if msg.err != nil {

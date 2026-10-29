@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // codexArgs builds a `codex exec` run. The workspace-write sandbox lets
@@ -46,23 +48,24 @@ func codexArgs(req Request) (args []string, input string) {
 	return args, in.String()
 }
 
+// codexParser reads `codex exec --json`. Codex reports usage only when a
+// turn completes, so there are no live figures; a run that has several
+// turns adds them up.
 type codexParser struct {
-	session string
-	usage   int
-	err     error
-	turned  bool // a turn completed or failed
+	session  string
+	tokens   usage.Tokens
+	hasUsage bool // some turn reported usable figures
+	err      error
+	turned   bool // a turn completed or failed
 }
 
 type codexLine struct {
-	Type     string    `json:"type"`
-	ThreadID string    `json:"thread_id"`
-	Item     codexItem `json:"item"`
-	Usage    struct {
-		Input  int `json:"input_tokens"`
-		Output int `json:"output_tokens"`
-	} `json:"usage"`
-	Error   json.RawMessage `json:"error"`
-	Message string          `json:"message"`
+	Type     string          `json:"type"`
+	ThreadID string          `json:"thread_id"`
+	Item     codexItem       `json:"item"`
+	Usage    json.RawMessage `json:"usage"`
+	Error    json.RawMessage `json:"error"`
+	Message  string          `json:"message"`
 }
 
 type codexItem struct {
@@ -112,14 +115,26 @@ func (p *codexParser) line(b []byte) []Event {
 		}
 	case "turn.completed":
 		p.turned = true
-		p.usage += l.Usage.Input + l.Usage.Output
+		return p.addUsage(l.Usage)
 	case "turn.failed", "error":
 		p.turned = true
 		if msg := errorText(l.Error, l.Message); msg != "" {
 			p.err = errors.New(msg)
 		}
+		return p.addUsage(l.Usage)
 	}
 	return nil
+}
+
+// addUsage counts a turn's usage, if it gave any, and reports the run's
+// total so far.
+func (p *codexParser) addUsage(raw json.RawMessage) []Event {
+	t, ok := openAIUsage(raw)
+	if !ok {
+		return nil
+	}
+	p.tokens, p.hasUsage = p.tokens.Add(t), true
+	return []Event{{Kind: EvUsage, Tokens: p.tokens}}
 }
 
 // errorText reads an error that may be a string or {"message": ...}.
@@ -139,18 +154,12 @@ func errorText(raw json.RawMessage, fallback string) string {
 
 func (p *codexParser) done(exitErr error, stderr string) Event {
 	ev := Event{Kind: EvDone, Session: p.session, Err: p.err}
-	if p.usage > 0 {
-		ev.Cost = compactTokens(p.usage) + " tokens"
+	if p.hasUsage {
+		// Codex's own figures, even if the run then failed or was stopped.
+		ev.Tokens, ev.TokenStatus = p.tokens, usage.Exact
 	}
 	if ev.Err == nil && (exitErr != nil || !p.turned) {
 		ev.Err = processErr("Codex", exitErr, stderr)
 	}
 	return ev
-}
-
-func compactTokens(n int) string {
-	if n < 1000 {
-		return fmt.Sprint(n)
-	}
-	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }

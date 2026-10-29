@@ -135,15 +135,101 @@ func (m *Model) registerAgent(s *session) tea.Cmd {
 	if created.IsZero() {
 		created = time.Now()
 	}
-	err := m.usage.SetAgent(usage.AgentInfo{
+	info := usage.AgentInfo{
 		ID: s.uid, Kind: string(s.kind), Model: s.model, Path: s.path, Branch: branch,
 		Planner: s.planner, Created: created,
-	})
-	if err != nil {
-		return m.usageFailed(err)
 	}
+	// Assumed written; a failure clears it so the next turn tries again.
 	s.agentKey = key
+	l := m.usage
+	return func() tea.Msg {
+		if err := l.SetAgent(info); err != nil {
+			return usageWrittenMsg{uid: info.ID, agentFailed: true, err: err}
+		}
+		return nil
+	}
+}
+
+// usageWrittenMsg reports ledger writes for the agent uid, which run in
+// tea.Cmds because a write may wait for another grove's lock.
+type usageWrittenMsg struct {
+	uid         string
+	flushed     bool     // from flushUsage
+	written     []string // turn IDs now in the ledger
+	assigned    int      // assignments written, from the front of the queue
+	agentFailed bool     // SetAgent failed
+	err         error
+}
+
+// sessionByUID finds the agent with grove id uid.
+func (m *Model) sessionByUID(uid string) *session {
+	for _, s := range m.allSessions() {
+		if s.uid == uid {
+			return s
+		}
+	}
 	return nil
+}
+
+func (m *Model) onUsageWritten(msg usageWrittenMsg) tea.Cmd {
+	s := m.sessionByUID(msg.uid)
+	if s == nil {
+		return m.usageFailed(msg.err)
+	}
+	if msg.agentFailed {
+		s.agentKey = ""
+	}
+	if !msg.flushed {
+		return m.usageFailed(msg.err)
+	}
+	s.writing = false
+	s.unrecorded = slices.DeleteFunc(s.unrecorded, func(t usage.Turn) bool { return slices.Contains(msg.written, t.ID) })
+	s.unassigned = s.unassigned[min(msg.assigned, len(s.unassigned)):]
+	if msg.err != nil {
+		return m.usageFailed(msg.err) // the clock tries again
+	}
+	return m.flushUsage(s) // anything queued meanwhile
+}
+
+// flushUsage writes s's turns not yet in the ledger, then its queued
+// assignments, so an assignment never comes before its turns. One flush
+// runs at a time per agent. The clock calls it again while anything is left
+// (retryUsage), and the ledger ignores a turn it already has, so retrying
+// never counts one twice.
+func (m *Model) flushUsage(s *session) tea.Cmd {
+	if m.usage == nil || s.writing || len(s.unrecorded)+len(s.unassigned) == 0 {
+		return nil
+	}
+	s.writing = true
+	l, uid := m.usage, s.uid
+	turns, assigns := slices.Clone(s.unrecorded), slices.Clone(s.unassigned)
+	return func() tea.Msg {
+		msg := usageWrittenMsg{uid: uid, flushed: true}
+		for _, t := range turns {
+			if _, err := l.Add(t); err != nil {
+				msg.err = err
+				return msg
+			}
+			msg.written = append(msg.written, t.ID)
+		}
+		for _, a := range assigns {
+			if err := l.Assign(a); err != nil {
+				msg.err = err
+				return msg
+			}
+			msg.assigned++
+		}
+		return msg
+	}
+}
+
+// retryUsage writes turns left over from failed writes, or from loading.
+func (m *Model) retryUsage() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, s := range m.allSessions() {
+		cmds = append(cmds, m.flushUsage(s))
+	}
+	return tea.Batch(cmds...)
 }
 
 // endTurn records s's turn as ev ended it, once.
@@ -162,18 +248,26 @@ func (m *Model) endTurn(s *session, ev agent.Event) tea.Cmd {
 	} else {
 		attr = m.attrFor(s, "")
 	}
-	return m.record(usage.Turn{
+	// A turn without an exact session total leaves the old one stale:
+	// passing it back would count this turn twice.
+	if ev.SessionTotal.IsZero() || ev.TokenStatus != usage.Exact {
+		s.sessionTotal = usage.Tokens{}
+	} else {
+		s.sessionTotal = ev.SessionTotal
+	}
+	m.record(s, usage.Turn{
 		ID: id, Agent: s.uid, Time: time.Now(), Tokens: ev.Tokens, Status: ev.TokenStatus, Failed: ev.Err != nil,
 		Plan: attr.Plan, PlanTitle: attr.PlanTitle, Task: attr.Task, Group: attr.Group,
 	})
+	return m.flushUsage(s)
 }
 
-func (m *Model) record(t usage.Turn) tea.Cmd {
-	if m.usage == nil {
-		return nil
+// record queues t to be written with s's other unrecorded turns, which are
+// saved with the session until the ledger has them.
+func (m *Model) record(s *session, t usage.Turn) {
+	if m.usage != nil {
+		s.unrecorded = append(s.unrecorded, t)
 	}
-	_, err := m.usage.Add(t)
-	return m.usageFailed(err)
 }
 
 // abandonTurn records the turn of an agent that is going away mid-turn
@@ -189,15 +283,17 @@ func (m *Model) abandonTurn(s *session) tea.Cmd {
 	return m.endTurn(s, agent.Event{Kind: agent.EvDone, Tokens: s.live, TokenStatus: status})
 }
 
-// recordCutShort records the turn a loaded session was saved in the middle
-// of, reporting whether there was one. The ledger ignores a turn it already
-// has, so loading the same file twice records it once.
+// recordCutShort queues the turn a loaded session was saved in the middle
+// of, reporting whether there was one; the clock writes it. The ledger
+// ignores a turn it already has, so loading the same file twice records it
+// once.
 func (m *Model) recordCutShort(s *session) bool {
 	c := s.cutShort
 	if c == nil {
 		return false
 	}
 	s.cutShort = nil
+	s.sessionTotal = usage.Tokens{} // it includes the turn cut short, or not: unknown
 	t := usage.Turn{
 		ID: c.ID, Agent: s.uid, Time: time.Now(), Status: usage.Unknown,
 		Plan: c.Attr.Plan, PlanTitle: c.Attr.PlanTitle, Task: c.Attr.Task, Group: c.Attr.Group,
@@ -208,7 +304,7 @@ func (m *Model) recordCutShort(s *session) bool {
 	if s.planner && c.Attr.Plan == "" {
 		s.drafting = append(s.drafting, c.ID)
 	}
-	m.record(t)
+	m.record(s, t)
 	return true
 }
 
@@ -222,7 +318,9 @@ func (m *Model) assignDrafting(s *session, p *plan.Plan) tea.Cmd {
 	if m.usage == nil || len(turns) == 0 {
 		return nil
 	}
-	return m.usageFailed(m.usage.Assign(usage.Assignment{Plan: p.ID, PlanTitle: p.Title, Turns: turns}))
+	// Written after the turns themselves, through the same queue.
+	s.unassigned = append(s.unassigned, usage.Assignment{Plan: p.ID, PlanTitle: p.Title, Turns: turns})
+	return m.flushUsage(s)
 }
 
 // liveFor adds up the running turns of the agents keep picks.

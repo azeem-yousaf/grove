@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,6 +25,17 @@ func withLedger(t *testing.T, m *Model) string {
 	}
 	m.usage = l
 	return dir
+}
+
+// writeUsage does what the clock does: writes turns still waiting for the
+// ledger, feeding the results back.
+func writeUsage(t *testing.T, m *Model) {
+	t.Helper()
+	for _, msg := range runCmds(m.retryUsage()) {
+		if w, ok := msg.(usageWrittenMsg); ok {
+			m.Update(w)
+		}
+	}
 }
 
 // done ends a turn with figures.
@@ -96,6 +108,7 @@ func TestUsageAddsUpAcrossTurnsAndRestarts(t *testing.T) {
 		m2.usage = l
 		r := restore(v, true, false)
 		m2.onSessionsLoaded(sessionsLoadedMsg{sessions: []*session{r}})
+		writeUsage(t, m2)
 		return m2, r
 	}
 	m2, r := load()
@@ -142,14 +155,85 @@ func TestUsageSessionTotalComesBack(t *testing.T) {
 		t.Fatalf("restored session total = %+v", r.sessionTotal)
 	}
 	r.checkpoint = "taken"
+	m.sessions[r.path] = r
 	pump(t, m, m.send(r, "two"))
 	if got := fake.reqs[1].SessionTotal; got != first.SessionTotal {
 		t.Errorf("next request's session total = %+v", got)
 	}
+	// That turn came back without a total, so the old one is stale.
+	if !r.sessionTotal.IsZero() {
+		t.Errorf("session total kept after a turn without one: %+v", r.sessionTotal)
+	}
+
+	// A turn that isn't exact makes it stale too.
+	partial := done(5, 5, usage.Partial)
+	partial.SessionTotal = usage.Tokens{Input: 900}
+	fake.turns = [][]agent.Event{{partial}}
+	r.sessionTotal = first.SessionTotal
+	pump(t, m, m.send(r, "three"))
+	if !r.sessionTotal.IsZero() {
+		t.Errorf("session total kept after a partial turn: %+v", r.sessionTotal)
+	}
+
 	// A new Claude session starts from nothing.
+	r.sessionTotal = first.SessionTotal
 	r.setSessionID("s2")
 	if !r.sessionTotal.IsZero() || !m.agentRequest(r).SessionTotal.IsZero() {
 		t.Errorf("session total kept for a new session: %+v", r.sessionTotal)
+	}
+
+	// So does a session saved in the middle of a turn.
+	r.sessionTotal = first.SessionTotal
+	m.startTurn(r)
+	r.running = true
+	cut := restore(r.saved(), true, false)
+	m.recordCutShort(cut)
+	if !cut.sessionTotal.IsZero() {
+		t.Errorf("session total kept across a turn cut short: %+v", cut.sessionTotal)
+	}
+}
+
+func TestUsageWriteFailsThenRetries(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	dir := withLedger(t, m)
+	// A file where the ledger's folder should be: every write fails.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgent{turns: [][]agent.Event{{done(100, 10, usage.Exact)}}}
+	s := agentSession(m, "/src/shop-auth", "feature/auth", fake)
+	pump(t, m, m.send(s, "go"))
+	if len(s.unrecorded) != 1 || s.writing || m.usageErr == nil {
+		t.Fatalf("after a failed write: unrecorded %d, writing %v, error %v", len(s.unrecorded), s.writing, m.usageErr)
+	}
+	// Kept with the session until written.
+	if v := s.saved(); len(v.Unrecorded) != 1 {
+		t.Errorf("unwritten turn not saved: %+v", v.Unrecorded)
+	}
+
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeUsage(t, m)
+	if len(s.unrecorded) != 0 {
+		t.Fatalf("the retry didn't write the turn: %+v", s.unrecorded)
+	}
+	// Written again (as after a crash before the result came back): still
+	// one turn.
+	s.unrecorded = []usage.Turn{{ID: s.uid + "/1", Agent: s.uid, Tokens: usage.Tokens{Input: 100, Output: 10}, Status: usage.Exact}}
+	writeUsage(t, m)
+	l, err := usage.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := l.Agent(s.uid); sum.Turns != 1 || sum.Tokens.Total() != 110 {
+		t.Errorf("after retrying: %+v", sum)
 	}
 }
 
@@ -162,6 +246,7 @@ func TestUsageCutShortWithoutFigures(t *testing.T) {
 	r := restore(s.saved(), true, false)
 	m.sessions = map[string]*session{}
 	m.onSessionsLoaded(sessionsLoadedMsg{sessions: []*session{r}})
+	writeUsage(t, m)
 	sum := m.usage.Agent(s.uid)
 	if sum.Turns != 1 || sum.Unknown != 1 {
 		t.Fatalf("cut short with nothing reported: %+v", sum)

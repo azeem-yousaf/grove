@@ -50,6 +50,9 @@ type savedSession struct {
 	// Claude's figures for the session ID above, so the first turn after a
 	// restart is still exact.
 	SessionTotal *usage.Tokens `json:"session_total,omitempty"`
+	// Ledger writes that hadn't succeeded yet.
+	Unrecorded []usage.Turn       `json:"unrecorded,omitempty"`
+	Unassigned []usage.Assignment `json:"unassigned,omitempty"`
 }
 
 // runningTurn is the turn a session was saved in the middle of, recorded as
@@ -92,6 +95,7 @@ func (s *session) saved() savedSession {
 		History: s.history, Checkpoint: s.checkpoint, TurnTree: s.turnTree, Allow: s.allow, Notes: s.notes, Cost: s.cost,
 		Failed: s.failed, Interrupted: s.running, Planner: s.planner,
 		UID: s.uid, Created: s.created, Turns: s.turns, Drafting: s.drafting,
+		Unrecorded: s.unrecorded, Unassigned: s.unassigned,
 	}
 	if !s.sessionTotal.IsZero() {
 		t := s.sessionTotal
@@ -125,6 +129,7 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, cost: v.Cost,
 		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner,
 		uid: v.UID, created: v.Created, turns: v.Turns, drafting: v.Drafting,
+		unrecorded: v.Unrecorded, unassigned: v.Unassigned,
 	}
 	if s.uid == "" {
 		s.uid = newUID() // saved before grove counted tokens
