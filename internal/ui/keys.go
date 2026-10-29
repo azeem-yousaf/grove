@@ -9,7 +9,7 @@ type keyMap struct {
 	Remove, Git, New, Agent, Undo           key.Binding
 	Mode, Overlaps, Filter, Refresh         key.Binding
 	Overview, Merge, Planner, Group, Ship   key.Binding
-	Review                                  key.Binding
+	Review, Usage                           key.Binding
 	Help, Actions, Quit, Back               key.Binding
 }
 
@@ -41,6 +41,7 @@ func defaultKeys() keyMap {
 		Mode:       b("m", "branch / uncommitted", "m"),
 		Overlaps:   b("o", "overlaps / conflicts only", "o"),
 		Overview:   b("w", "overview of every worktree", "w"),
+		Usage:      b("T", "token usage", "T"),
 		Merge:      b("c", "merge branches into this worktree", "c"),
 		Planner:    b("P", "planner", "P"),
 		Group:      b("t", "group or plan chat", "t"),
@@ -85,6 +86,7 @@ var helpSections = []helpSection{
 		{"m", "branch / uncommitted"},
 		{"o", "overlaps / conflicts"},
 		{"w", "overview of worktrees"},
+		{"T", "token usage"},
 		{"c", "merge branches here"},
 		{"/", "filter files"},
 		{"r", "refresh now"},

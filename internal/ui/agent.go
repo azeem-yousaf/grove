@@ -20,6 +20,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/open"
 	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/usage"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -56,6 +57,28 @@ type session struct {
 	failed     bool
 	seen       bool // the user has looked since it last finished
 	planner    bool // the planner: reads the repository, never edits it
+
+	// Token usage (usage.go).
+	uid      string       // grove's id for this agent in the usage ledger
+	created  time.Time    // when it was created
+	turns    int          // turns sent, numbering the next turn's ID
+	turnID   string       // the running turn, until it is recorded
+	turnAttr turnAttr     // what the running turn is for
+	nextPlan string       // the plan the planner's next turn is about, when grove asks it
+	live     usage.Tokens // the running turn's usage so far; shown, not stored
+	liveSeen bool         // the agent has reported usage this turn
+	cutShort *runningTurn // the turn grove was closed during, until it is recorded
+	agentKey string       // kind, model and branch last given to the ledger
+	drafting []string     // the planner's turns with no plan since its last draft
+
+	// Ledger writes not done yet (flushUsage), kept and saved until they are.
+	unrecorded []usage.Turn
+	unassigned []usage.Assignment
+	writing    bool // a flush is running
+
+	// Claude's figures for its whole session so far, passed back each turn
+	// so the next turn's own share can be worked out.
+	sessionTotal usage.Tokens
 
 	rendered chatCache // entries as the chat pane last drew them
 }
@@ -276,7 +299,7 @@ func (m *Model) openChat() tea.Cmd {
 }
 
 func (m *Model) newSession(path, name string, k agent.Kind) *session {
-	s := &session{kind: k, path: path, name: name, model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true}
+	s := &session{kind: k, path: path, name: name, model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true, uid: newUID(), created: time.Now()}
 	m.sessions[path] = s
 	return s
 }
@@ -593,6 +616,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	s.stream = ""
 	s.running, s.failed, s.started = true, false, time.Now()
 	m.chatFollow = true
+	registered := m.startTurn(s)
 
 	ctx, cancel := context.WithCancel(m.ctx)
 	s.cancel = cancel
@@ -632,7 +656,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 		}
 		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, ev: ev} })
 	}()
-	return tea.Batch(listen(ch), m.startAnimating())
+	return tea.Batch(listen(ch), m.startAnimating(), registered)
 }
 
 // agentRequest describes s's next turn, without the message.
@@ -648,6 +672,8 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Commands: s.planner && m.orchestrating(),
 		Tools:    append(m.groupTools(s), m.controlTools(s)...),
 		ReadDirs: m.groupmateDirs(s),
+
+		SessionTotal: s.sessionTotal,
 	}
 }
 
@@ -700,7 +726,7 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 	ev := msg.ev
 	switch ev.Kind {
 	case agent.EvSession:
-		s.id = ev.Session
+		s.setSessionID(ev.Session)
 	case agent.EvDelta:
 		s.stream += ev.Text
 	case agent.EvText:
@@ -717,6 +743,8 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 				s.touched[rel] = true
 			}
 		}
+	case agent.EvUsage:
+		s.live, s.liveSeen = ev.Tokens, true
 	case agent.EvDone:
 		return m.onAgentDone(s, ev)
 	}
@@ -726,7 +754,7 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	s.running, s.cancel, s.stream = false, nil, ""
 	if ev.Session != "" {
-		s.id = ev.Session
+		s.setSessionID(ev.Session)
 	}
 	if ev.Cost != "" {
 		s.cost = ev.Cost
@@ -735,6 +763,7 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 		s.failed = true
 		s.entries = append(s.entries, chatEntry{roleError, ev.Err.Error()})
 	}
+	recordErr := m.endTurn(s, ev)
 	reply := s.lastReply.String()
 	s.history = append(s.history, agent.Turn{User: s.lastUser, Agent: reply})
 
@@ -763,7 +792,7 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 
 	viewing := m.focus == focusChat && m.chatSession() == s
 	s.seen = viewing
-	cmds := []tea.Cmd{m.startScan()}
+	cmds := []tea.Cmd{m.startScan(), recordErr}
 	if s.planner {
 		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(reply), m.orchestrate())
 	} else {
@@ -1042,12 +1071,15 @@ func (m *Model) chatPane(w, h int) string {
 	if s.model != "" {
 		title += " · " + s.model
 	}
-	info := ""
-	switch {
-	case s.running:
-		info = st.accent.Render(spinnerFrames[m.frame%len(spinnerFrames)] + " working " + since(m.now, s.started))
-	case s.cost != "":
-		info = st.faint.Render(s.cost)
+	var info []string
+	if s.running {
+		info = append(info, st.accent.Render(spinnerFrames[m.frame%len(spinnerFrames)]+" working "+since(m.now, s.started)))
+	}
+	if u := m.agentUsage(s); u != "" {
+		info = append(info, u)
+	}
+	if s.cost != "" && !s.running {
+		info = append(info, st.faint.Render(s.cost))
 	}
 
 	bottom := m.chatBottom(s, inner)
@@ -1069,7 +1101,7 @@ func (m *Model) chatPane(w, h int) string {
 		m.chatView.GotoBottom()
 	}
 	body := append(strings.Split(m.chatView.View(), "\n"), bottom...)
-	return m.panel(title, info, "", body, w, h, m.focus == focusChat)
+	return m.panel(title, strings.Join(info, st.faint.Render(" · ")), "", body, w, h, m.focus == focusChat)
 }
 
 // chatBottom is the card waiting for the user, or the input line.
