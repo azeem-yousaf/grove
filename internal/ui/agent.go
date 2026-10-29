@@ -1198,12 +1198,7 @@ func (m *Model) chatPane(w, h int) string {
 	if s.running {
 		info = append(info, st.accent.Render(spinnerFrames[m.frame%len(spinnerFrames)]+" working "+since(m.now, s.started)))
 	}
-	if u := m.agentUsage(s); u != "" {
-		info = append(info, u)
-	}
-	if s.cost != "" && !s.running {
-		info = append(info, st.faint.Render(s.cost))
-	}
+	info = append(info, m.agentUsageCost(s)...)
 	if g := m.guardBadge(s.path, false); g != "" && ansi.StringWidth(strings.Join(info, " · "))+ansi.StringWidth(g)+3 < inner/2 {
 		info = append(info, g)
 	}

@@ -381,6 +381,25 @@ func (m *Model) agentUsage(s *session) string {
 	return m.usageText(sum, s.live, s.running && s.turnID != "")
 }
 
+// agentUsageCost is s's tokens and, for Claude, the session's cost, as
+// shown in its chat header and the worktree summary. Claude reports cost
+// only when a turn ends, so while one runs the last figure is marked as
+// from before it. Codex reports none and gets no cost, never a made-up $0.
+func (m *Model) agentUsageCost(s *session) []string {
+	var out []string
+	if u := m.agentUsage(s); u != "" {
+		out = append(out, u)
+	}
+	if s.cost != "" {
+		c := s.cost
+		if s.running {
+			c += " before this turn"
+		}
+		out = append(out, m.st.faint.Render(c))
+	}
+	return out
+}
+
 // groupUsage is a plan group's tokens, for its summary.
 func (m *Model) groupUsage(p *plan.Plan, groupID string) string {
 	sum := m.sumOf(func(l *usage.Ledger) usage.Sum { return l.Group(p.ID, groupID) })
