@@ -19,6 +19,8 @@ func plannerSays(block string) []agent.Event {
 func TestPlannerDecidesRefusedCommands(t *testing.T) {
 	m, p, fake := groupedPlan(t)
 	p.Orchestrated = true
+	// Both are the planner's to answer here.
+	m.classify = func(*session, string, string) approvalPolicy { return approvalPolicy{} }
 	fake.turns = [][]agent.Event{
 		plannerSays(`{"approve": [{"branch": "feature/a", "command": "npm test"}],
 			"deny": [{"branch": "feature/a", "command": "git push --force", "reason": "the user pushes"}]}`),
@@ -34,7 +36,7 @@ func TestPlannerDecidesRefusedCommands(t *testing.T) {
 		t.Fatalf("want a planner turn, the agent resumed and the planner checking it, got %d requests", len(fake.reqs))
 	}
 	ask := fake.reqs[0]
-	if !ask.ReadOnly || !strings.Contains(ask.Message, "- `npm test`") || !strings.Contains(ask.Message, "```grove-orchestrate") {
+	if !ask.ReadOnly || !strings.Contains(ask.Message, ": `npm test`") || !strings.Contains(ask.Message, "- id "+s.answered[0].ID+": `npm test`") || !strings.Contains(ask.Message, "```grove-orchestrate") {
 		t.Errorf("planner request:\n%s", ask.Message)
 	}
 	if last := m.planner.entries[0]; last.role != roleNote || last.text != "Asked to decide: feature/a wants to run 2 commands" {
@@ -74,10 +76,10 @@ func TestPlannerAnswersQuestionsAndLeavesTheRest(t *testing.T) {
 	if fake.reqs[1].Dir != b.path || fake.reqs[1].Message != "From the planner, who is watching this plan for the user: Use JSON." {
 		t.Errorf("answer sent as %q to %s", fake.reqs[1].Message, fake.reqs[1].Dir)
 	}
-	if len(a.pending) != 1 {
+	if len(a.pending) != 1 || !a.pending[0].left {
 		t.Error("a command the planner didn't decide stays for the user")
 	}
-	if out := strings.Join(m.chatBottom(a, 100), "\n"); !strings.Contains(out, "the planner will decide unless you do") {
+	if out := strings.Join(m.chatBottom(a, 100), "\n"); !strings.Contains(out, "the planner left it for you") {
 		t.Errorf("approval card:\n%s", out)
 	}
 }

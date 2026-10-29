@@ -197,6 +197,8 @@ type Model struct {
 	saveWatch func(string) error
 	sendAlert func(title, body string) error
 	listPRs   func(ctx context.Context, dir string) (map[string]gh.PR, error)
+	classify  func(s *session, tool, command string) approvalPolicy                       // who may answer a refused command (approvalpolicy.go)
+	grant     func(s *session, tool, command string, pol approvalPolicy, by string) error // lets an approved command through the agent's hook
 	prHooks   prHooks
 
 	auto gitAuto // agents' git autonomy (gitauto.go)
@@ -293,6 +295,8 @@ func New(ctx context.Context, o Options) *Model {
 		prHooks:      defaultPRHooks(),
 		auto:         newGitAuto(),
 	}
+	// Approvals are checked against, and let through, grove's git policy.
+	m.classify, m.grant = m.gitClassify, m.gitGrant
 	if o.Repo.CommonDir != "" {
 		m.store = store.Open(o.Repo.CommonDir)
 		m.usage, m.usageErr = usage.Open(filepath.Join(m.store.Dir(), "usage"))
