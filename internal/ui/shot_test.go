@@ -30,7 +30,12 @@ func TestReadmeShot(t *testing.T) {
 		t.Skip("set GROVE_SHOT to the output .svg path")
 	}
 	m := shotModel(t, 120, 22)
-	if err := os.WriteFile(out, []byte(toSVG(m.render(), m.st.p, "grove · shop")), 0o644); err != nil {
+	screen := m.render()
+	if filepath.Separator == '\\' {
+		// The same picture from every OS: the README shows ~/src/shop.
+		screen = strings.ReplaceAll(screen, `\`, "/")
+	}
+	if err := os.WriteFile(out, []byte(toSVG(screen, m.st.p, "grove · shop")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -44,6 +49,9 @@ func shotModel(t *testing.T, w, h int) *Model {
 
 	repo := &git.Repo{Here: src("shop-auth"), Name: "shop"}
 	m := New(context.Background(), Options{Repo: repo, Config: config.Default(), Version: "0.1.0"})
+	// Not this machine's editor, nor the .ts-to-editor rule it brings on
+	// Windows.
+	m.opener.Editor, m.opener.Overrides = "", map[string]string{}
 	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	m.Update(baseMsg{base: "main"})
 	commit := func(hash, subject string, ago time.Duration) *git.Commit {
