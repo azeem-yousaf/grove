@@ -543,7 +543,8 @@ func (m *Model) onModelMenuKey(s *session, key string) tea.Cmd {
 }
 
 // setModel switches s to model from its next message, and remembers it for
-// new chats with the same agent, the way /model does in Claude Code.
+// new chats with the same agent, the way /model does in Claude Code. A
+// planner's has its own setting under [planner], so only that chat changes.
 func (m *Model) setModel(s *session, model string) tea.Cmd {
 	s.menu = nil
 	s.model = model
@@ -556,6 +557,9 @@ func (m *Model) setModel(s *session, model string) tea.Cmd {
 	}
 	s.entries = append(s.entries, chatEntry{roleNote, note + "."})
 	m.chatFollow = true
+	if s.planner {
+		return m.warm(s)
+	}
 	switch s.kind {
 	case agent.Claude:
 		m.cfg.AI.ClaudeModel = model

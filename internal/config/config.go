@@ -481,8 +481,8 @@ pull_requests = true
 # and the task agents a plan starts. A Claude name or alias ("opus",
 # "sonnet", "haiku", claude-...) only applies when the agent is Claude, a
 # Codex one (gpt-..., o3, codex-...) only for Codex; "claude:" or "codex:"
-# in front makes that explicit. Empty = the [ai] model. /model in a chat
-# still changes it for that chat.
+# in front makes that explicit. Empty = the model set for that agent under
+# ai above. /model in one of their chats changes only that chat.
 # model = "opus"
 # crew_model = "sonnet"
 # task_model = ""
