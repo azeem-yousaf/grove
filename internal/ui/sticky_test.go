@@ -75,7 +75,7 @@ func TestPrefixApproval(t *testing.T) {
 	if !slices.Equal(s.allow, want) {
 		t.Errorf("allow = %q, want %q", s.allow, want)
 	}
-	if outs[0].detail != "" || !strings.Contains(outs[1].detail, "exact command only") || !strings.Contains(outs[2].detail, "exact command only") {
+	if strings.Contains(outs[0].detail, "exact command only") || !strings.Contains(outs[1].detail, "exact command only") || !strings.Contains(outs[2].detail, "exact command only") {
 		t.Errorf("details: %q / %q / %q", outs[0].detail, outs[1].detail, outs[2].detail)
 	}
 

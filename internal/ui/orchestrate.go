@@ -711,14 +711,17 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 		cmds = append(cmds, m.resume(s))
 	}
 	for _, a := range answered {
+		detail := "the agent carries on once you answer the rest of what it waits on"
 		switch s := a.s; {
 		case a.busy:
-			outs[a.out].detail = "the agent gets it when its turn ends"
+			detail = "the agent gets it when its turn ends"
 		case s.running:
-			outs[a.out].detail = "the agent was resumed with it"
-		default:
-			outs[a.out].detail = "the agent carries on once you answer the rest of what it waits on"
+			detail = "the agent was resumed with it"
 		}
+		if d := outs[a.out].detail; d != "" {
+			detail = d + "; " + detail
+		}
+		outs[a.out].detail = detail
 	}
 	for _, r := range d.Reply {
 		o := outcome{order: r.order, what: "reply to " + r.Branch, result: control.Applied, detail: "it reaches the agent as soon as it isn't working; you'll hear when its turn ends"}
