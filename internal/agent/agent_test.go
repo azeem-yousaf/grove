@@ -850,3 +850,31 @@ func TestFindPrefersExe(t *testing.T) {
 		t.Error("Parse should ignore case and spaces")
 	}
 }
+
+func TestCommandOutput(t *testing.T) {
+	p := &claudeParser{}
+	evs := feed(p, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"go test ./..."}},{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/w/a.go"}}]},"parent_tool_use_id":null}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"package a"}]},"parent_tool_use_id":null}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[{"type":"text","text":"--- FAIL: TestA\nFAIL\n"}]}]},"parent_tool_use_id":null}
+`)
+	var out []Event
+	for _, ev := range evs {
+		if ev.Kind == EvOutput {
+			out = append(out, ev)
+		}
+	}
+	if len(out) != 1 || out[0].Tool != "Bash" || out[0].Detail != "go test ./..." || !out[0].Failed || out[0].Text != "--- FAIL: TestA\nFAIL" {
+		t.Errorf("claude output events = %+v (only shell commands, once each)", out)
+	}
+
+	evs = feed(&codexParser{}, `{"type":"item.completed","item":{"type":"command_execution","command":"npm test","aggregated_output":"ok 3 tests\n","exit_code":0,"status":"completed"}}
+`)
+	if len(evs) != 2 || evs[0].Kind != EvOutput || evs[0].Failed || evs[0].Text != "ok 3 tests" || evs[0].Detail != "npm test" {
+		t.Errorf("codex output events = %+v", evs)
+	}
+
+	long := strings.Repeat("line of output\n", 1000)
+	if got := tail(long); len(got) > outputTail || !strings.HasPrefix(got, "line of output") {
+		t.Errorf("tail kept %d bytes starting %q", len(got), got[:20])
+	}
+}

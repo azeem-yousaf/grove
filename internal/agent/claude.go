@@ -420,6 +420,8 @@ type claudeParser struct {
 	finalStatus usage.Status
 	shown       usage.Tokens // the last EvUsage sent, when shownAny
 	shownAny    bool
+
+	cmds map[string]Event // shell commands waiting for their output, by tool use id
 }
 
 type claudeLine struct {
@@ -428,10 +430,14 @@ type claudeLine struct {
 	Session string `json:"session_id"`
 	Message struct {
 		Content []struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+			ID        string          `json:"id"`          // tool_use
+			ToolUseID string          `json:"tool_use_id"` // tool_result
+			Content   json.RawMessage `json:"content"`     // tool_result: a string or text blocks
+			IsError   bool            `json:"is_error"`    // tool_result
 		} `json:"content"`
 	} `json:"message"`
 	Event struct {
@@ -504,7 +510,28 @@ func (p *claudeParser) line(b []byte) []Event {
 			case "tool_use":
 				detail, path := toolDetail(c.Name, c.Input)
 				evs = append(evs, Event{Kind: EvTool, Tool: c.Name, Detail: detail, Path: path})
+				if (c.Name == "Bash" || c.Name == "PowerShell") && c.ID != "" && detail != "" {
+					if p.cmds == nil {
+						p.cmds = map[string]Event{}
+					}
+					p.cmds[c.ID] = Event{Kind: EvOutput, Tool: c.Name, Detail: detail}
+				}
 			}
+		}
+		return evs
+	case "user":
+		if sub {
+			return nil
+		}
+		var evs []Event
+		for _, c := range l.Message.Content {
+			ev, ok := p.cmds[c.ToolUseID]
+			if c.Type != "tool_result" || !ok {
+				continue
+			}
+			delete(p.cmds, c.ToolUseID)
+			ev.Text, ev.Failed = tail(resultText(c.Content)), c.IsError
+			evs = append(evs, ev)
 		}
 		return evs
 	case "result":
@@ -674,6 +701,27 @@ func (p *claudeParser) done(exitErr error, stderr string) Event {
 
 // toolDetail picks the human-readable argument of a tool call, and the
 // file it changes for edit tools.
+// resultText is a tool result's content, which is either a string or a
+// list of text blocks.
+func resultText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(raw, &blocks)
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 func toolDetail(tool string, input json.RawMessage) (detail, path string) {
 	var in map[string]any
 	_ = json.Unmarshal(input, &in)

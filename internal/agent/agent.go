@@ -160,6 +160,10 @@ const (
 	// EvUsage: Tokens is what the turn has used so far, replacing the last
 	// EvUsage (a running total, not a delta). Sent only when it changes.
 	EvUsage
+	// EvOutput: a shell command the agent ran (Tool "Bash", "PowerShell" or
+	// "Run", Detail the command) finished; Text is the end of its output,
+	// Failed whether it failed.
+	EvOutput
 )
 
 // Event is something the agent did.
@@ -170,6 +174,7 @@ type Event struct {
 	Tool    string // "Edit", "Bash", "Read", ...
 	Detail  string // the command, file or pattern
 	Path    string // file being changed, for edits
+	Failed  bool   // EvOutput: the command failed
 	Denied  []Denial
 	Cost    string // "$0.04" (Claude Code)
 	// Tokens is the turn's usage: so far for EvUsage, all of it for EvDone.
@@ -186,6 +191,23 @@ type Event struct {
 	// saved before it stale.
 	SessionTotal usage.Tokens
 	Err          error
+}
+
+// outputTail is how much of a command's output an EvOutput keeps.
+const outputTail = 4000
+
+// tail is the end of a command's output, at most outputTail bytes, starting
+// on a whole line when it was cut.
+func tail(out string) string {
+	out = strings.TrimRight(strings.ToValidUTF8(out, "?"), "\r\n\t ")
+	if len(out) <= outputTail {
+		return out
+	}
+	out = out[len(out)-outputTail:]
+	if i := strings.IndexByte(out, '\n'); i >= 0 {
+		out = out[i+1:]
+	}
+	return strings.ToValidUTF8(out, "")
 }
 
 // Denial is a tool call the agent wasn't allowed to make.

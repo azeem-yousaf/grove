@@ -102,3 +102,31 @@ func TestChatCopy(t *testing.T) {
 		t.Error("a click should not select or copy")
 	}
 }
+
+func TestChatShowsTestResults(t *testing.T) {
+	m := fakeModel(t, 120, 36)
+	fake := &fakeAgent{turns: [][]agent.Event{{
+		{Kind: agent.EvTool, Tool: "Bash", Detail: "go test ./..."},
+		{Kind: agent.EvOutput, Tool: "Bash", Detail: "go test ./...", Failed: true, Text: "--- FAIL: TestLogin\nFAIL\tshop/auth\t0.1s"},
+		{Kind: agent.EvTool, Tool: "Bash", Detail: "ls"},
+		{Kind: agent.EvOutput, Tool: "Bash", Detail: "ls", Text: "a.go"},
+		{Kind: agent.EvText, Text: "The login test fails."},
+	}}}
+	m.installed = func() []agent.Kind { return []agent.Kind{agent.Claude} }
+	m.runAgent = fake.run
+	press(m, "a")
+	typeText(m, "run the tests")
+	pump(t, m, func() tea.Msg { _, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); return cmd() })
+	out := plain(m)
+	for _, want := range []string{"✗ failed: go test ./...", "--- FAIL: TestLogin", "shop/auth"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("chat should show %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "a.go") {
+		t.Error("only test commands' output shows")
+	}
+	if !isTestCommand("npm run test:unit") || !isTestCommand("pytest -q") || isTestCommand("git log --grep test") || isTestCommand("cat latest.txt") {
+		t.Error("isTestCommand")
+	}
+}

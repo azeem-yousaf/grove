@@ -220,7 +220,7 @@ func TestFailingTestsGoBackToTheAgents(t *testing.T) {
 		t.Fatalf("plan = %s, tests %q", p.Status, p.Merge.Tests)
 	}
 	got := chat()
-	for _, want := range []string{"Running the tests: `" + m.cfg.Planner.Test + "`", "failed with exit code 1. The planner is getting the tasks' agents to fix it", "The tests passed."} {
+	for _, want := range []string{"Running the tests: `" + m.cfg.Planner.Test + "`", "failed with exit code 1. The planner is getting the tasks' agents to fix it", ") passed."} {
 		if !strings.Contains(got, want) {
 			t.Errorf("plan chat is missing %q:\n%s", want, got)
 		}

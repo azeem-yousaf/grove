@@ -109,6 +109,7 @@ const (
 	roleTool
 	roleNote
 	roleError
+	roleOutput // a test command's result: a status line, then the end of its output
 )
 
 type chatEntry struct {
@@ -758,6 +759,10 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 				s.touched[rel] = true
 			}
 		}
+	case agent.EvOutput:
+		if isTestCommand(ev.Detail) {
+			s.entries = append(s.entries, chatEntry{roleOutput, testResult(s, ev)})
+		}
 	case agent.EvUsage:
 		s.live, s.liveSeen = ev.Tokens, true
 	case agent.EvDone:
@@ -873,6 +878,53 @@ func toolLine(s *session, ev agent.Event) string {
 		}
 	}
 	return strings.TrimSpace(ev.Tool + " " + strings.ReplaceAll(detail, "\n", " "))
+}
+
+// testWords mark a shell command that runs tests, whose result the chat
+// shows.
+var testWords = regexp.MustCompile(`(?i)(^|[\s/._:-])(test|tests|pytest|jest|vitest|mocha|rspec|phpunit|ctest|spec)($|[\s/._:-])`)
+
+// isTestCommand reports whether a command an agent ran looks like a test run.
+func isTestCommand(cmd string) bool {
+	if f := strings.Fields(cmd); len(f) > 0 && (f[0] == "git" || f[0] == "git.exe") {
+		return false
+	}
+	return testWords.MatchString(cmd)
+}
+
+// testOutputLines is how many lines of a test run's output the chat shows.
+const testOutputLines = 12
+
+// testResult is a roleOutput entry's text for a finished test command.
+func testResult(s *session, ev agent.Event) string {
+	return testEntry(strings.TrimPrefix(toolLine(s, agent.Event{Detail: ev.Detail}), " "), !ev.Failed, ev.Text)
+}
+
+// testEntry is a roleOutput entry's text: whether cmd passed, then the end
+// of its output.
+func testEntry(cmd string, passed bool, output string) string {
+	head := "✓ passed: " + cmd
+	if !passed {
+		head = "✗ failed: " + cmd
+	}
+	if out := outputTail(output, testOutputLines); out != "" {
+		return head + "\n" + out
+	}
+	return head
+}
+
+// outputTail is the last n lines of a command's output, after "…" when
+// some were left out.
+func outputTail(output string, n int) string {
+	output = strings.TrimSpace(strings.ReplaceAll(output, "\r\n", "\n"))
+	if output == "" {
+		return ""
+	}
+	lines := strings.Split(output, "\n")
+	if len(lines) > n {
+		lines = append([]string{"…"}, lines[len(lines)-n:]...)
+	}
+	return strings.Join(lines, "\n")
 }
 
 var groveRun = regexp.MustCompile("(?s)```grove-run[ \\t]*\\r?\\n(.*?)```")
@@ -1128,7 +1180,7 @@ func (m *Model) chatPane(w, h int) string {
 	m.chatView.SetHeight(max(h-2-len(bottom), 1))
 	// The viewport measures every line it is given, which is slow for a
 	// long conversation, so it only gets new content when that changed.
-	lines := m.highlightChat(m.chatLines(s, inner), inner)
+	lines := m.highlightChat(m.chatLines(s, inner), inner, false)
 	if key := linesKey(inner, lines); key != m.chatShown {
 		m.chatView.SetContentLines(lines)
 		m.chatShown = key
@@ -1280,6 +1332,16 @@ func (m *Model) entryLines(s *session, width int) []string {
 			add(st.faint, "", e.text, st.muted)
 		case roleError:
 			add(st.del.Bold(true), "✕", e.text, st.del)
+		case roleOutput:
+			head, body, _ := strings.Cut(e.text, "\n")
+			style := st.add
+			if strings.HasPrefix(head, "✗") {
+				style = st.del
+			}
+			out = append(out, "      "+style.Render(ansi.Truncate(head, width-7, "…")))
+			if body != "" {
+				add(st.faint, "", "```\n"+strings.ReplaceAll(body, "```", "'''")+"\n```", st.muted)
+			}
 		}
 	}
 	if len(s.entries) > 0 {

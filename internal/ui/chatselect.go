@@ -3,17 +3,20 @@ package ui
 import (
 	"strings"
 
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
 // chatSelection is a range of conversation lines picked by dragging the
-// mouse. grove takes the mouse for clicks and scrolling, so the terminal's
-// own selection would also pick up the file list and the borders.
+// mouse, in an agent's chat or a group chat. grove takes the mouse for
+// clicks and scrolling, so the terminal's own selection would also pick up
+// the file list and the borders.
 type chatSelection struct {
 	active   bool
 	dragging bool
-	from, to int // line indexes into the conversation, in drag order
+	group    bool // in the group chat, not the agent chat
+	from, to int  // line indexes into the conversation, in drag order
 }
 
 func (c chatSelection) bounds() (int, int) {
@@ -28,6 +31,15 @@ func (c chatSelection) has(i int) bool {
 // chatGutter is the width of the speaker column before each message.
 const chatGutter = 6
 
+// selView is the conversation a drag selects in: the group chat's while
+// it has the focus, else the agent chat's.
+func (m *Model) selView() *viewport.Model {
+	if m.focus == focusGroup && m.groupChat != nil {
+		return &m.groupChat.view
+	}
+	return &m.chatView
+}
+
 // chatArea is where the conversation lines are on screen.
 func (m *Model) chatArea() (x, y, w, h int) {
 	listW, diffW, _ := m.layout()
@@ -35,20 +47,24 @@ func (m *Model) chatArea() (x, y, w, h int) {
 	if m.narrow() {
 		x = 1
 	}
-	return x, 2, diffW - 2, m.chatView.Height() // below the header and the pane's top border
+	return x, 2, diffW - 2, m.selView().Height() // below the header and the pane's top border
 }
 
 // chatLineAt is the conversation line under a screen row, clamped to the
 // lines on screen.
 func (m *Model) chatLineAt(y int) int {
 	_, top, _, h := m.chatArea()
+	v := m.selView()
 	row := max(0, min(y-top, h-1))
-	return max(0, min(m.chatView.YOffset()+row, m.chatView.TotalLineCount()-1))
+	return max(0, min(v.YOffset()+row, v.TotalLineCount()-1))
 }
 
-// inChat reports whether a screen cell is over the conversation.
+// inChat reports whether a screen cell is over a conversation.
 func (m *Model) inChat(x, y int) bool {
-	if m.focus != focusChat || m.chatSession() == nil {
+	switch {
+	case m.focus == focusChat && m.chatSession() != nil:
+	case m.focus == focusGroup && m.groupChat != nil:
+	default:
 		return false
 	}
 	cx, cy, w, h := m.chatArea()
@@ -57,7 +73,7 @@ func (m *Model) inChat(x, y int) bool {
 
 func (m *Model) startChatSelection(y int) {
 	i := m.chatLineAt(y)
-	m.chatSel = chatSelection{active: true, dragging: true, from: i, to: i}
+	m.chatSel = chatSelection{active: true, dragging: true, group: m.focus == focusGroup, from: i, to: i}
 }
 
 func (m *Model) onMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
@@ -66,13 +82,18 @@ func (m *Model) onMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 	}
 	// Dragging past the edge scrolls, so long replies can be picked.
 	_, top, _, h := m.chatArea()
+	v := m.selView()
 	switch {
 	case msg.Y < top:
-		m.chatView.ScrollUp(1)
+		v.ScrollUp(1)
 	case msg.Y >= top+h:
-		m.chatView.ScrollDown(1)
+		v.ScrollDown(1)
 	}
-	m.chatFollow = false
+	if m.chatSel.group && m.groupChat != nil {
+		m.groupChat.follow = false
+	} else {
+		m.chatFollow = false
+	}
 	m.chatSel.to = m.chatLineAt(msg.Y)
 	return nil
 }
@@ -87,14 +108,23 @@ func (m *Model) onMouseRelease(tea.MouseReleaseMsg) tea.Cmd {
 		m.chatSel = chatSelection{}
 		return nil
 	}
-	s := m.chatSession()
-	if s == nil {
-		return nil
-	}
-	_, _, w, _ := m.chatArea()
 	lo, hi := m.chatSel.bounds()
-	lines := m.chatLines(s, w)
-	text := selectedChatText(lines[min(lo, len(lines)):min(hi+1, len(lines))])
+	var text string
+	if m.chatSel.group {
+		if m.groupChat == nil {
+			return nil
+		}
+		lines := m.groupChat.lines
+		text = selectedGroupText(lines[min(lo, len(lines)):min(hi+1, len(lines))])
+	} else {
+		s := m.chatSession()
+		if s == nil {
+			return nil
+		}
+		_, _, w, _ := m.chatArea()
+		lines := m.chatLines(s, w)
+		text = selectedChatText(lines[min(lo, len(lines)):min(hi+1, len(lines))])
+	}
 	if text == "" {
 		m.chatSel = chatSelection{}
 		return nil
@@ -124,9 +154,26 @@ func selectedChatText(lines []string) string {
 	return strings.Trim(strings.Join(out, "\n"), "\n")
 }
 
-// highlightChat marks the selected lines.
-func (m *Model) highlightChat(lines []string, width int) []string {
-	if !m.chatSel.active {
+// selectedGroupText is selectedChatText for group chat lines, whose
+// messages are indented under a line with the time and sender.
+func selectedGroupText(lines []string) string {
+	var out []string
+	for _, l := range lines {
+		plain := strings.TrimRight(ansi.Strip(l), " ")
+		plain = strings.TrimPrefix(plain, groupIndent)
+		if rest, ok := strings.CutPrefix(plain, codeWrap); ok && len(out) > 0 {
+			out[len(out)-1] += " " + strings.TrimLeft(rest, " ")
+			continue
+		}
+		out = append(out, strings.TrimPrefix(plain, " "))
+	}
+	return strings.Trim(strings.Join(out, "\n"), "\n")
+}
+
+// highlightChat marks the selected lines of the agent chat (group false)
+// or the group chat.
+func (m *Model) highlightChat(lines []string, width int, group bool) []string {
+	if !m.chatSel.active || m.chatSel.group != group {
 		return lines
 	}
 	lo, hi := m.chatSel.bounds()

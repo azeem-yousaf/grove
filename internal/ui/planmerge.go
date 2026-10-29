@@ -548,11 +548,15 @@ func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
 	res := msg.res
 	if res.OK() {
 		p.Merge.Tests = plan.TestsPassed
-		m.plannerNote(roleNote, "The tests passed.")
+		m.plannerNote(roleOutput, testEntry(msg.command, true, string(res.Output)))
 		m.queueMerge(p, msg.report+" grove ran `"+msg.command+"` in that worktree and it passed. "+
 			"Check anything else the change needs, if you must, without changing files. "+reviewAsk)
+		post := fmt.Sprintf("The tests (`%s`) passed. Try it there, then tell the planner here what to change.", msg.command)
+		if out := outputTail(string(res.Output), 8); out != "" {
+			post += "\n\n```\n" + out + "\n```"
+		}
 		return tea.Batch(m.savePlan(p), m.waitForFeedback(p),
-			m.grovePost(p, "The tests passed. Try it there, then tell the planner here what to change.", m.orchestrate(), m.publishPlan(p, "passed")))
+			m.grovePost(p, post, m.orchestrate(), m.publishPlan(p, "passed")))
 	}
 	p.Merge.Tests = plan.TestsFailed
 	var why string
@@ -568,15 +572,11 @@ func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
 	if output == "" {
 		output = "(no output)"
 	}
-	m.plannerNote(roleNote, "The tests "+why+".")
+	m.plannerNote(roleOutput, testEntry(msg.command+" ("+why+")", false, output))
 	m.queueMerge(p, fmt.Sprintf("%s grove ran `%s` in that worktree and it %s. The end of its output:\n\n```\n%s\n```\n\n%s",
 		msg.report, msg.command, why, output, testFixAsk))
-	lines := strings.Split(output, "\n")
-	if len(lines) > 15 {
-		lines = append([]string{"…"}, lines[len(lines)-15:]...)
-	}
 	post := fmt.Sprintf("The tests (`%s`) %s. The planner is getting the tasks' agents to fix it before asking you.\n\n```\n%s\n```",
-		msg.command, why, strings.Join(lines, "\n"))
+		msg.command, why, outputTail(output, 15))
 	return tea.Batch(m.savePlan(p), m.notify(p.Title+": the merged tests failed; the planner is sending the failures to the agents", toastInfo),
 		m.grovePost(p, post, m.orchestrate()))
 }

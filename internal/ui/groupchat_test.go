@@ -222,3 +222,45 @@ func TestOverviewShowsPlans(t *testing.T) {
 		t.Errorf("the summary should show the plan's progress:\n%s", plain(m))
 	}
 }
+
+func TestGroupChatCopy(t *testing.T) {
+	m, p, _ := groupedPlan(t)
+	log, _ := m.groupLog(p, "g")
+	if err := log.Post(group.Message{From: "feature/a", Text: "The API returns **orderId**.\nUse it."}); err != nil {
+		t.Fatal(err)
+	}
+	open := m.openGroupChat(m.taskPath(p, "feature/a"))
+	drive(t, m).until(open, func() bool { return !m.pollingGroups })
+	plain(m)
+	lines := m.groupChat.lines
+	first, last := -1, -1
+	for i, l := range lines {
+		if strings.Contains(l, "feature/a") && first < 0 && i > 0 {
+			first = i
+		}
+		if strings.Contains(l, "Use it.") {
+			last = i
+		}
+	}
+	if first < 0 || last < 0 {
+		t.Fatalf("message not rendered: %q", lines)
+	}
+	x, top, _, _ := m.chatArea()
+	off := m.groupChat.view.YOffset()
+	m.Update(tea.MouseClickMsg{X: x + 3, Y: top + first - off, Button: tea.MouseLeft})
+	m.Update(tea.MouseMotionMsg{X: x + 10, Y: top + last - off, Button: tea.MouseLeft})
+	if !m.chatSel.group || !m.chatSel.has(first) || !m.chatSel.has(last) {
+		t.Fatalf("selection = %+v, want group lines %d-%d", m.chatSel, first, last)
+	}
+	if !strings.Contains(plain(m), "Use it.") {
+		t.Error("the highlighted lines should still show")
+	}
+	_, cmd := m.Update(tea.MouseReleaseMsg{X: x + 10, Y: top + last - off, Button: tea.MouseLeft})
+	if got := copied(cmd); len(got) != 1 || got[0] != "Copied "+plural(last-first+1, "line") {
+		t.Errorf("drag copied %v", got)
+	}
+	got := selectedGroupText(lines[first : last+1])
+	if !strings.HasSuffix(got, "feature/a\nThe API returns orderId.\nUse it.") {
+		t.Errorf("selected text = %q", got)
+	}
+}

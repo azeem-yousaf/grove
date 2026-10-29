@@ -74,6 +74,8 @@ type codexItem struct {
 	Text     string `json:"text"`
 	Command  string `json:"command"`
 	Status   string `json:"status"`
+	Output   string `json:"aggregated_output"` // command_execution
+	ExitCode *int   `json:"exit_code"`         // command_execution
 	Changes  []struct {
 		Path string `json:"path"`
 		Kind string `json:"kind"`
@@ -106,6 +108,9 @@ func (p *codexParser) line(b []byte) []Event {
 			if strings.TrimSpace(l.Item.Text) != "" {
 				return []Event{{Kind: EvText, Text: l.Item.Text}}
 			}
+		case "command_execution":
+			failed := l.Item.Status == "failed" || l.Item.ExitCode != nil && *l.Item.ExitCode != 0
+			return []Event{{Kind: EvOutput, Tool: "Run", Detail: l.Item.Command, Text: tail(l.Item.Output), Failed: failed}}
 		case "file_change":
 			var evs []Event
 			for _, c := range l.Item.Changes {

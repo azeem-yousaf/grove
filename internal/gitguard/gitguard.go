@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -135,7 +136,9 @@ func readSettings(dir string) settings {
 
 func writeIfChanged(path string, data []byte, perm os.FileMode) error {
 	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
-		if fi, err := os.Stat(path); err == nil && fi.Mode().Perm()&perm == perm {
+		// Windows has no execute bits (Git for Windows runs hooks anyway),
+		// so only the content counts there.
+		if fi, err := os.Stat(path); err == nil && (runtime.GOOS == "windows" || fi.Mode().Perm()&perm == perm) {
 			return nil
 		}
 	}

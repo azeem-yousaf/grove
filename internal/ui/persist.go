@@ -85,7 +85,7 @@ type savedPending struct {
 	Left        bool     `json:"left,omitempty"` // the planner left it for the user
 }
 
-var roleNames = map[chatRole]string{roleUser: "user", roleAgent: "agent", roleTool: "tool", roleNote: "note", roleError: "error"}
+var roleNames = map[chatRole]string{roleUser: "user", roleAgent: "agent", roleTool: "tool", roleNote: "note", roleError: "error", roleOutput: "output"}
 
 func sessionFile(path string) string { return "sessions/" + git.PathKey(path) + ".json" }
 

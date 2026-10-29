@@ -49,7 +49,8 @@ type groupChat struct {
 	renderedN    int
 	renderedW    int
 	renderedDark bool
-	shown        uint64 // linesKey of what the viewport holds
+	shown        uint64   // linesKey of what the viewport holds
+	lines        []string // the conversation lines, unhighlighted, for copying
 }
 
 type groupsReadMsg struct {
@@ -324,6 +325,7 @@ func (m *Model) openGroup(planID, groupID string) tea.Cmd {
 	ta.SetStyles(chatInputStyles(m.dark))
 	m.groupChat = &groupChat{plan: planID, group: groupID, input: ta, view: viewport.New(), follow: true}
 	m.focus = focusGroup
+	m.chatSel = chatSelection{}
 	return tea.Batch(m.groupChat.input.Focus(), m.pollGroups())
 }
 
@@ -332,6 +334,9 @@ func (m *Model) onGroupKey(msg tea.KeyPressMsg) tea.Cmd {
 	if gc == nil {
 		m.focus = focusList
 		return nil
+	}
+	if !m.chatSel.dragging {
+		m.chatSel = chatSelection{}
 	}
 	switch msg.String() {
 	case "ctrl+c":
@@ -472,6 +477,8 @@ func (m *Model) groupPane(w, h int) string {
 		hints = append(hints, [2]string{"ctrl+t", "group chat"})
 	}
 	bottom = append(bottom, " "+ansi.Truncate(m.hints(hints), inner-1, ""))
+	gc.lines = lines
+	lines = m.highlightChat(lines, inner, true)
 	gc.view.SetWidth(inner)
 	gc.view.SetHeight(max(h-2-len(bottom), 1))
 	// The viewport measures every line it is given, so only hand it new
@@ -486,6 +493,9 @@ func (m *Model) groupPane(w, h int) string {
 	body := append(strings.Split(gc.view.View(), "\n"), bottom...)
 	return m.panel(groupTitle(g)+" · "+p.Title, st.faint.Render(plural(len(p.ChatMembers(gc.group)), "agent")), "", body, w, h, m.focus == focusGroup)
 }
+
+// groupIndent indents a message's lines under its sender.
+const groupIndent = "   "
 
 // groupMessageLines renders msgs, reusing what earlier frames rendered.
 func (m *Model) groupMessageLines(gc *groupChat, msgs []group.Message, inner int) []string {
@@ -509,7 +519,7 @@ func (m *Model) groupMessageLines(gc *groupChat, msgs []group.Message, inner int
 		}
 		gc.rendered = append(gc.rendered, "", head)
 		for _, l := range renderChatText(msg.Text, max(inner-4, 10), st, st.text) {
-			gc.rendered = append(gc.rendered, "   "+l)
+			gc.rendered = append(gc.rendered, groupIndent+l)
 		}
 	}
 	gc.renderedN = len(msgs)
