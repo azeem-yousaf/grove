@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,27 @@ func TestModelFor(t *testing.T) {
 	ai := AI{Model: "old", CodexModel: "gpt"}
 	if ai.ModelFor("claude") != "old" || ai.ModelFor("codex") != "gpt" {
 		t.Errorf("fallback = %q, %q", ai.ModelFor("claude"), ai.ModelFor("codex"))
+	}
+}
+
+func TestGitProtected(t *testing.T) {
+	var cfg Config
+	if _, err := toml.Decode(Template, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Git.ProtectedWith("develop")
+	if want := []string{"main", "master", "develop", "release/*"}; !slices.Equal(got, want) {
+		t.Errorf("protected = %q, want %q", got, want)
+	}
+	if got := (Git{Protected: []string{" master ", ""}}).ProtectedWith("refs/heads/main"); !slices.Equal(got, []string{"main", "master"}) {
+		t.Errorf("duplicates kept: %q", got)
+	}
+	if !cfg.Planner.OpenPRs() || !(Planner{}).OpenPRs() {
+		t.Error("pull requests should be on by default")
+	}
+	off := false
+	if (Planner{PullRequests: &off}).OpenPRs() {
+		t.Error("pull_requests = false ignored")
 	}
 }
 

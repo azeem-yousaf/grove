@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -40,6 +41,31 @@ type Config struct {
 	// Notify configures telling the user about agents while grove's
 	// terminal isn't focused.
 	Notify Notify `toml:"notify"`
+	// Git configures what agents may do with git on their own.
+	Git Git `toml:"git"`
+}
+
+// Git configures agents' git autonomy: routine git on their own branches
+// runs without asking; protected branches only change with the user's
+// approval.
+type Git struct {
+	// Protected lists more branches agents never change on their own: names
+	// or globs such as "release/*". main, master and the base branch are
+	// always protected.
+	Protected []string `toml:"protected"`
+}
+
+// ProtectedWith is Protected joined with main, master and base (the
+// detected default branch), without duplicates or blanks.
+func (g Git) ProtectedWith(base string) []string {
+	out := []string{"main", "master"}
+	for _, p := range append([]string{base}, g.Protected...) {
+		p = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(p), "refs/heads/"))
+		if p != "" && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Notify configures notifications sent while grove's terminal isn't
@@ -92,7 +118,13 @@ type Planner struct {
 	// TestMinutes is how long the test command may run before it is
 	// stopped. 0 or less means the default, 20.
 	TestMinutes int `toml:"test_minutes"`
+	// PullRequests has grove push a merged plan's branch and open a pull
+	// request into the plan's base once its tests pass. Unset means on.
+	PullRequests *bool `toml:"pull_requests"`
 }
+
+// OpenPRs is PullRequests with the default applied.
+func (p Planner) OpenPRs() bool { return p.PullRequests == nil || *p.PullRequests }
 
 // Watchers are the values Planner.Watcher may take.
 const (
@@ -381,6 +413,18 @@ watcher = ""
 test = ""
 # Minutes the test command may run before it is stopped.
 test_minutes = 20
+# Once a merged plan's tests pass, push its plan/<name> branch and open a
+# pull request into the base branch with the GitHub CLI (gh).
+pull_requests = true
+
+# What agents may do with git on their own. Routine git on their own
+# feature branch (commit, branch, merge, rebase of unpushed work, push of
+# their branch) just runs; anything that changes a protected branch, or
+# could lose work, waits for you.
+[git]
+# Branches agents never change without you, as names or globs. main,
+# master and the base branch are always protected.
+protected = ["release/*"]
 
 # Files changed in more than one worktree are test-merged in git's object
 # store (nothing on disk changes) to show which would really conflict.

@@ -73,6 +73,9 @@ type Merge struct {
 	// Tests is how the test command went on the latest merge: TestsPassed,
 	// TestsFailed, or "" before they ran or without a test command.
 	Tests string `json:"tests,omitempty"`
+	// PR is the URL of the pull request grove opened from Branch into the
+	// plan's base, once there is one.
+	PR string `json:"pr,omitempty"`
 }
 
 // Merge.Tests values.

@@ -360,7 +360,7 @@ func (m *Model) onPlanMerged(msg planMergedMsg) tea.Cmd {
 		}
 		m.queueMerge(p, ask+" No test command is set ([planner] test in grove's config, or \"test\" in the plan): "+
 			"work out how this repository is built and tested, and run that in the worktree, without changing files. "+reviewAsk)
-		cmds = append(cmds, m.grovePost(p, text+" Try it there, then tell the planner here what to change."), m.waitForFeedback(p))
+		cmds = append(cmds, m.grovePost(p, text+" Try it there, then tell the planner here what to change."), m.waitForFeedback(p), m.publishPlan(p, ""))
 	}
 	return tea.Batch(append(cmds, m.orchestrate())...)
 }
@@ -536,7 +536,7 @@ func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
 		m.queueMerge(p, msg.report+" grove ran `"+msg.command+"` in that worktree and it passed. "+
 			"Check anything else the change needs, if you must, without changing files. "+reviewAsk)
 		return tea.Batch(m.savePlan(p), m.grovePost(p, "The tests passed. Try it there, then tell the planner here what to change."),
-			m.waitForFeedback(p), m.orchestrate())
+			m.waitForFeedback(p), m.publishPlan(p, "passed"), m.orchestrate())
 	}
 	p.Merge.Tests = plan.TestsFailed
 	var why string

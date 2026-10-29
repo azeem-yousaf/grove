@@ -113,6 +113,8 @@ type (
 		turnTree   string // taken before a later turn, for "since the last turn"
 		err        error
 		closed     bool
+		guard      *guardVerifiedMsg // the guard checked before the first turn
+		ack        chan struct{}     // closed once guard is applied
 	}
 	agentSavedMsg struct{ err error }
 	undoReadyMsg  struct {
@@ -598,6 +600,10 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	s.cancel = cancel
 	ch := make(chan agentMsg, 64)
 	s.events = ch
+	// The guard is checked in a worktree before its agent first runs git;
+	// until then its scope says unguarded, so git writes ask the user.
+	checkGuard := m.verifyGuard(s.path)
+	policyErr := m.writePolicy()
 	req := m.agentRequest(s)
 	req.Message = text
 	// Claude keeps the conversation itself, so it needs the instructions
@@ -614,6 +620,17 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	run := m.runAgent
 	go func() {
 		defer close(ch)
+		if checkGuard != nil {
+			if g, ok := checkGuard().(guardVerifiedMsg); ok {
+				ack := make(chan struct{})
+				ch <- agentMsg{path: path, planner: planner, guard: &g, ack: ack}
+				select {
+				case <-ack:
+				case <-time.After(10 * time.Second):
+				case <-ctx.Done():
+				}
+			}
+		}
 		switch {
 		case needCheckpoint:
 			tree, err := git.Checkpoint(ctx, path)
@@ -632,12 +649,16 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 		}
 		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, ev: ev} })
 	}()
-	return tea.Batch(listen(ch), m.startAnimating())
+	return tea.Batch(listen(ch), m.startAnimating(), policyErr)
 }
 
-// agentRequest describes s's next turn, without the message.
+// agentRequest describes s's next turn, without the message. Every agent
+// runs git under the guard, and Claude checks shell commands with grove's
+// policy first.
 func (m *Model) agentRequest(s *session) agent.Request {
 	return agent.Request{
+		Env:      m.guardEnv(),
+		Hook:     m.agentHook(s),
 		Kind:     s.kind,
 		Dir:      s.path,
 		Session:  s.id,
@@ -686,6 +707,11 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 		return nil
 	}
 	next := listen(s.events)
+	if msg.guard != nil {
+		cmd := m.onGuardVerified(*msg.guard)
+		close(msg.ack)
+		return tea.Batch(next, cmd)
+	}
 	if msg.turnTree != "" {
 		s.turnTree = msg.turnTree
 		return next
@@ -757,13 +783,12 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 		}
 		s.entries = append(s.entries, chatEntry{roleNote, fmt.Sprintf("Blocked %s %s: %s", d.Tool, what, why)})
 	}
-	for _, c := range suggestedCommands(reply) {
-		s.pending = append(s.pending, pendingAction{kind: pendingCommand, text: c})
-	}
+	// grove runs the routine git lines itself; the rest wait for the user.
+	gitCmd := m.suggestedLines(s, suggestedCommands(reply))
 
 	viewing := m.focus == focusChat && m.chatSession() == s
 	s.seen = viewing
-	cmds := []tea.Cmd{m.startScan()}
+	cmds := []tea.Cmd{m.startScan(), gitCmd, m.checkWatches(s)}
 	if s.planner {
 		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(reply), m.orchestrate())
 	} else {
@@ -854,7 +879,7 @@ func (m *Model) agentContext(s *session) string {
 	if len(mates) > 0 {
 		b.WriteString("\n- You may read, but never change, your groupmates' worktrees, to match their APIs, types and names: " + strings.Join(mates, "; ") + ".")
 	}
-	b.WriteString("\n- Don't run git commands that change the repository (commit, checkout, switch, merge, rebase, reset, restore, stash, push, pull, branch). When one is needed, put it in a fenced code block whose language is grove-run, one command per line, and the user will run it from grove:\n\n```grove-run\ngit commit -m \"Describe the change\"\n```\n")
+	b.WriteString("\n" + m.gitRules(s))
 	b.WriteString("- Some shell commands need the user's approval. If one is refused, say what you wanted to run and why, then stop.\n")
 	b.WriteString("- Replies appear in a narrow terminal panel: keep them short and plain.\n")
 
@@ -1048,6 +1073,12 @@ func (m *Model) chatPane(w, h int) string {
 		info = st.accent.Render(spinnerFrames[m.frame%len(spinnerFrames)] + " working " + since(m.now, s.started))
 	case s.cost != "":
 		info = st.faint.Render(s.cost)
+	}
+	if g := m.guardBadge(s.path, false); g != "" && ansi.StringWidth(info)+ansi.StringWidth(g)+3 < inner/2 {
+		if info != "" {
+			info += st.faint.Render(" · ")
+		}
+		info += g
 	}
 
 	bottom := m.chatBottom(s, inner)

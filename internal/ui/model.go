@@ -190,6 +190,9 @@ type Model struct {
 	saveWatch func(string) error
 	sendAlert func(title, body string) error
 	listPRs   func(ctx context.Context, dir string) (map[string]gh.PR, error)
+	prHooks   prHooks
+
+	auto gitAuto // agents' git autonomy (gitauto.go)
 }
 
 type toastKind uint8
@@ -280,6 +283,8 @@ func New(ctx context.Context, o Options) *Model {
 		sendAlert:    notify.Send,
 		ghPath:       gh.Path(),
 		listPRs:      gh.List,
+		prHooks:      defaultPRHooks(),
+		auto:         newGitAuto(),
 	}
 	if o.Repo.CommonDir != "" {
 		m.store = store.Open(o.Repo.CommonDir)
@@ -450,7 +455,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case clockMsg:
 		m.now = time.Time(msg)
-		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now)}
+		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.gitAutoTick()}
 		if m.termFocused {
 			cmds = append(cmds, m.pollPRs(false))
 		}
@@ -532,6 +537,21 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case testsDoneMsg:
 		return m.onTestsDone(msg)
+
+	case planPRMsg:
+		return m.onPlanPR(msg)
+
+	case guardInstalledMsg:
+		return m.onGuardInstalled(msg)
+
+	case guardVerifiedMsg:
+		return m.onGuardVerified(msg)
+
+	case autoGitMsg:
+		return m.onAutoGit(msg)
+
+	case refsCheckedMsg:
+		return m.onRefsChecked(msg)
 
 	case groupsReadMsg:
 		return m.onGroupsRead(msg)

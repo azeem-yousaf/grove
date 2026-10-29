@@ -86,6 +86,13 @@ func noAgents(m *Model) {
 	m.sendAlert = func(string, string) error { return nil }
 	m.ghPath = ""
 	m.listPRs = func(context.Context, string) (map[string]gh.PR, error) { return nil, nil }
+	m.prHooks.push = func(context.Context, string, string, string, []string) error {
+		return fmt.Errorf("no pushing in tests")
+	}
+	m.prHooks.open = func(context.Context, string, string) (gh.PR, bool, error) { return gh.PR{}, false, nil }
+	m.prHooks.create = func(context.Context, string, string, string, string, string) (string, error) {
+		return "", fmt.Errorf("no pull requests in tests")
+	}
 }
 
 func press(m *Model, keys ...string) {
