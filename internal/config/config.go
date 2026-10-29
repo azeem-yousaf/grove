@@ -399,12 +399,14 @@ max_agents = 3
 # How many times in a row grove wakes idle agents of a group to answer each
 # other before it waits for you to post in the group chat.
 max_wakeups = 6
-# How many turns in a row the planner may take for a plan it watches before
-# it waits for you to say something.
+# How many turns in a row a planner may take for a plan it watches without
+# the plan moving forward before it waits for you to say something.
 max_decisions = 20
 # Who watches a running plan's agents and answers them: "you", or "planner"
-# to have the planner approve their commands, answer their questions and
-# follow their group chats. Empty = ask before each plan.
+# to put the planner (and a planner per group) in charge: it approves their
+# commands (all but destructive git), answers their questions, helps the
+# ones that get stuck, merges and tests the plan and opens a pull request,
+# and follows your review of it. Empty = ask before each plan.
 watcher = ""
 # The command grove runs in a plan's worktree after the planner merges the
 # plan, e.g. "go test ./..." or "npm test" (through sh, or cmd.exe on
@@ -414,7 +416,9 @@ test = ""
 # Minutes the test command may run before it is stopped.
 test_minutes = 20
 # Once a merged plan's tests pass, push its plan/<name> branch and open a
-# pull request into the base branch with the GitHub CLI (gh).
+# pull request into the base branch with the GitHub CLI (gh). While the
+# planner is in charge, it follows the pull request's reviews, and the plan
+# closes once the pull request is merged.
 pull_requests = true
 
 # What agents may do with git on their own. Routine git on their own

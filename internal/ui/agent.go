@@ -333,7 +333,10 @@ func (m *Model) showChat(s *session) tea.Cmd {
 	m.chatFollow = true
 	m.chatSel = chatSelection{}
 	m.chatInput.Placeholder = "ask the agent to do something in this worktree…"
-	if s.planner {
+	switch {
+	case s.crewGroup != "":
+		m.chatInput.Placeholder = "tell the group's planner what you want…"
+	case s.planner:
 		m.chatInput.Placeholder = "describe what to build, or name a Jira issue or epic…"
 	}
 	m.chatInput.SetValue(draft)
@@ -1287,6 +1290,8 @@ func (m *Model) chatBottom(s *session, width int) []string {
 	switch {
 	case s.running:
 		hint = [][2]string{{"ctrl+x", "stop"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"/model", "model"}}
+	case s.crewGroup != "":
+		hint = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+g", "group chat"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"tab", "list"}, {"/model", "model"}}
 	case s.planner:
 		hint = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+o", "review plan"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"tab", "list"}, {"/model", "model"}}
 	}

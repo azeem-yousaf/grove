@@ -12,8 +12,10 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -29,7 +31,7 @@ func TestReadmeShot(t *testing.T) {
 	if out == "" {
 		t.Skip("set GROVE_SHOT to the output .svg path")
 	}
-	m := shotModel(t, 120, 22)
+	m := shotModel(t, 130, 26)
 	screen := m.render()
 	if filepath.Separator == '\\' {
 		// The same picture from every OS: the README shows ~/src/shop.
@@ -90,8 +92,31 @@ func shotModel(t *testing.T, w, h int) *Model {
 		Overlaps: map[string][]int{"src/api/client.ts": {1, 2}},
 		Taken:    now,
 	}
+	// Both features are one plan the planner is in charge of, grouped
+	// because the UI uses the API, so the list shows their group box and
+	// the right pane that group's planner at work.
+	p := &plan.Plan{ID: "p1", Title: "Faster checkout", Status: plan.Running, Orchestrated: true, Agent: "claude", Base: "main",
+		Groups: []plan.Group{{ID: "checkout", Name: "Checkout", Icon: "🛒"}},
+		Tasks: []plan.Task{
+			{ID: "auth", Title: "Keep shoppers signed in", Branch: "feature/auth", Path: src("shop-auth"), Group: "checkout", Status: plan.Working},
+			{ID: "cart", Title: "Cart totals", Branch: "feature/cart", Path: src("shop-cart"), Group: "checkout", Status: plan.Finished},
+		}}
+	m.plans = []*plan.Plan{p}
+	m.newSession(src("shop-auth"), "feature/auth", agent.Claude).running = true
+	m.newSession(src("shop-cart"), "feature/cart", agent.Claude)
 	m.Update(scanMsg{seq: m.scanSeq, snap: snap})
-	press(m, "down") // src/api/client.ts in feature/auth
+
+	crew := m.plannerFor(p.ID, "checkout")
+	crew.entries = []chatEntry{
+		{roleNote, "Asked to decide: feature/cart wants to run 1 command; feature/auth asked a question"},
+		{roleOutput, "✓ passed: npm test -- cart\n Test Files  4 passed (4)\n      Tests  31 passed (31)"},
+		{roleAgent, "Approved `npm install zod` for **feature/cart**: the cart schema needs it. " +
+			"Told **feature/auth** to keep the 10 s timeout and retry 3 times, as the cart API expects."},
+		{roleUser, "Keep the old session cookie until auth is merged"},
+		{roleAgent, "Will do. I've asked feature/auth to read both cookies for now; I'll check its diff when it finishes."},
+	}
+	press(m, "down") // feature/auth's header, under the Checkout group
+	m.showChat(crew)
 
 	st, f, _ := m.selectedFile()
 	m.Update(diffMsg{key: diffKey(st, f), raw: strings.Join([]string{

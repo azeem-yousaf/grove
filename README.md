@@ -8,7 +8,7 @@ per-file `+`/`−` counts, a syntax-highlighted diff, and a warning whenever two
 worktrees touch the same file, which is where your merge conflicts will come
 from.
 
-![grove showing three worktrees, with src/api/client.ts changed in both feature branches](docs/screenshot.svg)
+![grove showing a plan's two feature worktrees grouped as Checkout, with that group's planner approving a command, reporting a passing test run and answering the user](docs/screenshot.svg)
 
 ## Features
 
@@ -37,6 +37,12 @@ from.
   down when it isn't, and refreshes the moment you come back. Background scans
   never take git's index lock, so they can't get in the way of your own git
   commands.
+- **AI agents per worktree, and a planner that runs them**: describe a
+  feature, and the planner splits it into tasks, each in its own worktree
+  with its own agent. Put the planner in charge and it approves their
+  commands, answers their questions, helps the ones that get stuck, merges
+  and tests the result and opens a pull request: all you do is review it.
+  See *Planner*.
 - **Desktop notifications** while you're in another window: an agent
   finished, needs you or failed, a plan is ready or done, or two worktrees
   start to conflict. See *Notifications*.
@@ -174,9 +180,19 @@ use; tick *Remember my choice* (off by default) to stop it asking
   - with Codex, its `workspace-write` sandbox limits writes to the folder.
     Codex can still read outside it, so isolation is stronger with Claude
     Code.
-- **Git changes stay yours.** Agents are asked not to commit, check out,
-  rebase or push. They suggest those commands instead, which appear as
-  cards you can run (`enter`), edit in the `:` prompt (`e`) or skip.
+- **Agents handle their own git, but never your protected branches.**
+  Routine git on the agent's own branch (add, commit, branch, merging
+  feature branches, rebasing work that isn't pushed, pushing its branch)
+  just runs. grove reads every git command an agent wants to run, without
+  AI, and anything that changes a protected branch (main, master, the base
+  branch and `[git] protected`), could lose work (deleting branches, force
+  pushes, discarding changes) or could get around those checks waits for
+  you as a card you can run (`enter`), edit in the `:` prompt (`e`) or
+  skip. A git hook that only applies to the agents' git backs this up: the
+  chat header shows `🛡 guarded` once grove has checked it works in that
+  worktree. Your own git is never affected.
+- **Test results show in the chat.** When an agent runs tests, the chat
+  shows whether they passed and the end of their output.
 - **Undo.** Before an agent's first turn grove takes a checkpoint of the
   worktree (a git tree object; your index, branch and files are untouched).
   `ctrl+z` in the chat, or `u` in the list, shows every file changed since
@@ -190,7 +206,7 @@ use; tick *Remember my choice* (off by default) to stop it asking
   (`ctrl+v`, or your terminal's own paste) and keeps pasted line breaks;
   `enter` sends, `shift+enter` (or `ctrl+j`) starts a new line. `ctrl+y`
   copies the agent's last reply as it wrote it, and dragging over the
-  conversation copies those lines as plain text.
+  conversation (here or in a group chat) copies those lines as plain text.
 - **Replies are formatted.** Markdown in replies shows as styled text
   without its marks: bold, italics, code, links, headings, quotes, bullets
   and task boxes. Tables are laid out in columns that fit the pane; when
@@ -224,27 +240,49 @@ Before you plan, grove asks who will watch the plan's agents while it runs:
 
 - **You**: commands an agent was refused, questions it ends a turn with and
   group chats all wait for you, as with any other agent.
-- **The planner**, as an orchestrator: grove sends it what would otherwise
-  wait for you, and it approves commands that are safe and needed for the
-  task (builds, tests, linters), denies destructive ones with a reason for
-  the agent, answers questions the plan and the code can answer, and
-  follows the group chats, posting when agents are stuck or disagree. When
-  a task's agent says it is done, or a task fails, the planner checks the
-  work and tells the agent what is missing, or marks the task failed. What
-  it doesn't decide stays for you, and you can always answer first: an
-  approval card says the planner will decide unless you do. Its decisions
-  show in its chat and in each agent's chat. After `[planner]
-  max_decisions` (default 20) turns in a row it pauses until you say
+- **The planner**, which then takes charge. You review the pull request at
+  the end, and that is all:
+
+  - **Commands.** It answers every command an agent was refused. It approves
+    what the task needs, git included, and denies the rest with what to do
+    instead. Only destructive git (deleting branches or worktrees, force
+    pushes, discarding work), changes to protected branches and commands
+    that could get around grove's git checks are kept for you; it can't
+    approve those. One it doesn't answer is asked about again, then denied
+    so the agent carries on.
+  - **Questions and stuck agents.** It answers agents' questions from the
+    plan and the code. When an agent struggles (errors, failing builds or
+    tests, missing tools) it looks at its worktree, runs what it needs
+    there and tells it exactly what to do next. It never edits files
+    itself. A failed task is diagnosed and started again; it is only marked
+    failed if it can't be done at all.
+  - **Finished work.** When a task's agent says it is done, the planner
+    checks the work and sends back what is missing.
+  - **Group chats.** It follows them and settles what agents are stuck on
+    or disagree about, also when they keep waking each other.
+
+  You can still answer anything first: an approval card says the planner
+  will decide unless you do. Its decisions show in its chat and in each
+  agent's chat, and turns that need nothing from you don't send desktop
+  notifications. If it takes `[planner] max_decisions` (default 20) turns
+  in a row without the plan moving forward, it pauses until you say
   something to it or to an agent.
 
+  **A planner per group.** Each group of tasks gets its own planner, which
+  owns that group: its agents' commands, questions, finished work and group
+  chat go to it, and it can only act on its own group. The main planner
+  keeps the isolated tasks and the plan chat, and merges the plan. Press `P`
+  on a group in the list, or `ctrl+p` in its group chat, to see a group's
+  planner and talk to it; `ctrl+g` in its chat opens the group chat.
+
   While a plan it watches is running, the planner may run any shell command
-  without asking (to read a task's diff or run its tests), though it never
-  edits files itself, and it gets grove's control tools through a small MCP
-  server built into grove (`grove mcp-plan`): `tasks` (each task's status,
-  the end of its agent's last reply and the commands it waits on),
-  `message`, `approve`, `deny`, `mark`, `post`, `merge` and `close`. It can
-  act with these during a turn as well as with its decisions block at the
-  end.
+  without asking (to read a task's diff, run its tests or install what an
+  agent needs), and the main planner gets grove's control tools through a
+  small MCP server built into grove (`grove mcp-plan`): `tasks` (each
+  task's status, the end of its agent's last reply and the commands it
+  waits on), `message`, `approve`, `deny`, `mark`, `post`, `merge` and
+  `close`. It can act with these during a turn as well as with its
+  decisions block at the end.
 
   Once every task is finished or failed, the planner merges the plan for
   you. grove commits each finished task's worktree and merges the branches,
@@ -257,17 +295,22 @@ Before you plan, grove asks who will watch the plan's agents while it runs:
   Then grove runs the plan's test command in the merged worktree: `[planner]
   test` from the config (for example `go test ./...` or `npm test`, run
   through `sh`, or `cmd.exe` on Windows), else the command the planner
-  proposed with the plan; the plan review shows which. If the tests fail,
-  you aren't asked yet: grove posts the end of the output in the plan chat,
-  and the planner works out which tasks cause the failures and sends them
-  back to those agents, merging and testing again once they are done. It
-  only turns to you if the agents can't fix it. With no test command, the
-  planner works out how to test the result itself. Once the tests pass, the
-  planner posts a summary in the plan chat and waits for your feedback
-  there: when you ask for changes it reopens the
-  tasks that own them and merges again once they are done; when you are
-  happy it closes the plan, and you ship the plan's branch from its
-  worktree (`s`).
+  proposed with the plan; the plan review shows which. The result and the
+  end of its output show in the planner's chat and the plan chat. If the
+  tests fail, the planner works out which tasks cause the failures and
+  sends them back to those agents, merging and testing again once they are
+  done. With no test command, the planner works out how to test the result
+  itself.
+
+  **The pull request.** Once the tests pass, grove pushes the plan's branch
+  and opens a pull request into the base branch with the GitHub CLI (`gh`),
+  and tells you it is ready for review. grove reads the pull request every
+  minute: your reviews, comments and comments on lines of code go to the
+  planner, which sends the changes to the agents that own them and merges
+  again, so the fixes land on the same pull request. When you merge the
+  pull request (or close it), grove closes the plan. Without `gh`, or with
+  `[planner] pull_requests = false`, the planner instead posts a summary in
+  the plan chat and takes your feedback there.
 
 Tick *Remember my choice* (off by default) to save the answer as
 `[planner] watcher` and stop being asked.
@@ -332,19 +375,21 @@ grouped agent's chat) to open the group chat. You see every message and
 can post too; start with `@branch` to address one agent. When a message
 arrives for an agent that isn't working, grove starts a turn so it can
 answer. To keep agents from waking each other forever, grove stops after
-`[planner] max_wakeups` (default 6) wake-ups in a row in a group and waits
-for you to post.
+`[planner] max_wakeups` (default 6) wake-ups in a row in a group: then the
+group's planner settles it if the planner is in charge, and otherwise grove
+waits for you to post.
 
 **Plan chat.** Every started plan also has a plan chat, for you, the
 planner and all of the plan's agents (each gets it as a second set of the
-same tools). It is where a watching planner talks to you, for example after
-merging the plan. Anything you post there goes to the planner; agents are
+same tools). It is where the planner posts news about the plan, such as
+merges, test runs and the pull request. Anything you post there goes to the
+planner, and anything you post in a group chat to that group's planner; agents are
 only woken for messages addressed to them with `@branch`. Press `t` on an
 isolated task's worktree or the plan's merged worktree to open it,
 `ctrl+t` in a group chat to switch to it and back, or `ctrl+g` in the
 planner's chat.
 
-Plans, the planner's conversation and group chats are saved with the
+Plans, the planners' conversations and group chats are saved with the
 agents' conversations and survive restarts.
 
 ### Overview of every worktree
@@ -446,8 +491,10 @@ worktrees work the same way. The main worktree can't be removed.
 
 While grove's terminal isn't focused, grove shows a desktop notification
 when an agent finishes, needs you (a command to approve) or fails, when the
-planner proposes a plan or a plan is done, when the planner or a group chat
-pauses to wait for you, and when two worktrees start to conflict.
+planner proposes a plan, a plan's pull request is ready for review or a plan
+is done, when the planner or a group chat pauses to wait for you, and when
+two worktrees start to conflict. For a plan the planner is in charge of,
+only what needs you is notified.
 Notifications that come within two seconds of each other are combined into
 one. While the terminal is focused, the usual toasts are enough.
 
@@ -475,7 +522,7 @@ one. While the terminal is focused, the usual toasts are enough.
 | `y` | copy the path |
 | `n` | create a worktree (in the list) |
 | `a` | open the worktree's AI agent |
-| `P` | the planner: turn requirements into tasks and worktrees |
+| `P` | the planner: turn requirements into tasks and worktrees (on a group: that group's planner) |
 | `t` | the group chat of a group or a grouped task's worktree, or the plan chat of any other task or a plan's merged worktree |
 | `w` | overview of every worktree |
 | `s` | ship: commit, push, pull request, update from the base branch |
@@ -537,10 +584,14 @@ model = ""           # passed to the agent; "" = its default
 [planner]            # plans (key P)
 max_agents = 3       # task agents working at once; the rest wait
 max_wakeups = 6      # wake-ups in a row in a group chat before waiting for you
-max_decisions = 20   # turns in a row the planner takes for a plan it watches
-watcher = ""         # who watches a plan's agents: "you" or "planner"; "" = ask before each plan
+max_decisions = 20   # turns in a row a planner takes without the plan moving forward
+watcher = ""         # who watches a plan's agents: "you" or "planner" (in charge); "" = ask before each plan
 test = ""            # run in a merged plan's worktree, e.g. "go test ./..."; "" = the planner's suggestion
 test_minutes = 20    # how long that may run before it is stopped
+pull_requests = true # push a merged plan's branch and open a pull request with gh
+
+[git]                # what agents may do with git on their own
+protected = ["release/*"]  # branches agents never change without you; main, master and the base always are
 
 [notify]             # while grove's terminal isn't focused
 desktop = true       # desktop notifications
