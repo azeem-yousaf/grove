@@ -111,9 +111,20 @@ func poll(t *testing.T, m *Model, fake *fakeAgent) {
 	pump(t, m, next)
 }
 
+// asking is n agent turns that end with a question, which keeps a task
+// working rather than finished.
+func asking(n int) [][]agent.Event {
+	out := make([][]agent.Event, n)
+	for i := range out {
+		out[i] = []agent.Event{{Kind: agent.EvText, Text: "Shall I go on?"}, {Kind: agent.EvDone}}
+	}
+	return out
+}
+
 func TestIdleAgentsWakeForMessagesUpToTheLimit(t *testing.T) {
 	m, p, fake := groupedPlan(t)
 	m.cfg.Planner.MaxWakeups = 2
+	fake.turns = asking(3)
 	log, _ := m.groupLog(p, "g")
 	if err := log.Post(group.Message{From: "feature/a", Text: "The API returns {orderId}."}); err != nil {
 		t.Fatal(err)
@@ -241,6 +252,50 @@ func TestSettleZeroWakesAtOnce(t *testing.T) {
 	poll(t, m, fake)
 	if len(fake.reqs) != 1 {
 		t.Fatalf("settle 0 wakes at once: %+v", fake.reqs)
+	}
+}
+
+func TestFinishedTaskWakesOnlyForItsOwnMessages(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	for i := range p.Tasks {
+		if p.Tasks[i].Branch == "feature/b" {
+			p.Tasks[i].Status = plan.Finished
+		}
+	}
+	log, _ := m.groupLog(p, "g")
+	log.Post(group.Message{From: "feature/a", Text: "I renamed the type"})
+	poll(t, m, fake)
+	if len(fake.reqs) != 0 {
+		t.Fatalf("a finished task isn't woken by a groupmate's post: %+v", fake.reqs)
+	}
+	m.pollingGroups = false
+	log.Post(group.Message{From: "feature/a", To: "feature/b", Text: "please update your call"})
+	poll(t, m, fake)
+	if len(fake.reqs) != 1 || !strings.Contains(fake.reqs[0].Dir, "shop-b") {
+		t.Fatalf("a post to it wakes a finished task: %+v", fake.reqs)
+	}
+}
+
+func TestGroveNoticesDontCountTowardTheLimit(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	m.cfg.Planner.MaxWakeups = 1
+	fake.turns = asking(4)
+	log, _ := m.groupLog(p, "g")
+	log.Post(group.Message{From: group.Grove, To: "feature/b", Text: "you now conflict with feature/c"})
+	// The fake never reads, so each poll wakes b again.
+	for range 3 {
+		m.pollingGroups = false
+		poll(t, m, fake)
+	}
+	g := m.groups[log.Dir]
+	if len(fake.reqs) != 3 || g.wakeups != 0 || g.paused {
+		t.Fatalf("grove's notices count: %d wakes, %d counted, paused %v", len(fake.reqs), g.wakeups, g.paused)
+	}
+	log.Post(group.Message{From: "feature/a", Text: "hello"})
+	m.pollingGroups = false
+	poll(t, m, fake)
+	if len(fake.reqs) != 4 || g.wakeups != 1 {
+		t.Errorf("a groupmate's post counts: %d wakes, %d counted", len(fake.reqs), g.wakeups)
 	}
 }
 

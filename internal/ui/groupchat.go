@@ -38,6 +38,17 @@ type groupState struct {
 	// messages waiting, for waiting until the chat settles (settled).
 	newest time.Time
 	since  map[string]time.Time
+
+	// Who the unread messages are from, by member.
+	from map[string]unreadFrom
+}
+
+// unreadFrom counts a member's unread messages from grove and from the
+// user, which wake it differently.
+type unreadFrom struct {
+	grove       int // from group.Grove
+	groveDirect int // from group.Grove, addressed to the member alone
+	user        int // from group.User
 }
 
 // settled reports whether member's messages may wake it: the chat has been
@@ -73,6 +84,7 @@ type groupsReadMsg struct {
 type groupRead struct {
 	msgs           []group.Message
 	unread, direct map[string]int
+	from           map[string]unreadFrom
 }
 
 // groupLog is the chat of a plan's group, or false without a store.
@@ -225,17 +237,28 @@ func (m *Model) pollGroups() tea.Cmd {
 		out := map[string]groupRead{}
 		for _, l := range logs {
 			msgs, _ := l.All()
-			out[l.Dir] = groupRead{msgs: msgs, unread: map[string]int{}, direct: map[string]int{}}
+			out[l.Dir] = groupRead{msgs: msgs, unread: map[string]int{}, direct: map[string]int{}, from: map[string]unreadFrom{}}
 		}
 		for _, mb := range members {
 			r := out[mb.log.Dir]
 			unread := group.UnreadIn(r.msgs, mb.log.Cursor(mb.name), mb.name)
 			r.unread[mb.name] = len(unread)
+			var from unreadFrom
 			for _, msg := range unread {
 				if msg.To == mb.name {
 					r.direct[mb.name]++
 				}
+				switch msg.From {
+				case group.Grove:
+					from.grove++
+					if msg.To == mb.name {
+						from.groveDirect++
+					}
+				case group.User:
+					from.user++
+				}
 			}
+			r.from[mb.name] = from
 		}
 		return groupsReadMsg{out}
 	}
@@ -252,7 +275,7 @@ func (m *Model) onGroupsRead(msg groupsReadMsg) tea.Cmd {
 		if len(r.msgs) > len(g.msgs) {
 			g.newest = m.now
 		}
-		g.msgs, g.unread, g.direct = r.msgs, r.unread, r.direct
+		g.msgs, g.unread, g.direct, g.from = r.msgs, r.unread, r.direct, r.from
 	}
 	m.queueGroups()
 	return tea.Batch(m.wakeGroups(), m.orchestrate())
@@ -291,7 +314,22 @@ func (m *Model) wakeGroups() tea.Cmd {
 				if t.Path == "" || s == nil || s.running || len(s.pending) > 0 || waiting[t.Branch] == 0 {
 					continue
 				}
-				if g.wakeups >= m.cfg.Planner.Wakeups() {
+				// Messages from grove alone (conflict notices) don't count
+				// toward the limit.
+				from := g.from[t.Branch]
+				groveOnly := waiting[t.Branch] == from.grove
+				forIt := g.direct[t.Branch] - from.groveDirect
+				if grp.ID == plan.ChatID {
+					groveOnly = waiting[t.Branch] == from.groveDirect
+				} else {
+					forIt += from.user
+				}
+				if taskDone(t) && forIt <= 0 {
+					// A finished or failed task reads the chat when it is next
+					// asked; only messages to it or the user's start a turn.
+					continue
+				}
+				if !groveOnly && g.wakeups >= m.cfg.Planner.Wakeups() {
 					switch {
 					case g.paused:
 					case watched(p):
@@ -312,7 +350,9 @@ func (m *Model) wakeGroups() tea.Cmd {
 				if !g.settled(t.Branch, m.now, m.cfg.Planner.SettleDelay()) {
 					continue
 				}
-				g.wakeups++
+				if !groveOnly {
+					g.wakeups++
+				}
 				delete(g.since, t.Branch)
 				n := waiting[t.Branch]
 				g.unread[t.Branch], g.direct[t.Branch] = 0, 0 // until the next poll sees what it read
@@ -323,6 +363,9 @@ func (m *Model) wakeGroups() tea.Cmd {
 	}
 	return tea.Batch(cmds...)
 }
+
+// taskDone reports whether t is finished or failed.
+func taskDone(t *plan.Task) bool { return t.Status == plan.Finished || t.Status == plan.Failed }
 
 // openGroupChat shows the group chat of the task in the worktree at path,
 // or its plan's chat when the task isn't grouped.
