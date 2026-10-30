@@ -197,6 +197,7 @@ func (m *Model) dropCrews(planID string) tea.Cmd {
 			continue
 		}
 		cmds = append(cmds, m.abandonTurn(s), m.flushUsage(s))
+		m.keepUsage(s)
 		if s.running && s.cancel != nil {
 			s.cancel()
 		}
