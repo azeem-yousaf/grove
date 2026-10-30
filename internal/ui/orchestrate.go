@@ -359,11 +359,8 @@ func (m *Model) orchestrate() tea.Cmd {
 	var cmds []tea.Cmd
 	var rest []orchItem
 	for _, k := range owners {
-		items := byOwner[k]
-		cmd, sent := m.orchestrateOne(items)
-		if !sent {
-			rest = append(rest, items...)
-		}
+		cmd, left := m.orchestrateOne(byOwner[k])
+		rest = append(rest, left...)
 		cmds = append(cmds, cmd)
 	}
 	o.queue = rest
@@ -371,10 +368,11 @@ func (m *Model) orchestrate() tea.Cmd {
 }
 
 // orchestrateOne starts a turn of the planner that owns items, all of one
-// owner, reporting whether it took them.
-func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
+// owner, returning the items still waiting. While that planner is busy,
+// urgent approvals and questions go to a side turn (side.go).
+func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, []orchItem) {
 	if !slices.ContainsFunc(items, func(it orchItem) bool { return it.urgent }) {
-		return nil, false
+		return nil, items
 	}
 	planID, groupID := items[0].plan, m.ownerOf(items[0])
 	var cur *session
@@ -384,7 +382,7 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 		cur = m.crews[crewKey(planID, groupID)]
 	}
 	if cur != nil && cur.running {
-		return nil, false
+		return m.sideTurn(cur, items)
 	}
 	st := m.stateOf(cur)
 	if groupID != "" && cur == nil {
@@ -396,16 +394,16 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	}
 	if st.turns >= m.cfg.Planner.Decisions() {
 		if st.paused {
-			return nil, false
+			return nil, items
 		}
 		st.paused = true
 		return tea.Batch(
 			m.notify(fmt.Sprintf("✦ %s paused after %d decisions in a row; say something to it (P) or an agent to let it go on", who, st.turns), toastInfo),
-			m.alert(fmt.Sprintf("%s paused after %d decisions in a row and waits for you", who, st.turns))), false
+			m.alert(fmt.Sprintf("%s paused after %d decisions in a row and waits for you", who, st.turns))), items
 	}
 	s := m.plannerFor(planID, groupID)
 	if s == nil {
-		return nil, false
+		return nil, items
 	}
 	st = m.stateOf(s)
 	st.turns++
@@ -414,11 +412,11 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 		st.asked = append(st.asked, it.ids...)
 	}
 	s.nextPlan = planIDs(items)[0]
-	st.reports = nil
+	st.reports, st.whileBusy = nil, nil
 	cmd := m.send(s, text)
 	// The chat shows a line about it, not the whole request.
 	s.entries[len(s.entries)-1] = chatEntry{roleNote, summary}
-	return cmd, true
+	return cmd, nil
 }
 
 // groupTitleOf is a group's name, or its ID when it isn't known.
@@ -509,6 +507,12 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 				}
 				what = append(what, fmt.Sprintf("%s in %s", plural(len(it.lines), "message"), name))
 			}
+		}
+	}
+	if busy := m.stateOf(s).whileBusy; len(busy) > 0 {
+		b.WriteString("\nWhile you were busy, a side turn (a fork of this conversation) decided for you:\n")
+		for _, r := range busy {
+			b.WriteString("- " + r + "\n")
 		}
 	}
 	if reports := m.stateOf(s).reports; len(reports) > 0 {
@@ -631,7 +635,12 @@ func (m *Model) applyDecisions(s *session, reply string) tea.Cmd {
 		return nil
 	}
 	d, refused := m.scopeDecisions(s, d)
+	var told []string
+	if s.side {
+		told = m.sideAccount(d) // before decide takes the approvals away
+	}
 	cmd, outs := m.decide(s, d)
+	m.tellOwner(s, told, outs)
 	for _, o := range append(refused, outs...) {
 		switch o.result {
 		case control.Applied:

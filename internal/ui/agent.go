@@ -89,6 +89,11 @@ type session struct {
 	// so the next turn's own share can be worked out.
 	sessionTotal usage.Tokens
 
+	// A planner's side turn (side.go) answers urgent items in a fork of its
+	// owner's conversation while the owner is busy.
+	side   bool
+	sideOf *session // its owner, once it has run
+
 	rendered chatCache // entries as the chat pane last drew them
 }
 
@@ -285,6 +290,9 @@ func (m *Model) allSessions() []*session {
 		out = append(out, m.planner)
 	}
 	for _, s := range m.crews {
+		out = append(out, s)
+	}
+	for _, s := range m.sides {
 		out = append(out, s)
 	}
 	return out
@@ -652,7 +660,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	}
 	req.Context, req.Message = s.takeNotes(req.Context, req.Message)
 	// The planner changes nothing, so there's nothing to undo.
-	path, planner, crew, needCheckpoint := s.path, s.planner, s.crewKey(), s.checkpoint == "" && !s.planner
+	path, planner, crew, needCheckpoint := s.path, s.planner, s.slot(), s.checkpoint == "" && !s.planner
 	run := m.runAgent
 	go func() {
 		defer close(ch)
@@ -702,7 +710,8 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Model:    s.model,
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,
-		Slot:     s.crewKey(),
+		Slot:     s.slot(),
+		Fork:     s.side,
 		Commands: s.planner && m.orchestrating(),
 		Tools:    append(m.groupTools(s), m.controlTools(s)...),
 		ReadDirs: m.groupmateDirs(s),
@@ -743,6 +752,9 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 		s = m.planner
 		if msg.crew != "" {
 			s = m.crews[msg.crew]
+		}
+		if side := m.sides[msg.crew]; side != nil {
+			s = side
 		}
 	}
 	if s == nil {
@@ -812,6 +824,9 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	recordErr := m.endTurn(s, ev)
 	reply := s.lastReply.String()
 	s.history = append(s.history, agent.Turn{User: s.lastUser, Agent: reply})
+	if s.side {
+		return m.onSideDone(s, ev, reply, recordErr)
+	}
 
 	var needsYou []pendingAction // only the user may answer these
 	for _, d := range ev.Denied {

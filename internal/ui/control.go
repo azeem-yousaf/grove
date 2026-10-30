@@ -46,10 +46,11 @@ func (m *Model) controlDir() (string, bool) {
 }
 
 // controlTools gives the planner its control tools while it watches a
-// running plan.
+// running plan. A side turn answers in its block only, which is scoped like
+// its owner's; the tools would act as the lead.
 func (m *Model) controlTools(s *session) []agent.ToolServer {
 	dir, ok := m.controlDir()
-	if !s.planner || !ok || m.groveBin == "" || !m.orchestrating() {
+	if !s.planner || s.side || !ok || m.groveBin == "" || !m.orchestrating() {
 		return nil
 	}
 	return []agent.ToolServer{{

@@ -57,6 +57,9 @@ type savedSession struct {
 	// Ledger writes that hadn't succeeded yet.
 	Unrecorded []usage.Turn       `json:"unrecorded,omitempty"`
 	Unassigned []usage.Assignment `json:"unassigned,omitempty"`
+
+	// A planner's side turn (side.go), saved for its usage only.
+	Side bool `json:"side,omitempty"`
 }
 
 // runningTurn is the turn a session was saved in the middle of, recorded as
@@ -97,11 +100,16 @@ func sessionFile(path string) string { return "sessions/" + git.PathKey(path) + 
 const (
 	plannerFile = "planner/session.json"
 	crewDir     = "planner/groups"
+	sideDir     = "planner/sides"
 )
 
 // file is where s is saved.
 func (s *session) file() string {
 	switch {
+	case s.side && s.crewGroup == "":
+		return sideDir + "/lead.json"
+	case s.side:
+		return sideDir + "/" + git.PathKey(s.crewPlan+"-"+s.crewGroup) + ".json"
 	case s.crewGroup != "":
 		return crewDir + "/" + git.PathKey(s.crewPlan+"-"+s.crewGroup) + ".json"
 	case s.planner:
@@ -115,7 +123,7 @@ func (s *session) saved() savedSession {
 		Version: 2, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
 		History: s.history, Checkpoint: s.checkpoint, TurnTree: s.turnTree, Allow: s.allow, Notes: s.notes, Cost: s.cost,
 		Failed: s.failed, Interrupted: s.running, Planner: s.planner, Approvals: s.seq, Answered: s.answered,
-		CrewPlan: s.crewPlan, CrewGroup: s.crewGroup,
+		CrewPlan: s.crewPlan, CrewGroup: s.crewGroup, Side: s.side,
 		UID: s.uid, Created: s.created, Turns: s.turns, Drafting: s.drafting,
 		Unrecorded: s.unrecorded, Unassigned: s.unassigned,
 	}
@@ -129,6 +137,10 @@ func (s *session) saved() savedSession {
 			t := s.live
 			out.Running.Tokens = &t
 		}
+	}
+	if s.side {
+		out.History = nil // only its usage is worth keeping
+		return out
 	}
 	for _, e := range s.entries {
 		out.Entries = append(out.Entries, savedEntry{roleNames[e.role], e.text})
@@ -152,7 +164,7 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 		kind: v.Kind, path: v.Path, name: v.Name, model: v.Model, id: v.ID,
 		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, cost: v.Cost,
 		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner, seq: v.Approvals, answered: v.Answered,
-		crewPlan: v.CrewPlan, crewGroup: v.CrewGroup,
+		crewPlan: v.CrewPlan, crewGroup: v.CrewGroup, side: v.Side,
 		uid: v.UID, created: v.Created, turns: v.Turns, drafting: v.Drafting,
 		unrecorded: v.Unrecorded, unassigned: v.Unassigned,
 	}
@@ -231,6 +243,9 @@ func (m *Model) loadSessions() tea.Cmd {
 		if crews, cerr := st.List(crewDir); cerr == nil {
 			names = append(names, crews...)
 		}
+		if sides, serr := st.List(sideDir); serr == nil {
+			names = append(names, sides...)
+		}
 		var out []*session
 		var errs []error
 		if err != nil {
@@ -261,6 +276,11 @@ func (m *Model) onSessionsLoaded(msg sessionsLoadedMsg) tea.Cmd {
 		cut := m.recordCutShort(s)
 		// One the user started while loading wins.
 		switch {
+		case s.side:
+			if m.sides[s.slot()] != nil {
+				continue
+			}
+			m.sides[s.slot()] = s
 		case s.crewGroup != "":
 			if m.crews[s.crewKey()] != nil {
 				continue

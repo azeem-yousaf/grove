@@ -28,6 +28,8 @@ type plannerState struct {
 	paused  bool     // stopped at the limit until the user says something
 	asked   []string // approvals in its current turn, by ID
 	reports []string // its decisions that didn't apply, for its next request
+	// What its side turns decided while it was busy, for its next request.
+	whileBusy []string
 }
 
 // crewKey identifies a group's planner; "" for the lead.
@@ -40,9 +42,10 @@ func crewKey(planID, groupID string) string {
 
 func (s *session) crewKey() string { return crewKey(s.crewPlan, s.crewGroup) }
 
-// stateOf is s's state as an orchestrator.
+// stateOf is s's state as an orchestrator. A side turn has its own, for
+// what it was asked; its turns count towards its owner's.
 func (m *Model) stateOf(s *session) *plannerState {
-	if s != nil && s.crewGroup != "" {
+	if s != nil && (s.crewGroup != "" || s.side) {
 		return &s.crew
 	}
 	return &m.orch.plannerState
@@ -167,11 +170,21 @@ func (m *Model) inCrew(s *session, branch string) bool {
 // scopeDecisions keeps a group planner's decisions to its own group: other
 // tasks are out of reach, its posts go to its group chat unless it names
 // the plan chat, and merging and closing are the lead's.
+// A side turn can't merge or close either: that waits for its owner.
 func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
-	if s == nil || s.crewGroup == "" {
-		return d, nil
-	}
 	var outs []outcome
+	if s != nil && s.side {
+		for _, mg := range d.Merge {
+			outs = append(outs, outcome{what: "merge " + mg.Plan, result: control.Failed, detail: "a side turn only answers approvals and questions; merge in your main turn"})
+		}
+		for _, c := range d.Close {
+			outs = append(outs, outcome{what: "close " + c.Plan, result: control.Failed, detail: "a side turn only answers approvals and questions; close in your main turn"})
+		}
+		d.Merge, d.Close = nil, nil
+	}
+	if s == nil || s.crewGroup == "" {
+		return d, outs
+	}
 	out := func(what string) {
 		outs = append(outs, outcome{what: what, result: control.NotFound, detail: "not a task of your group"})
 	}
@@ -233,8 +246,11 @@ func (m *Model) ownerPlanner(path string) *session {
 	return m.planner
 }
 
-// noteTo adds a line to planner s's chat.
+// noteTo adds a line to planner s's chat: its owner's, for a side turn.
 func noteTo(s *session, role chatRole, text string) {
+	if s != nil && s.sideOf != nil {
+		s = s.sideOf
+	}
 	if s != nil {
 		s.entries = append(s.entries, chatEntry{role, text})
 	}
