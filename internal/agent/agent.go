@@ -253,25 +253,27 @@ func NewRunner() *Runner {
 // a new session, else the last total seen here or passed in. nil if
 // unknown, which includes a session whose last turn here ended without a
 // total: Claude Code still added that turn to the session, so any earlier
-// total, the request's included, would count it again.
-func (r *Runner) sessionBase(req Request) *usage.Tokens {
+// total, the request's included, would count it again. saved reports a
+// base from Request.SessionTotal, which an earlier grove saved: the session
+// may have been used outside grove since.
+func (r *Runner) sessionBase(req Request) (base *usage.Tokens, saved bool) {
 	if req.Session == "" {
-		return &usage.Tokens{}
+		return &usage.Tokens{}, false
 	}
 	r.mu.Lock()
 	t, ok := r.totals[req.Session]
 	r.mu.Unlock()
 	switch {
 	case ok && t == nil:
-		return nil
+		return nil, false
 	case ok:
-		base := *t
-		return &base
+		b := *t
+		return &b, false
 	case req.SessionTotal.IsZero():
-		return nil
+		return nil, false
 	}
-	base := req.SessionTotal
-	return &base
+	b := req.SessionTotal
+	return &b, true
 }
 
 // noteTotal records the session's total after a turn, or that it is no
@@ -313,7 +315,8 @@ func (r *Runner) Run(ctx context.Context, req Request, emit func(Event)) {
 			emit(Event{Kind: EvDone, Err: err})
 			return
 		}
-		ev := p.turn(ctx, req, r.sessionBase(req), emit)
+		base, saved := r.sessionBase(req)
+		ev := p.turn(ctx, req, base, saved, emit)
 		r.release(procKey(req), p)
 		r.noteTotal(req, ev)
 		emit(ev)

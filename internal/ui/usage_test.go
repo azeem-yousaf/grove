@@ -167,14 +167,21 @@ func TestUsageSessionTotalComesBack(t *testing.T) {
 		t.Errorf("session total kept after a turn without one: %+v", r.sessionTotal)
 	}
 
-	// A turn that isn't exact makes it stale too.
+	// A Partial turn (no base that fits) still brings the provider's own
+	// session total, which is good for the next turn.
 	partial := done(5, 5, usage.Partial)
 	partial.SessionTotal = usage.Tokens{Input: 900}
 	fake.turns = [][]agent.Event{{partial}}
 	r.sessionTotal = first.SessionTotal
 	pump(t, m, m.send(r, "three"))
+	if r.sessionTotal != partial.SessionTotal {
+		t.Errorf("session total after a partial turn = %+v, want %+v", r.sessionTotal, partial.SessionTotal)
+	}
+	// One cut short without a total makes it stale.
+	fake.turns = [][]agent.Event{{done(5, 5, usage.Partial)}}
+	pump(t, m, m.send(r, "four"))
 	if !r.sessionTotal.IsZero() {
-		t.Errorf("session total kept after a partial turn: %+v", r.sessionTotal)
+		t.Errorf("session total kept after a turn without one: %+v", r.sessionTotal)
 	}
 
 	// A new Claude session starts from nothing.

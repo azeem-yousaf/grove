@@ -320,8 +320,8 @@ func (p *claudeProc) end() {
 // returning the final EvDone for the caller to emit. Cancelling ctx
 // interrupts the turn, which leaves the process ready for the next one.
 // base is the session's usage before the turn (see claudeParser), nil if
-// unknown.
-func (p *claudeProc) turn(ctx context.Context, req Request, base *usage.Tokens, emit func(Event)) Event {
+// unknown; saved marks one an earlier grove saved.
+func (p *claudeProc) turn(ctx context.Context, req Request, base *usage.Tokens, saved bool, emit func(Event)) Event {
 	t := &claudeTurn{lines: make(chan []byte), done: make(chan struct{})}
 	p.curMu.Lock()
 	p.cur = t
@@ -333,7 +333,7 @@ func (p *claudeProc) turn(ctx context.Context, req Request, base *usage.Tokens, 
 		close(t.done)
 	}()
 
-	parse := &claudeParser{session: p.session}
+	parse := &claudeParser{session: p.session, savedBase: saved}
 	if base != nil {
 		parse.base = *base
 	} else {
@@ -462,9 +462,10 @@ func plainWord(w string) bool {
 //     total_cost_usd add up over the whole session, and carry on after a
 //     --resume restart rather than starting at zero. So the turn's figure is
 //     the session's modelUsage total minus the total before the turn (base,
-//     from the Runner or Request.SessionTotal; zero for a new session).
-//     Without a base it falls back to result.usage, marked Partial since it
-//     may leave out subagents. Cost is shown as Claude Code reports it.
+//     from the Runner; zero for a new session). Without a base, or with
+//     only Request.SessionTotal (saved by an earlier grove; the session may
+//     have been used outside grove since), it falls back to result.usage,
+//     marked Partial since it may leave out subagents. Cost is shown as Claude Code reports it.
 //   - output_tokens already includes thinking tokens.
 //   - message_start carries a message's input side (input_tokens leaves out
 //     the cache) and message_delta its usage so far; message_delta has no
@@ -480,8 +481,9 @@ type claudeParser struct {
 	result  *claudeResult
 	sawText bool
 
-	base   usage.Tokens // the session's total before the turn
-	noBase bool         // base is unknown
+	base      usage.Tokens // the session's total before the turn
+	noBase    bool         // base is unknown
+	savedBase bool         // base came from an earlier grove (Request.SessionTotal)
 
 	msgs        map[string]*anthropicUsage // the turn's messages so far, by id
 	cur         string                     // the message in progress
@@ -625,11 +627,14 @@ func (p *claudeParser) line(b []byte) []Event {
 			main, mainOK = u.tokens()
 		}
 		switch {
-		case p.totalOK && !p.noBase && covers(p.total, p.base, main, mainOK):
+		case p.totalOK && !p.noBase && !p.savedBase && covers(p.total, p.base, main, mainOK):
 			p.final, p.finalStatus = minus(p.total, p.base), usage.Exact
 		case mainOK:
 			// Without the session's earlier total, only the main
 			// conversation's figure is known: subagents may be missing.
+			// A total saved by an earlier grove may be from before the
+			// session was used outside grove, and nothing in the result
+			// shows it wasn't, so the difference could include that use.
 			p.final, p.finalStatus = main, usage.Partial
 		}
 		if p.finalStatus != usage.Unknown {

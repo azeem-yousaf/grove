@@ -275,13 +275,10 @@ func (m *Model) endTurn(s *session, ev agent.Event) tea.Cmd {
 		attr = m.attrFor(s, "")
 	}
 	attr.Kind = s.turnAttr.Kind
-	// A turn without an exact session total leaves the old one stale:
-	// passing it back would count this turn twice.
-	if ev.SessionTotal.IsZero() || ev.TokenStatus != usage.Exact {
-		s.sessionTotal = usage.Tokens{}
-	} else {
-		s.sessionTotal = ev.SessionTotal
-	}
+	// The provider's session total is good whenever it came, even for a
+	// Partial turn (one without a base that fits); a turn without one
+	// leaves the old one stale: passing it back would count this turn twice.
+	s.sessionTotal = ev.SessionTotal
 	m.record(s, usage.Turn{
 		ID: id, Agent: s.uid, Time: time.Now(), Tokens: ev.Tokens, Status: ev.TokenStatus, Failed: ev.Err != nil,
 		Plan: attr.Plan, PlanTitle: attr.PlanTitle, Task: attr.Task, Group: attr.Group, Kind: attr.Kind,

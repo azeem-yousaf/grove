@@ -321,6 +321,9 @@ func TestClaudeUsageBase(t *testing.T) {
 		"unknown": {noBase: true},
 		"above":   {base: usage.Tokens{Input: 200, Output: 9}},
 		"too big": {base: usage.Tokens{Input: 102, Output: 9}}, // leaves less than result.usage
+		// It fits, but an earlier grove saved it: the session may have
+		// been used outside grove since.
+		"saved": {base: usage.Tokens{Input: 95, Output: 9}, savedBase: true},
 	} {
 		if ev := run(p); ev.Tokens != (usage.Tokens{Input: 5, Output: 2}) || ev.TokenStatus != usage.Partial || ev.SessionTotal != (usage.Tokens{Input: 105, Output: 12}) {
 			t.Errorf("%s base = %+v", name, ev)
@@ -597,10 +600,20 @@ func TestClaudeKeepsItsProcess(t *testing.T) {
 	r2.Stop(dir)
 	r3 := NewRunner()
 	defer r3.Stop(dir)
+	// A total saved by the earlier grove may be from before the session
+	// was used outside grove, so the turn after it is only the main
+	// conversation's figure, but its own total is good, and from then on
+	// turns are exact.
 	req.Message, req.SessionTotal = "with the total", evs[len(evs)-1].SessionTotal
 	evs = turn(t, r3, ctx, req)
-	if done := evs[len(evs)-1]; done.Tokens != turnTokens(1) || done.TokenStatus != usage.Exact {
-		t.Errorf("resumed turn with its total = %+v %v", done.Tokens, done.TokenStatus)
+	done = evs[len(evs)-1]
+	if done.Tokens != mainTokens(1) || done.TokenStatus != usage.Partial || done.SessionTotal.IsZero() {
+		t.Errorf("resumed turn with a saved total = %+v", done)
+	}
+	req.Message, req.SessionTotal = "and on", done.SessionTotal
+	evs = turn(t, r3, ctx, req)
+	if done := evs[len(evs)-1]; done.Tokens != turnTokens(2) || done.TokenStatus != usage.Exact {
+		t.Errorf("turn after that = %+v %v", done.Tokens, done.TokenStatus)
 	}
 }
 
