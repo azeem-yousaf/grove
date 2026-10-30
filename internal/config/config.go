@@ -127,6 +127,63 @@ type Planner struct {
 	// PullRequests has grove push a merged plan's branch and open a pull
 	// request into the plan's base once its tests pass. Unset means on.
 	PullRequests *bool `toml:"pull_requests"`
+	// Model, CrewModel and TaskModel are the models for the lead planner,
+	// the group planners of a plan it watches, and the task agents a plan
+	// starts. A name only applies to the agent it belongs to (see
+	// ModelAgent); empty, or a name for the other agent, uses [ai].
+	Model     string `toml:"model"`
+	CrewModel string `toml:"crew_model"`
+	TaskModel string `toml:"task_model"`
+}
+
+// Roles a plan's agents have, for Planner.ModelFor.
+const (
+	RoleLead = "lead"
+	RoleCrew = "crew"
+	RoleTask = "task"
+)
+
+// ModelFor is the model for role (RoleLead, RoleCrew or RoleTask) when it
+// runs agent ("claude" or "codex"), falling back to ai's.
+func (p Planner) ModelFor(role, agent string, ai AI) string {
+	v := map[string]string{RoleLead: p.Model, RoleCrew: p.CrewModel, RoleTask: p.TaskModel}[role]
+	if name, ok := modelFor(v, agent); ok {
+		return name
+	}
+	return ai.ModelFor(agent)
+}
+
+// modelFor is the model name in v for agent, and whether v names one for
+// it: an explicit "claude:" or "codex:" prefix, else ModelAgent.
+func modelFor(v, agent string) (string, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", false
+	}
+	if a, name, ok := strings.Cut(v, ":"); ok && (a == "claude" || a == "codex") {
+		name = strings.TrimSpace(name)
+		return name, a == agent && name != ""
+	}
+	a := ModelAgent(v)
+	return v, a == "" || a == agent
+}
+
+// ModelAgent is the agent a model name belongs to, "claude" or "codex", or
+// "" when the name doesn't tell.
+func ModelAgent(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "opus", "sonnet", "haiku", "fable", "opusplan", "default":
+		return "claude"
+	}
+	switch {
+	case strings.HasPrefix(n, "claude"), strings.HasPrefix(n, "opus["), strings.HasPrefix(n, "sonnet["):
+		return "claude"
+	case strings.HasPrefix(n, "gpt"), strings.HasPrefix(n, "codex"),
+		strings.HasPrefix(n, "o1"), strings.HasPrefix(n, "o3"), strings.HasPrefix(n, "o4"):
+		return "codex"
+	}
+	return ""
 }
 
 // OpenPRs is PullRequests with the default applied.
@@ -449,6 +506,15 @@ test_minutes = 20
 # planner is in charge, it follows the pull request's reviews, and the plan
 # closes once the pull request is merged.
 pull_requests = true
+# Models for the planner, the planner of each group of a plan it watches,
+# and the task agents a plan starts. A Claude name or alias ("opus",
+# "sonnet", "haiku", claude-...) only applies when the agent is Claude, a
+# Codex one (gpt-..., o3, codex-...) only for Codex; "claude:" or "codex:"
+# in front makes that explicit. Empty = the model set for that agent under
+# ai above. /model in one of their chats changes only that chat.
+# model = "opus"
+# crew_model = "sonnet"
+# task_model = ""
 
 # What agents may do with git on their own. Routine git on their own
 # feature branch (commit, branch, merge, rebase of unpushed work, push of

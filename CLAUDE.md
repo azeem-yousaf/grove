@@ -99,7 +99,7 @@ Opt-in tests, skipped unless their environment variable is set:
 ### internal/open and internal/config
 
 - `open` picks per-OS implementations through `open_windows.go` / `open_darwin.go` / `open_other.go`: `ShellExecute` on Windows (falling back to the "Open with" dialog when no program is associated), `open` on macOS, `xdg-open` elsewhere. On Windows, `.ts`/`.mts`/`.cts` go to the editor instead of the system default, because Windows often maps `.ts` to video.
-- `config` reads optional TOML from `os.UserConfigDir()/grove/config.toml` (`grove --init-config` writes a starter). `Git.ProtectedWith(base)` joins `[git] protected` with main, master and the base branch.
+- `config` reads optional TOML from `os.UserConfigDir()/grove/config.toml` (`grove --init-config` writes a starter). `Git.ProtectedWith(base)` joins `[git] protected` with main, master and the base branch. `Planner.ModelFor(role, agent, ai)` gives the lead planner, group planners and task agents (`RoleLead`/`RoleCrew`/`RoleTask`) `[planner] model`/`crew_model`/`task_model`: a name `ModelAgent` ties to the other agent, or a `claude:`/`codex:` prefix for it, is skipped, and empty falls back to `[ai]`. The UI applies them in `newPlanner`, `plannerFor` and `newSession` (when `taskFor` finds a task); `/model` in a planner's chat changes only that session.
 
 ## Tests
 

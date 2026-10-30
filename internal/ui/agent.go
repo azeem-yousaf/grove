@@ -331,8 +331,14 @@ func (m *Model) openChat() tea.Cmd {
 	})
 }
 
+// newSession makes the agent for the worktree at path, on the model
+// [planner] task_model names when the worktree is a plan task's.
 func (m *Model) newSession(path, name string, k agent.Kind) *session {
-	s := &session{kind: k, path: path, name: name, model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true, uid: newUID(), created: time.Now()}
+	model := m.cfg.AI.ModelFor(string(k))
+	if _, t := m.taskFor(path); t != nil {
+		model = m.roleModel(config.RoleTask, k)
+	}
+	s := &session{kind: k, path: path, name: name, model: model, touched: map[string]bool{}, seen: true, uid: newUID(), created: time.Now()}
 	m.sessions[path] = s
 	return s
 }
@@ -550,7 +556,8 @@ func (m *Model) onModelMenuKey(s *session, key string) tea.Cmd {
 }
 
 // setModel switches s to model from its next message, and remembers it for
-// new chats with the same agent, the way /model does in Claude Code.
+// new chats with the same agent, the way /model does in Claude Code. A
+// planner's has its own setting under [planner], so only that chat changes.
 func (m *Model) setModel(s *session, model string) tea.Cmd {
 	s.menu = nil
 	s.model = model
@@ -563,6 +570,9 @@ func (m *Model) setModel(s *session, model string) tea.Cmd {
 	}
 	s.entries = append(s.entries, chatEntry{roleNote, note + "."})
 	m.chatFollow = true
+	if s.planner {
+		return m.warm(s)
+	}
 	switch s.kind {
 	case agent.Claude:
 		m.cfg.AI.ClaudeModel = model

@@ -64,7 +64,13 @@ func (m *Model) plannerDir() string {
 }
 
 func (m *Model) newPlanner(dir string, k agent.Kind) *session {
-	return &session{kind: k, path: dir, name: "planner", model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true, planner: true, uid: newUID(), created: time.Now()}
+	return &session{kind: k, path: dir, name: "planner", model: m.roleModel(config.RoleLead, k), touched: map[string]bool{}, seen: true, planner: true, uid: newUID(), created: time.Now()}
+}
+
+// roleModel is the model for a plan's agent with role (config.RoleLead,
+// RoleCrew or RoleTask) when it runs k.
+func (m *Model) roleModel(role string, k agent.Kind) string {
+	return m.cfg.Planner.ModelFor(role, string(k), m.cfg.AI)
 }
 
 // openPlanner shows the planner, starting one if needed. Before the next
