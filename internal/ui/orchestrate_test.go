@@ -145,8 +145,8 @@ func TestPlannerHearsAboutIdleTasks(t *testing.T) {
 	p.Orchestrated = true
 	m.now = time.Now()
 	s := m.sessionFor(m.taskPath(p, "feature/a"))
-	// A suggested command waits, so the task stays working.
-	s.pending = []pendingAction{{kind: pendingCommand, text: "make deploy"}}
+	// A suggested command only the user may run waits, so the task stays working.
+	s.pending = []pendingAction{{kind: pendingCommand, text: "make deploy", policy: approvalPolicy{userOnly: true}}}
 	s.lastReply.WriteString("Run make deploy for me.")
 	s.running = true
 	pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone}))

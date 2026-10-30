@@ -251,15 +251,19 @@ func (m *Model) queueTurn(s *session, again bool) tea.Cmd {
 		return nil
 	}
 	var cmds, ids []string
-	for _, a := range s.pending {
-		if m.awaitsPlanner(s, a) {
+	for i := range s.pending {
+		a := &s.pending[i]
+		if a.id == "" {
+			a.id = s.nextApprovalID() // a command card saved by an older grove
+		}
+		if m.awaitsPlanner(s, *a) {
 			cmds, ids = append(cmds, a.text), append(ids, a.id)
 		}
 	}
 	reply := strings.TrimSpace(s.lastReply.String())
 	switch {
 	case len(cmds) > 0:
-		userToo := slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval && a.policy.userOnly })
+		userToo := slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.policy.userOnly })
 		m.orch.queue = append(m.orch.queue, orchItem{kind: orchApproval, plan: p.ID, branch: t.Branch, lines: cmds, ids: ids, urgent: true, now: userToo})
 	case slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval }):
 		// Only the user can answer what it waits on.
@@ -594,7 +598,7 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 				_, t, ts := m.watchedTask(it.branch)
 				fmt.Fprintf(&b, "\n%s (task %q) wants to run commands it isn't allowed to:\n", it.branch, t.Title)
 				for i, c := range it.lines {
-					fmt.Fprintf(&b, "- id %s: `%s`%s\n", it.ids[i], c, m.staleSuffix(ts, it.ids[i]))
+					fmt.Fprintf(&b, "- id %s: `%s`%s\n", it.ids[i], c, m.staleSuffix(ts, it.ids[i])+cardSuffix(ts, it.ids[i]))
 				}
 				what = append(what, fmt.Sprintf("%s wants to run %s", it.branch, plural(len(it.lines), "command")))
 			case orchQuestion:
@@ -712,6 +716,7 @@ func (m *Model) orchRules(s *session) string {
 		"If one is marked as the worktree changed since it was asked, check the worktree before approving it: it may no longer do what the agent meant. " +
 		"Deny anything destructive and anything that reaches outside the plan's worktrees, saying what to do instead. " +
 		"Commands grove's policy keeps for the user (deleting branches or worktrees, force pushes, discarding work, protected branches) aren't listed and can't be approved by you. " +
+		"Some are commands an agent asked grove to run for it (marked so): approving one runs it in the agent's worktree and gives the agent the output; denying dismisses it. " +
 		"grove reports every decision that doesn't apply. " +
 		"Answer every question and every approval you are given; anything you leave out is asked again, and an approval you keep leaving is denied. " +
 		"When an agent is struggling (errors, failing builds or tests, missing tools or dependencies, going round in circles), take it on: look at its worktree, " +
@@ -847,6 +852,16 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 			name = "`" + a.Command + "`"
 		}
 		o := outcome{order: a.order, what: fmt.Sprintf("%s %s for %s", verb, name, a.Branch), result: control.Applied}
+		if cs, ci := m.findCard(a.Branch, a.ID, a.Command); cs != nil {
+			// A command the agent asked grove to run (cards.go).
+			cmd, o2, resume := m.decideCard(cs, ci, approve, a.Reason, o)
+			cmds, o = append(cmds, cmd), o2
+			if resume {
+				answered = append(answered, applied{len(outs), cs, cs.running})
+			}
+			outs = append(outs, o)
+			return
+		}
 		s, i, rec := m.findApproval(a.Branch, a.ID, a.Command)
 		switch {
 		case s == nil:

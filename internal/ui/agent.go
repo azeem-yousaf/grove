@@ -910,8 +910,30 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 		}
 		s.entries = append(s.entries, chatEntry{roleNote, fmt.Sprintf("Blocked %s %s: %s", d.Tool, what, why)})
 	}
-	// grove runs the routine git lines itself; the rest wait for the user.
+	// grove runs the routine git lines itself; the rest wait for the user,
+	// or on a watched plan for the planner (cards.go).
+	before := len(s.pending)
 	gitCmd := m.suggestedLines(s, suggestedCommands(reply))
+	for i := before; i < len(s.pending); i++ {
+		a := &s.pending[i]
+		if a.kind != pendingCommand {
+			continue
+		}
+		if a.id == "" {
+			a.id = s.nextApprovalID()
+		}
+		if !m.watchedBy(s.path) {
+			continue
+		}
+		// The planner may run it for the agent, unless grove's policy keeps
+		// the whole line for the user.
+		if pol := m.classify(s, "Bash", a.text); pol.userOnly && !a.policy.userOnly {
+			a.policy = pol
+		}
+		if a.policy.userOnly {
+			needsYou = append(needsYou, *a)
+		}
+	}
 
 	viewing := m.focus == focusChat && m.chatSession() == s
 	s.seen = viewing
@@ -1327,8 +1349,10 @@ func (m *Model) chatBottom(s *session, width int) []string {
 	if len(s.pending) > 0 {
 		a := s.pending[0]
 		head, keys := st.warn.Bold(true).Render(" "+s.kind.Label()+" wants to run"), [][2]string{{"enter", "allow"}, {"esc", "deny"}}
+		if a.kind == pendingCommand {
+			head, keys = st.accent.Bold(true).Render(" Suggested command"), [][2]string{{"enter", "run"}, {"e", "edit"}, {"esc", "skip"}}
+		}
 		switch {
-		case a.kind != pendingApproval:
 		case a.policy.userOnly:
 			why := "needs you"
 			if a.policy.reason != "" {
@@ -1339,9 +1363,6 @@ func (m *Model) chatBottom(s *session, width int) []string {
 			head += st.faint.Render("  · the planner will decide unless you do")
 		case a.left:
 			head += st.faint.Render("  · the planner left it for you")
-		}
-		if a.kind == pendingCommand {
-			head, keys = st.accent.Bold(true).Render(" Suggested command"), [][2]string{{"enter", "run"}, {"e", "edit"}, {"esc", "skip"}}
 		}
 		more := ""
 		if n := len(s.pending) - 1; n > 0 {

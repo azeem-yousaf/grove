@@ -89,9 +89,14 @@ func (m *Model) controlState() control.State {
 				ct.Busy = s.running
 				ct.LastReply = tail(lastReply(s), 1500)
 				for _, a := range s.pending {
-					if a.kind == pendingApproval {
+					switch a.kind {
+					case pendingApproval:
 						ct.Approvals = append(ct.Approvals, control.Approval{ID: a.id, Tool: a.tool, Command: a.text, Reason: a.policy.reason, Planner: !a.policy.userOnly,
 							Stale: m.staleApproval(s, a)})
+					case pendingCommand:
+						if a.id != "" {
+							ct.Approvals = append(ct.Approvals, control.Approval{ID: a.id, Tool: "Bash", Command: a.text, Reason: a.policy.reason, Planner: !a.policy.userOnly, Run: true})
+						}
 					}
 				}
 			}

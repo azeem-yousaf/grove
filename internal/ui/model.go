@@ -590,6 +590,9 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case autoGitMsg:
 		return m.onAutoGit(msg)
 
+	case cardRanMsg:
+		return m.onCardRan(msg)
+
 	case refsCheckedMsg:
 		return m.onRefsChecked(msg)
 
