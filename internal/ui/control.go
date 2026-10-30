@@ -52,10 +52,15 @@ func (m *Model) controlTools(s *session) []agent.ToolServer {
 	if !s.planner || !ok || m.groveBin == "" || !m.orchestrating() {
 		return nil
 	}
+	args := []string{"mcp-plan", "--dir", dir}
+	if s.crewGroup != "" {
+		// A group's planner may act only on its group.
+		args = append(args, "--plan", s.crewPlan, "--group", s.crewGroup)
+	}
 	return []agent.ToolServer{{
 		Name:    "grove",
 		Command: m.groveBin,
-		Args:    []string{"mcp-plan", "--dir", dir},
+		Args:    args,
 		Allow:   control.Tools,
 	}}
 }
@@ -67,7 +72,7 @@ func (m *Model) controlState() control.State {
 		if !orchestrated(p) {
 			continue
 		}
-		cp := control.Plan{ID: p.ID, Title: p.Title, Status: string(p.Status)}
+		cp := control.Plan{ID: p.ID, Title: p.Title, Status: string(p.Status), Test: m.testCommand(p)}
 		if mg := p.Merge; mg != nil {
 			cp.Merge = "branch " + mg.Branch + " in " + mg.Path
 			switch {
@@ -85,6 +90,9 @@ func (m *Model) controlState() control.State {
 		}
 		for _, t := range p.Tasks {
 			ct := control.Task{Branch: t.Branch, Title: t.Title, Group: t.Group, Status: string(t.Status), Error: t.Error, Path: t.Path}
+			if c := m.checkIn(t.Path); c != nil {
+				ct.Testing = c.command
+			}
 			if s := m.sessionFor(t.Path); t.Path != "" && s != nil {
 				ct.Busy = s.running
 				ct.LastReply = tail(lastReply(s), 1500)
@@ -169,7 +177,9 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 	if m.orch.orders == nil {
 		m.orch.orders = map[string]bool{}
 	}
-	var d decisions
+	// Each planner's orders are carried out as its own, within its reach.
+	var callers []control.Caller
+	byCaller := map[control.Caller]*decisions{}
 	var results []control.Result
 	for _, o := range msg.orders {
 		if o.ID != "" && m.orch.orders[o.ID] {
@@ -178,6 +188,15 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 		}
 		if o.ID != "" {
 			m.orch.orders[o.ID] = true
+		}
+		if o.By.Group == "" {
+			o.By = control.Caller{}
+		}
+		d := byCaller[o.By]
+		if d == nil {
+			d = &decisions{}
+			byCaller[o.By] = d
+			callers = append(callers, o.By)
 		}
 		switch o.Action {
 		case control.Message:
@@ -196,16 +215,32 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 			d.Merge = append(d.Merge, planDecision{o.Plan, "", o.ID})
 		case control.Close:
 			d.Close = append(d.Close, planDecision{o.Plan, o.Note, o.ID})
+		case control.Test:
+			d.Test = append(d.Test, testDecision{o.Task, o.Text, o.ID})
 		default:
 			results = append(results, control.Result{Order: o.ID, Outcome: control.Failed, Detail: "grove doesn't know the action " + o.Action})
 		}
 	}
-	cmd, outs := m.decide(nil, d)
-	for _, o := range outs {
-		if o.order != "" {
-			results = append(results, control.Result{Order: o.order, Outcome: o.result, Detail: o.detail})
+	var cmds []tea.Cmd
+	for _, c := range callers {
+		var by *session // the lead
+		if c.Group != "" {
+			by = m.crews[crewKey(c.Plan, c.Group)]
+			if by == nil {
+				// Gone since; it still acts only on its group.
+				by = &session{planner: true, crewPlan: c.Plan, crewGroup: c.Group}
+			}
+		}
+		d, refused := m.scopeDecisions(by, *byCaller[c])
+		cmd, outs := m.decide(by, d)
+		cmds = append(cmds, cmd)
+		for _, o := range append(refused, outs...) {
+			if o.order != "" {
+				results = append(results, control.Result{Order: o.order, Outcome: o.result, Detail: o.detail})
+			}
 		}
 	}
+	cmd := tea.Batch(cmds...)
 	dir, ok := m.controlDir()
 	if !ok || len(results) == 0 {
 		return cmd

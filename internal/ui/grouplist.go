@@ -371,6 +371,9 @@ func (m *Model) groupSummaryLines(gi, width int) []string {
 			if badge := m.agentBadge(t.Path); t.Path != "" && badge != "" {
 				status = badge
 			}
+			if m.checkIn(t.Path) != nil {
+				status = st.warn.Render("testing…")
+			}
 			right := ""
 			if t.Path != "" {
 				if wt := m.snap.IndexOf(t.Path); wt < 0 {

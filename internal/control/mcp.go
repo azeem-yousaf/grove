@@ -13,16 +13,16 @@ import (
 
 // Tools are the names of the tools Serve offers, as the planner's
 // permission rules need them.
-var Tools = server("", "").Names()
+var Tools = server("", "", Caller{}).Names()
 
-// Serve speaks the Model Context Protocol on in and out, offering the
-// planner the tools to run the started plans whose state is in dir. It
-// returns when in ends.
-func Serve(in io.Reader, out io.Writer, dir, version string) error {
-	return server(dir, version).Serve(in, out)
+// Serve speaks the Model Context Protocol on in and out, offering planner
+// as the tools to run the started plans whose state is in dir. It returns
+// when in ends.
+func Serve(in io.Reader, out io.Writer, dir, version string, as Caller) error {
+	return server(dir, version, as).Serve(in, out)
 }
 
-func server(dir, version string) mcp.Server {
+func server(dir, version string, as Caller) mcp.Server {
 	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	task := str("The task's branch, as the tasks tool lists it.")
 	id := str("The approval's id, as tasks shows it. Preferred over command.")
@@ -45,7 +45,7 @@ func server(dir, version string) mcp.Server {
 					"If it is working, the message waits until its turn ends. Messaging a finished or failed task reopens it.",
 				Schema: mcp.Object(map[string]any{"task": task, "text": str("The message.")}, "task", "text"),
 				Call: func(args json.RawMessage) (string, bool) {
-					return order(dir, Message, args)
+					return order(dir, as, Message, args)
 				},
 			},
 			{
@@ -54,7 +54,7 @@ func server(dir, version string) mcp.Server {
 					"Only commands tasks marks as yours to answer; the rest wait for the user. You get grove's answer: applied, already applied, not found or needs the user.",
 				Schema: mcp.Object(map[string]any{"task": task, "id": id, "command": command}),
 				Call: func(args json.RawMessage) (string, bool) {
-					return order(dir, Approve, args)
+					return order(dir, as, Approve, args)
 				},
 			},
 			{
@@ -62,7 +62,7 @@ func server(dir, version string) mcp.Server {
 				Description: "Refuse a command a task's agent is waiting on. The reason is passed on to the agent. You get grove's answer.",
 				Schema:      mcp.Object(map[string]any{"task": task, "id": id, "command": command, "reason": str("Why, and what to do instead.")}),
 				Call: func(args json.RawMessage) (string, bool) {
-					return order(dir, Deny, args)
+					return order(dir, as, Deny, args)
 				},
 			},
 			{
@@ -74,7 +74,20 @@ func server(dir, version string) mcp.Server {
 					"note":   str("A sentence on why, shown to the user."),
 				}, "task", "status"),
 				Call: func(args json.RawMessage) (string, bool) {
-					return order(dir, "mark", args)
+					return order(dir, as, "mark", args)
+				},
+			},
+			{
+				Name: "test",
+				Description: "Run the plan's test command, or the command you give, in a task's worktree in the background, and return at once. " +
+					"When it ends grove sends you a new request with whether it passed and the end of its output; carry on with other things meanwhile. " +
+					"Use it for anything long (test suites, builds) instead of running it yourself. One run per worktree at a time; git commands aren't allowed.",
+				Schema: mcp.Object(map[string]any{
+					"task":    task,
+					"command": str("The command to run, through sh (cmd.exe on Windows). Leave out for the plan's test command."),
+				}, "task"),
+				Call: func(args json.RawMessage) (string, bool) {
+					return order(dir, as, Test, args)
 				},
 			},
 			{
@@ -87,7 +100,7 @@ func server(dir, version string) mcp.Server {
 					"to":    str("A task's branch, to address only its agent."),
 					"text":  str("The message."),
 				}, "text"),
-				Call: func(args json.RawMessage) (string, bool) { return post(dir, args) },
+				Call: func(args json.RawMessage) (string, bool) { return post(dir, as, args) },
 			},
 			{
 				Name: "merge",
@@ -95,7 +108,7 @@ func server(dir, version string) mcp.Server {
 					"in plan order, into the plan's own worktree (made the first time) for the user to try. Merging again brings in later changes. " +
 					"If a branch conflicts with the work merged so far, grove asks that task's agent to resolve it and merges again once it is done. You hear how it went.",
 				Schema: mcp.Object(map[string]any{"plan": str("The plan's ID, as tasks shows it. Optional when only one plan is running.")}),
-				Call:   func(args json.RawMessage) (string, bool) { return planOrder(dir, Merge, args) },
+				Call:   func(args json.RawMessage) (string, bool) { return planOrder(dir, as, Merge, args) },
 			},
 			{
 				Name:        "close",
@@ -104,7 +117,7 @@ func server(dir, version string) mcp.Server {
 					"plan": str("The plan's ID, as tasks shows it. Optional when only one plan is running."),
 					"note": str("A sentence on what the user accepted."),
 				}),
-				Call: func(args json.RawMessage) (string, bool) { return planOrder(dir, Close, args) },
+				Call: func(args json.RawMessage) (string, bool) { return planOrder(dir, as, Close, args) },
 			},
 		},
 	}
@@ -127,10 +140,16 @@ func tasks(dir string) (string, bool) {
 		if p.Merge != "" {
 			fmt.Fprintf(&b, "Merge: %s\n", p.Merge)
 		}
+		if p.Test != "" {
+			fmt.Fprintf(&b, "Test command: %s\n", p.Test)
+		}
 		for _, t := range p.Tasks {
 			fmt.Fprintf(&b, "\n- %s: %s · %s", t.Branch, t.Title, t.Status)
 			if t.Busy {
 				b.WriteString(" · agent working")
+			}
+			if t.Testing != "" {
+				fmt.Fprintf(&b, " · grove is running `%s`", t.Testing)
 			}
 			if t.Group != "" {
 				fmt.Fprintf(&b, " · group %s", t.Group)
@@ -171,7 +190,7 @@ var Wait = 5 * time.Second
 
 // order checks an order against the tasks grove last described and
 // queues it.
-func order(dir, action string, args json.RawMessage) (string, bool) {
+func order(dir string, as Caller, action string, args json.RawMessage) (string, bool) {
 	var a struct{ Task, ID, Text, Command, Reason, Status, Note string }
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "Invalid arguments: " + err.Error(), true
@@ -185,13 +204,28 @@ func order(dir, action string, args json.RawMessage) (string, bool) {
 			a.Task = t.Branch
 		}
 	}
-	t, ok := st.Find(a.Task)
+	p, t, ok := st.FindTask(a.Task)
 	if !ok {
 		return fmt.Sprintf("No running task has the branch %q; use the tasks tool to see them.", a.Task), true
 	}
-	o := Order{ID: NewID(), Action: action, Task: t.Branch}
+	if as.Group != "" && (p.ID != as.Plan || t.Group != as.Group) {
+		return fmt.Sprintf("%s isn't a task of your group; its planner handles it.", t.Branch), true
+	}
+	o := Order{ID: NewID(), Action: action, Task: t.Branch, By: as}
 	done := ""
 	switch action {
+	case Test:
+		if t.Path == "" {
+			return t.Branch + " hasn't started yet: its worktree is still to be made.", true
+		}
+		if t.Testing != "" {
+			return fmt.Sprintf("grove is already running `%s` in %s's worktree; wait for its result.", t.Testing, t.Branch), true
+		}
+		if strings.TrimSpace(a.Command) == "" && p.Test == "" {
+			return fmt.Sprintf("Plan %q has no test command: give the command to run.", p.Title), true
+		}
+		// grove checks the command isn't git and has the last word.
+		o.Text = strings.TrimSpace(a.Command)
 	case Message:
 		if strings.TrimSpace(a.Text) == "" {
 			return "The message is empty.", true
@@ -255,7 +289,7 @@ func awaitResult(dir, id string) (string, bool) {
 
 // post checks a chat message against the plans grove last described and
 // queues it.
-func post(dir string, args json.RawMessage) (string, bool) {
+func post(dir string, as Caller, args json.RawMessage) (string, bool) {
 	var a struct{ Plan, Group, To, Text string }
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "Invalid arguments: " + err.Error(), true
@@ -273,7 +307,7 @@ func post(dir string, args json.RawMessage) (string, bool) {
 	if a.To != "" && !slices.ContainsFunc(p.Tasks, func(t Task) bool { return strings.EqualFold(t.Branch, a.To) }) {
 		return fmt.Sprintf("Plan %q has no task with the branch %q.", p.Title, a.To), true
 	}
-	if err := Queue(dir, Order{Action: Post, Plan: p.ID, Group: a.Group, To: a.To, Text: a.Text}); err != nil {
+	if err := Queue(dir, Order{Action: Post, Plan: p.ID, Group: a.Group, To: a.To, Text: a.Text, By: as}); err != nil {
 		return "Couldn't reach grove: " + err.Error(), true
 	}
 	return "Posted.", false
@@ -299,7 +333,7 @@ func findPlan(dir, name string) (Plan, string) {
 }
 
 // planOrder checks an order about a whole plan and queues it.
-func planOrder(dir, action string, args json.RawMessage) (string, bool) {
+func planOrder(dir string, as Caller, action string, args json.RawMessage) (string, bool) {
 	var a struct{ Plan, Note string }
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "Invalid arguments: " + err.Error(), true
@@ -322,7 +356,7 @@ func planOrder(dir, action string, args json.RawMessage) (string, bool) {
 		}
 		done = "Closed."
 	}
-	if err := Queue(dir, Order{Action: action, Plan: p.ID, Note: a.Note}); err != nil {
+	if err := Queue(dir, Order{Action: action, Plan: p.ID, Note: a.Note, By: as}); err != nil {
 		return "Couldn't reach grove: " + err.Error(), true
 	}
 	return done, false

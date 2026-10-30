@@ -48,6 +48,7 @@ const (
 	orchSettled                  // every task of a plan is finished or failed
 	orchMerge                    // how merging a plan went
 	orchReview                   // new reviews and comments on a plan's pull request
+	orchCheck                    // how a test run a planner asked for went; group is that planner's
 )
 
 // orchItem is one thing waiting for the planner.
@@ -216,11 +217,12 @@ func (m *Model) progressed() {
 }
 
 // queueTurn hands a watched task's refused commands, or its closing
-// question, to the planner.
-func (m *Model) queueTurn(s *session) {
+// question, to the planner. Finished work is tested first when the plan
+// has a test command; the command returned runs the tests.
+func (m *Model) queueTurn(s *session) tea.Cmd {
 	p, t := m.taskFor(s.path)
 	if t == nil || !watched(p) {
-		return
+		return nil
 	}
 	var cmds, ids []string
 	for _, a := range s.pending {
@@ -242,9 +244,11 @@ func (m *Model) queueTurn(s *session) {
 	case t.Status == plan.Failed:
 		m.orch.queue = append(m.orch.queue, orchItem{kind: orchFailed, plan: p.ID, branch: t.Branch, lines: []string{t.Error}, urgent: true})
 	case t.Status == plan.Finished:
-		// The planner checks the work before the user merges it.
-		m.orch.queue = append(m.orch.queue, orchItem{kind: orchFinished, plan: p.ID, branch: t.Branch, lines: []string{tail(reply, 2000)}, urgent: true})
+		// The planner checks the work before the user merges it, once grove
+		// has run the tests.
+		return m.checkFinished(p, t, tail(reply, 2000))
 	}
+	return nil
 }
 
 // queueGroups passes new messages in watched plans' chats to the planner.
@@ -307,8 +311,13 @@ func (m *Model) liveItems(items []orchItem) []orchItem {
 		}
 		switch it.kind {
 		case orchGroup, orchMerge, orchReview:
+		case orchCheck:
+			if _, t, _ := m.watchedTask(it.branch); t == nil {
+				continue
+			}
 		case orchSettled:
-			if p.Status != plan.Running || !p.Settled() || m.mergingPlan[p.ID] || p.Merge != nil && p.Merge.Fixing != "" {
+			// Testing a finished task queues it again when it ends.
+			if p.Status != plan.Running || !p.Settled() || m.mergingPlan[p.ID] || p.Merge != nil && p.Merge.Fixing != "" || m.checkingFinished(p) {
 				continue
 			}
 		default:
@@ -465,8 +474,14 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 				what = append(what, it.branch+" asked a question")
 			case orchFinished:
 				_, t, _ := m.watchedTask(it.branch)
-				fmt.Fprintf(&b, "\n%s (task %q) says it is done:\n\n%s\n\nCheck its work, such as its diff and tests, before the user merges it. "+
-					"If something is missing, reply to tell it what; if it can't be done as planned, mark it failed.\n", it.branch, t.Title, quoteText(it.lines[0]))
+				fmt.Fprintf(&b, "\n%s (task %q) says it is done:\n\n%s\n", it.branch, t.Title, quoteText(it.lines[0]))
+				if len(it.lines) > 1 {
+					fmt.Fprintf(&b, "\n%s\ngrove has already run the tests, so don't run the full suite yourself. "+
+						"Check its work, such as its diff, before the user merges it; use the test tool for anything else long, and carry on with other items meanwhile. ", it.lines[1])
+				} else {
+					b.WriteString("\nCheck its work, such as its diff and tests, before the user merges it. ")
+				}
+				b.WriteString("If something is missing, reply to tell it what; if it can't be done as planned, mark it failed.\n")
 				what = append(what, it.branch+" finished")
 			case orchFailed:
 				_, t, _ := m.watchedTask(it.branch)
@@ -494,6 +509,9 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 					"and merge again once they are finished; grove tests it and pushes to the same pull request. " +
 					"Answer questions, or say what you changed, on the pull request with gh pr comment. An approval alone needs nothing from you.\n")
 				what = append(what, fmt.Sprintf("%s on %s's pull request", plural(len(it.lines), "review comment"), p.Title))
+			case orchCheck:
+				fmt.Fprintf(&b, "\nThe test run you asked for in %s's worktree has ended: %s\n", it.branch, it.lines[0])
+				what = append(what, "a test run in "+it.branch+" ended")
 			case orchGroup:
 				name := it.group
 				if g, ok := p.Chat(it.group); ok {
@@ -529,8 +547,9 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
   "close": [{"plan": "plan id", "note": "what the user accepted"}]
 }` + "\n```\n\n")
 	if len(m.controlTools(s)) > 0 {
-		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark, post, merge, close) instead of the block, " +
-			"and you may run shell commands without asking, for example to read a task's diff, run its tests, install its dependencies or run git grove allows in its worktree. " +
+		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark, post, merge, close, test) instead of the block; " +
+			"test runs a command in a task's worktree in the background and grove sends you the result when it ends. " +
+			"and you may run shell commands without asking, for example to read a task's diff, run a quick check, install its dependencies or run git grove allows in its worktree. " +
 			"Don't change any files yourself; the task agents do the work.\n\n")
 	}
 	b.WriteString("Approve a command when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for; " +
@@ -572,6 +591,7 @@ type decisions struct {
 	Mark    []markDecision
 	Merge   []planDecision
 	Close   []planDecision
+	Test    []testDecision
 }
 
 // Each decision may come from a control order, whose outcome grove records
@@ -596,6 +616,10 @@ type (
 	planDecision struct {
 		Plan, Note string
 		order      string
+	}
+	testDecision struct {
+		Branch, Command string // "" for the plan's test command
+		order           string
 	}
 )
 
@@ -776,6 +800,13 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 		}
 		outs = append(outs, o)
 	}
+	for _, tc := range d.Test {
+		cmd, o := m.decideTest(by, tc)
+		cmds = append(cmds, cmd)
+		outs = append(outs, o)
+	}
+	// A task reopened above isn't the work its tests were checking.
+	m.pruneChecks()
 	return tea.Batch(cmds...), outs
 }
 

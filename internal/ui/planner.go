@@ -513,8 +513,8 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 	if t.Status == plan.Finished && watched(p) {
 		m.progressed()
 	}
-	m.queueTurn(s)
-	return tea.Batch(m.finishIfSettled(p), m.savePlan(p), m.schedule(), m.orchestrate())
+	check := m.queueTurn(s)
+	return tea.Batch(check, m.finishIfSettled(p), m.savePlan(p), m.schedule(), m.orchestrate())
 }
 
 func endsWithQuestion(reply string) bool {

@@ -222,6 +222,9 @@ func (m *Model) attentionItems() []attention {
 			if t.Status == plan.Failed {
 				urgent = append(urgent, attention{st.del.Render("✕"), fmt.Sprintf("%s (%s) failed: %s", t.Title, p.Title, t.Error), t.Path})
 			}
+			if c := m.checkIn(t.Path); c != nil {
+				later = append(later, attention{st.accent.Render("●"), fmt.Sprintf("%s: grove is running %s for the planner", t.Title, c.command), t.Path})
+			}
 		}
 		for _, g := range p.Groups {
 			if log, ok := m.groupLog(p, g.ID); ok {
@@ -591,6 +594,9 @@ func (m *Model) overviewColumns(width int) []ovColumn {
 	task := ovColumn{"TASK", 0, 'l', func(_ int, s git.State) string {
 		if p, t := m.taskFor(s.Path); t != nil {
 			out := m.taskIcon(t) + " " + st.text.Render(t.Title)
+			if m.checkIn(t.Path) != nil {
+				out += st.warn.Render(" testing…")
+			}
 			if g, ok := p.Group(t.Group); ok {
 				out += st.warn.Render(" ⇄ " + g.Name)
 			}
@@ -656,6 +662,10 @@ func (m *Model) activePlan() *plan.Plan {
 // taskIcon shows a task's status.
 func (m *Model) taskIcon(t *plan.Task) string {
 	st := m.st
+	if m.checkIn(t.Path) != nil {
+		// grove is testing it for the planner.
+		return st.warn.Render(spinnerFrames[m.frame%len(spinnerFrames)])
+	}
 	switch t.Status {
 	case plan.Working:
 		if s := m.sessionFor(t.Path); s != nil && s.running {

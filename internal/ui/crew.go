@@ -72,6 +72,8 @@ func (m *Model) ownerOf(it orchItem) string {
 		if it.group != plan.ChatID {
 			return it.group
 		}
+	case orchCheck:
+		return it.group // the planner that asked
 	}
 	return ""
 }
@@ -172,8 +174,8 @@ func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
 		return d, nil
 	}
 	var outs []outcome
-	out := func(what string) {
-		outs = append(outs, outcome{what: what, result: control.NotFound, detail: "not a task of your group"})
+	out := func(what, order string) {
+		outs = append(outs, outcome{order: order, what: what, result: control.NotFound, detail: "not a task of your group"})
 	}
 	keepAnswers := func(as []answerDecision, verb string) []answerDecision {
 		var kept []answerDecision
@@ -181,7 +183,7 @@ func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
 			if m.inCrew(s, a.Branch) {
 				kept = append(kept, a)
 			} else {
-				out(verb + " for " + a.Branch)
+				out(verb+" for "+a.Branch, a.order)
 			}
 		}
 		return kept
@@ -193,7 +195,7 @@ func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
 		if m.inCrew(s, r.Branch) {
 			replies = append(replies, r)
 		} else {
-			out("reply to " + r.Branch)
+			out("reply to "+r.Branch, r.order)
 		}
 	}
 	d.Reply = replies
@@ -202,10 +204,19 @@ func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
 		if m.inCrew(s, mk.Branch) {
 			marks = append(marks, mk)
 		} else {
-			out("mark " + mk.Branch)
+			out("mark "+mk.Branch, mk.order)
 		}
 	}
 	d.Mark = marks
+	var tests []testDecision
+	for _, tc := range d.Test {
+		if m.inCrew(s, tc.Branch) {
+			tests = append(tests, tc)
+		} else {
+			out("test "+tc.Branch, tc.order)
+		}
+	}
+	d.Test = tests
 	for i := range d.Post {
 		d.Post[i].Plan = s.crewPlan
 		if d.Post[i].Group != plan.ChatID {
@@ -213,10 +224,10 @@ func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
 		}
 	}
 	for _, mg := range d.Merge {
-		outs = append(outs, outcome{what: "merge " + mg.Plan, result: control.Failed, detail: "the lead planner merges the plan"})
+		outs = append(outs, outcome{order: mg.order, what: "merge " + mg.Plan, result: control.Failed, detail: "the lead planner merges the plan"})
 	}
 	for _, c := range d.Close {
-		outs = append(outs, outcome{what: "close " + c.Plan, result: control.Failed, detail: "the lead planner closes the plan"})
+		outs = append(outs, outcome{order: c.order, what: "close " + c.Plan, result: control.Failed, detail: "the lead planner closes the plan"})
 	}
 	d.Merge, d.Close = nil, nil
 	return d, outs

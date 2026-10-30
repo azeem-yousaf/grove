@@ -550,7 +550,7 @@ func (m *Model) runPlanTests(p *plan.Plan, command, report string) tea.Cmd {
 	run := func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, timeout)
 		defer cancel()
-		return testsDoneMsg{plan: id, command: command, report: report, res: shell.Run(ctx, dir, command, 8000)}
+		return testsDoneMsg{plan: id, command: command, report: report, res: shell.Run(ctx, dir, command, testOutput)}
 	}
 	return tea.Batch(run, m.startAnimating())
 }
@@ -576,15 +576,7 @@ func (m *Model) onTestsDone(msg testsDoneMsg) tea.Cmd {
 			m.grovePost(p, post, m.orchestrate(), m.publishPlan(p, "passed")))
 	}
 	p.Merge.Tests = plan.TestsFailed
-	var why string
-	switch {
-	case res.TimedOut:
-		why = fmt.Sprintf("ran longer than %s and was stopped", m.cfg.Planner.TestTimeout())
-	case res.Err != nil:
-		why = "couldn't run: " + res.Err.Error()
-	default:
-		why = fmt.Sprintf("failed with exit code %d", res.ExitCode)
-	}
+	why := m.whyFailed(res)
 	output := strings.TrimSpace(strings.ToValidUTF8(string(res.Output), "?"))
 	if output == "" {
 		output = "(no output)"
