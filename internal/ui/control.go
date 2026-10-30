@@ -90,7 +90,8 @@ func (m *Model) controlState() control.State {
 				ct.LastReply = tail(lastReply(s), 1500)
 				for _, a := range s.pending {
 					if a.kind == pendingApproval {
-						ct.Approvals = append(ct.Approvals, control.Approval{ID: a.id, Tool: a.tool, Command: a.text, Reason: a.policy.reason, Planner: !a.policy.userOnly})
+						ct.Approvals = append(ct.Approvals, control.Approval{ID: a.id, Tool: a.tool, Command: a.text, Reason: a.policy.reason, Planner: !a.policy.userOnly,
+							Stale: m.staleApproval(s, a)})
 					}
 				}
 			}
@@ -183,9 +184,9 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 		case control.Message:
 			d.Reply = append(d.Reply, replyDecision{o.Task, o.Text, o.ID})
 		case control.Approve:
-			d.Approve = append(d.Approve, answerDecision{o.Item, o.Task, o.Text, "", o.ID})
+			d.Approve = append(d.Approve, answerDecision{o.Item, o.Task, o.Text, "", o.Prefix, o.ID})
 		case control.Deny:
-			d.Deny = append(d.Deny, answerDecision{o.Item, o.Task, o.Text, o.Note, o.ID})
+			d.Deny = append(d.Deny, answerDecision{o.Item, o.Task, o.Text, o.Note, false, o.ID})
 		case control.Finish:
 			d.Mark = append(d.Mark, markDecision{o.Task, "finished", o.Note, o.ID})
 		case control.Fail:

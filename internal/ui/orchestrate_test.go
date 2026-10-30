@@ -138,6 +138,88 @@ func TestUserPostReachesThePlannerAtOnce(t *testing.T) {
 	}
 }
 
+// A task whose turn ends without finishing or asking goes to the planner
+// with its next turn, or on its own after idleWait.
+func TestPlannerHearsAboutIdleTasks(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	p.Orchestrated = true
+	m.now = time.Now()
+	s := m.sessionFor(m.taskPath(p, "feature/a"))
+	// A suggested command waits, so the task stays working.
+	s.pending = []pendingAction{{kind: pendingCommand, text: "make deploy"}}
+	s.lastReply.WriteString("Run make deploy for me.")
+	s.running = true
+	pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone}))
+	if len(fake.reqs) != 0 || len(m.orch.queue) != 1 || m.orch.queue[0].kind != orchIdle || m.orch.queue[0].urgent {
+		t.Fatalf("want one waiting idle item and no planner turn, got %d requests, queue %+v", len(fake.reqs), m.orch.queue)
+	}
+	// A second idle turn doesn't add another.
+	s.running = true
+	pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone}))
+	if len(m.orch.queue) != 1 {
+		t.Fatalf("queue %+v", m.orch.queue)
+	}
+
+	m.now = m.now.Add(idleWait - time.Second)
+	pump(t, m, m.idleTick())
+	if len(fake.reqs) != 0 {
+		t.Fatal("it should wait idleWait")
+	}
+	m.now = m.now.Add(time.Second)
+	pump(t, m, m.idleTick())
+	if len(fake.reqs) != 1 || !strings.Contains(fake.reqs[0].Message, "feature/a (task \"Work on feature/a\") ended its turn without finishing") ||
+		!strings.Contains(fake.reqs[0].Message, "> Run make deploy for me.") {
+		t.Fatalf("planner requests: %+v", fake.reqs)
+	}
+	if len(m.orch.queue) != 0 {
+		t.Errorf("queue left %+v", m.orch.queue)
+	}
+}
+
+// A finished task that finishes again without a new commit isn't checked
+// again; once its HEAD moves, it is.
+func TestFinishedAgainNeedsANewCommit(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	p.Orchestrated = true
+	s := m.sessionFor(m.taskPath(p, "feature/a"))
+	finish := func() {
+		t.Helper()
+		s.running = true
+		s.lastReply.Reset()
+		s.lastReply.WriteString("Done.")
+		pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone}))
+	}
+	checks := func() int {
+		n := 0
+		for _, r := range fake.reqs {
+			if strings.Contains(r.Message, "feature/a (task \"Work on feature/a\") says it is done") {
+				n++
+			}
+		}
+		return n
+	}
+	finish()
+	if _, task := m.taskFor(s.path); task.Status != plan.Finished || checks() != 1 || s.finishedHead == "" {
+		t.Fatalf("status %v, checks %d, head %q", task.Status, checks(), s.finishedHead)
+	}
+	if r := restore(s.saved(), true, true); r.finishedHead != s.finishedHead {
+		t.Errorf("restored head %q, want %q", r.finishedHead, s.finishedHead)
+	}
+
+	// Woken again (a group message), it says it's done with nothing new.
+	finish()
+	if checks() != 1 {
+		t.Fatalf("checked %d times without a new commit", checks())
+	}
+
+	// A new commit is news.
+	gitOut(t, s.path, "commit", "--allow-empty", "-qm", "more")
+	finish()
+	if checks() != 2 {
+		t.Fatalf("checked %d times after a new commit", checks())
+	}
+}
+
 func TestUnwatchedPlanWaitsForTheUser(t *testing.T) {
 	m, p, fake := groupedPlan(t)
 	s := m.sessionFor(m.taskPath(p, "feature/a"))

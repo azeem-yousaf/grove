@@ -496,6 +496,7 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 	if t == nil {
 		return nil
 	}
+	again := t.Status == plan.Finished
 	// While grove runs the agent's git for it, the agent carries on with
 	// the output.
 	if t.Status == plan.Working && len(s.pending) == 0 && !m.gitBusy(s) {
@@ -513,8 +514,8 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 	if t.Status == plan.Finished && watched(p) {
 		m.progressed()
 	}
-	m.queueTurn(s)
-	return tea.Batch(m.finishIfSettled(p), m.savePlan(p), m.schedule(), m.orchestrate())
+	queued := m.queueTurn(s, again)
+	return tea.Batch(queued, m.finishIfSettled(p), m.savePlan(p), m.schedule(), m.orchestrate())
 }
 
 func endsWithQuestion(reply string) bool {

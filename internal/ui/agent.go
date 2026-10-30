@@ -67,6 +67,11 @@ type session struct {
 	crewPlan, crewGroup string
 	crew                plannerState // its state as an orchestrator
 
+	// rulesKey of the orchestrating rules its conversation (id) last got.
+	rulesSent string
+	// A task's HEAD when the planner was last told it finished.
+	finishedHead string
+
 	// Token usage (usage.go).
 	uid      string       // grove's id for this agent in the usage ledger
 	created  time.Time    // when it was created
@@ -137,6 +142,14 @@ type pendingAction struct {
 	policy approvalPolicy // for approvals: whether only the user may answer, and why
 	left   bool           // the planner was asked and left it for the user
 	asked  int            // planner turns that were asked about it and didn't answer
+
+	// The worktree when an approval was asked (worktreeMark): HEAD and a
+	// fingerprint of its changed files. The first scan started after the
+	// card was made (seq > after) takes them again, since the snapshot
+	// can lag the agent's last edits; rebase says it hasn't yet.
+	head, files string
+	after       int
+	rebase      bool
 }
 
 type (
@@ -698,7 +711,7 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Kind:     s.kind,
 		Dir:      s.path,
 		Session:  s.id,
-		Allow:    append([]string(nil), s.allow...),
+		Allow:    m.allowFor(s),
 		Model:    s.model,
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,
@@ -807,6 +820,7 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	}
 	if ev.Err != nil {
 		s.failed = true
+		s.rulesSent = "" // the conversation may not have taken them in
 		s.entries = append(s.entries, chatEntry{roleError, ev.Err.Error()})
 	}
 	recordErr := m.endTurn(s, ev)

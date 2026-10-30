@@ -169,6 +169,20 @@ func TestHookDecisions(t *testing.T) {
 		}
 	}
 
+	// Claude's prefix rules (the plan's checks, the planner's family
+	// approvals, such as Bash(go test:*)) never cover git: the hook still
+	// judges git chained onto an allowed family.
+	for _, c := range []struct{ cmd, want string }{
+		{"go test ./... -run X", ""},
+		{"go test ./... && git push origin HEAD:main", "ask"},
+		{"go test ./...; git push --force origin feature/x", "ask"},
+		{"go vet ./... | git update-ref refs/heads/main HEAD", "ask"},
+	} {
+		if d, reason := hookRun(t, h, call("Bash", wt, c.cmd)); d != c.want {
+			t.Errorf("%q = %q (%s), want %q", c.cmd, d, reason, c.want)
+		}
+	}
+
 	// An approved command runs once.
 	AddGrant(dir, Grant{Worktree: wt, Command: "git push origin HEAD:main"})
 	if d, _ := hookRun(t, h, call("Bash", wt, "git push origin HEAD:main")); d != "allow" {
