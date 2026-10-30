@@ -16,6 +16,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -85,6 +86,67 @@ type Order struct {
 	Text   string    `json:"text,omitempty"`
 	Note   string    `json:"note,omitempty"`
 	Prefix bool      `json:"prefix,omitempty"` // for Approve: the command's family, not just the line
+	By     string    `json:"by,omitempty"`     // the planner that sent it (Caller.String); grove refuses orders without one
+}
+
+// Caller is the planner a tool server works for: the lead planner (the
+// zero Caller), or the planner of one group of a plan, which sees and acts
+// on that group only.
+type Caller struct{ Plan, Group string }
+
+// Lead is the lead planner's Caller.String.
+const Lead = "lead"
+
+// String is how --as and Order.By name the caller.
+func (c Caller) String() string {
+	if c.Group == "" {
+		return Lead
+	}
+	return "crew:" + c.Plan + ":" + c.Group
+}
+
+// ParseCaller reads what Caller.String wrote. Plan IDs have no colon, so
+// the group is everything after the second one.
+func ParseCaller(s string) (Caller, bool) {
+	if s == Lead {
+		return Caller{}, true
+	}
+	rest, ok := strings.CutPrefix(s, "crew:")
+	if !ok {
+		return Caller{}, false
+	}
+	planID, groupID, ok := strings.Cut(rest, ":")
+	if !ok || planID == "" || groupID == "" {
+		return Caller{}, false
+	}
+	return Caller{planID, groupID}, true
+}
+
+// For is what c may see of s: everything for the lead; for a group's
+// planner, its plan with only its group's tasks and chat.
+func (s State) For(c Caller) State {
+	if c.Group == "" {
+		return s
+	}
+	var out State
+	for _, p := range s.Plans {
+		if p.ID != c.Plan {
+			continue
+		}
+		var tasks []Task
+		for _, t := range p.Tasks {
+			if t.Group == c.Group {
+				tasks = append(tasks, t)
+			}
+		}
+		groups := p.Groups
+		p.Tasks, p.Groups = tasks, nil
+		if slices.Contains(groups, c.Group) {
+			p.Groups = []string{c.Group}
+		}
+		out.Plans = append(out.Plans, p)
+	}
+	return out
 }
 
 // Outcomes of an order, or of a decision in a grove-orchestrate block.

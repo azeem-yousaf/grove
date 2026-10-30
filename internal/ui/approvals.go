@@ -305,7 +305,7 @@ func (m *Model) findApproval(branch, id, command string) (*session, int, *answer
 	var sessions []*session
 	if id != "" {
 		for _, p := range m.plans {
-			if !watched(p) {
+			if !watchedLive(p) {
 				continue
 			}
 			for _, t := range p.Tasks {

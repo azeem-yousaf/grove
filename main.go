@@ -425,17 +425,22 @@ func mcpGroup(args []string) error {
 }
 
 // mcpPlan is the tool server grove gives the planner while a plan runs:
-// `grove mcp-plan --dir <control folder>`. The agent's CLI starts it.
+// `grove mcp-plan --dir <control folder> --as <planner>`. The agent's CLI starts it.
 func mcpPlan(args []string) error {
 	fs := flag.NewFlagSet("mcp-plan", flag.ContinueOnError)
 	dir := fs.String("dir", "", "grove's plan control folder")
+	as := fs.String("as", "", `the planner it works for: "lead" or "crew:<plan>:<group>"`)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *dir == "" {
-		return errors.New("mcp-plan needs --dir")
+	if *dir == "" || *as == "" {
+		return errors.New("mcp-plan needs --dir and --as")
 	}
-	return control.Serve(os.Stdin, os.Stdout, *dir, version)
+	c, ok := control.ParseCaller(*as)
+	if !ok {
+		return fmt.Errorf("mcp-plan: unknown planner %q", *as)
+	}
+	return control.Serve(os.Stdin, os.Stdout, *dir, c, version)
 }
 
 // agentHook checks an agent's shell command against grove's git policy:

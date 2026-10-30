@@ -151,6 +151,12 @@ func procKey(req Request) string {
 	return req.Dir
 }
 
+// ReadOnlyKey is what Stop takes to end the kept process of a read-only
+// agent in dir with Slot slot.
+func ReadOnlyKey(dir, slot string) string {
+	return procKey(Request{Dir: dir, ReadOnly: true, Slot: slot})
+}
+
 // EventKind classifies an Event.
 type EventKind int
 
@@ -353,7 +359,7 @@ func (r *Runner) Warm(req Request) {
 	r.idleLater(key, p)
 }
 
-// Stop ends the agent kept for dir and waits for it to exit, so the folder
+// Stop ends the agent kept for dir (or ReadOnlyKey) and waits for it to exit, so the folder
 // is no longer in use.
 func (r *Runner) Stop(dir string) {
 	r.mu.Lock()

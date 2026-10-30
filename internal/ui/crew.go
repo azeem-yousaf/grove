@@ -3,12 +3,14 @@ package ui
 import (
 	"cmp"
 	"fmt"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/control"
+	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/plan"
 )
 
@@ -165,6 +167,79 @@ func (m *Model) inCrew(s *session, branch string) bool {
 	return t != nil && p.ID == s.crewPlan && t.Group == s.crewGroup
 }
 
+// watchedLive reports whether the planner watches p and it isn't done:
+// a closed plan's branches and approvals are out of every planner's reach,
+// and a later plan may reuse its branch names.
+func watchedLive(p *plan.Plan) bool { return watched(p) && p.Status != plan.Done }
+
+// crewHas reports whether task is the agent of a task of s's group; the
+// lead may act on every one.
+func (m *Model) crewHas(s, task *session) bool {
+	if s == nil || s.crewGroup == "" {
+		return true
+	}
+	p := m.planByID(s.crewPlan)
+	if !watchedLive(p) {
+		return false
+	}
+	return slices.ContainsFunc(p.Tasks, func(t plan.Task) bool {
+		return t.Group == s.crewGroup && t.Path != "" && git.SamePath(t.Path, task.path)
+	})
+}
+
+// dropCrews ends the group planners of plan planID, once it is closed or
+// gone: their turns are recorded (the ledger keeps their usage), their
+// Claude processes stopped and their saved conversations deleted.
+func (m *Model) dropCrews(planID string) tea.Cmd {
+	var cmds []tea.Cmd
+	for key, s := range m.crews {
+		if s.crewPlan != planID {
+			continue
+		}
+		cmds = append(cmds, m.abandonTurn(s), m.flushUsage(s))
+		if s.running && s.cancel != nil {
+			s.cancel()
+		}
+		delete(m.crews, key)
+		delete(m.savedJSON, s.file())
+		if m.chatPlanner && m.chatCrew == key {
+			m.chatPlanner, m.chatCrew, m.chatPath = false, "", ""
+			if m.focus == focusChat {
+				m.focus = focusList
+			}
+		}
+		stop, proc, st, file := m.stopAgent, agent.ReadOnlyKey(s.path, key), m.store, s.file()
+		cmds = append(cmds, func() tea.Msg {
+			stop(proc)
+			if st == nil {
+				return nil
+			}
+			return persistMsg{err: st.Remove(file)}
+		})
+	}
+	if len(cmds) > 0 {
+		cmds = append(cmds, m.writePolicy())
+	}
+	return tea.Batch(cmds...)
+}
+
+// pruneCrews drops the group planners whose plan is gone or done, once
+// both the plans and the sessions are loaded.
+func (m *Model) pruneCrews() tea.Cmd {
+	if !m.plansLoaded {
+		return nil
+	}
+	var cmds []tea.Cmd
+	seen := map[string]bool{}
+	for _, s := range m.crews {
+		if p := m.planByID(s.crewPlan); (p == nil || p.Status == plan.Done) && !seen[s.crewPlan] {
+			seen[s.crewPlan] = true
+			cmds = append(cmds, m.dropCrews(s.crewPlan))
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
 // scopeDecisions keeps a group planner's decisions to its own group: other
 // tasks are out of reach, its posts go to its group chat unless it names
 // the plan chat, and merging and closing are the lead's.
@@ -173,16 +248,24 @@ func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
 		return d, nil
 	}
 	var outs []outcome
-	out := func(what string) {
-		outs = append(outs, outcome{what: what, result: control.NotFound, detail: "not a task of your group"})
+	out := func(order, what string) {
+		outs = append(outs, outcome{order: order, what: what, result: control.NotFound, detail: "not a task of your group"})
 	}
 	keepAnswers := func(as []answerDecision, verb string) []answerDecision {
 		var kept []answerDecision
 		for _, a := range as {
-			if m.inCrew(s, a.Branch) {
+			// The approval decides, not the branch named with it: an ID
+			// finds it among every watched task's.
+			ok := m.inCrew(s, a.Branch)
+			if task, _, _ := m.findApproval(a.Branch, a.ID, a.Command); task != nil {
+				ok = m.crewHas(s, task)
+			} else if a.ID != "" {
+				ok = true // decide says it wasn't found
+			}
+			if ok {
 				kept = append(kept, a)
 			} else {
-				out(verb + " for " + a.Branch)
+				out(a.order, verb+" "+cmp.Or(a.ID, "`"+a.Command+"`")+" for "+a.Branch)
 			}
 		}
 		return kept
@@ -194,7 +277,7 @@ func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
 		if m.inCrew(s, r.Branch) {
 			replies = append(replies, r)
 		} else {
-			out("reply to " + r.Branch)
+			out(r.order, "reply to "+r.Branch)
 		}
 	}
 	d.Reply = replies
@@ -203,7 +286,7 @@ func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
 		if m.inCrew(s, mk.Branch) {
 			marks = append(marks, mk)
 		} else {
-			out("mark " + mk.Branch)
+			out(mk.order, "mark "+mk.Branch)
 		}
 	}
 	d.Mark = marks
@@ -214,10 +297,10 @@ func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
 		}
 	}
 	for _, mg := range d.Merge {
-		outs = append(outs, outcome{what: "merge " + mg.Plan, result: control.Failed, detail: "the lead planner merges the plan"})
+		outs = append(outs, outcome{order: mg.order, what: "merge " + mg.Plan, result: control.Failed, detail: "the lead planner merges the plan"})
 	}
 	for _, c := range d.Close {
-		outs = append(outs, outcome{what: "close " + c.Plan, result: control.Failed, detail: "the lead planner closes the plan"})
+		outs = append(outs, outcome{order: c.order, what: "close " + c.Plan, result: control.Failed, detail: "the lead planner closes the plan"})
 	}
 	d.Merge, d.Close = nil, nil
 	return d, outs

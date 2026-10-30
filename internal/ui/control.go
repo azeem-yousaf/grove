@@ -46,7 +46,9 @@ func (m *Model) controlDir() (string, bool) {
 }
 
 // controlTools gives the planner its control tools while it watches a
-// running plan.
+// running plan. Each planner's tool server knows who it works for
+// (callerOf): a group's planner sees only its group, and grove carries out
+// its orders within that group.
 func (m *Model) controlTools(s *session) []agent.ToolServer {
 	dir, ok := m.controlDir()
 	if !s.planner || !ok || m.groveBin == "" || !m.orchestrating() {
@@ -55,9 +57,30 @@ func (m *Model) controlTools(s *session) []agent.ToolServer {
 	return []agent.ToolServer{{
 		Name:    "grove",
 		Command: m.groveBin,
-		Args:    []string{"mcp-plan", "--dir", dir},
+		Args:    []string{"mcp-plan", "--dir", dir, "--as", callerOf(s).String()},
 		Allow:   control.Tools,
 	}}
+}
+
+// callerOf is planner s as its control tools name it.
+func callerOf(s *session) control.Caller {
+	return control.Caller{Plan: s.crewPlan, Group: s.crewGroup}
+}
+
+// plannerOf is the planner an order came from: the lead (which may not be
+// made yet, so nil is fine for it) or a group's planner, which must exist.
+func (m *Model) plannerOf(by string) (*session, string) {
+	c, ok := control.ParseCaller(by)
+	switch {
+	case !ok:
+		return nil, "the order doesn't say which planner sent it"
+	case c.Group == "":
+		return m.planner, ""
+	}
+	if s := m.crews[crewKey(c.Plan, c.Group)]; s != nil {
+		return s, ""
+	}
+	return nil, "grove has no planner for the group " + c.Group + " any more"
 }
 
 // controlState describes the watched running plans for the tools.
@@ -170,8 +193,11 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 	if m.orch.orders == nil {
 		m.orch.orders = map[string]bool{}
 	}
-	var d decisions
 	var results []control.Result
+	// Each planner's orders are carried out as its own, so a group's
+	// planner stays within its group whatever its tool server let through.
+	var callers []string
+	byCaller := map[string]*decisions{}
 	for _, o := range msg.orders {
 		if o.ID != "" && m.orch.orders[o.ID] {
 			results = append(results, control.Result{Order: o.ID, Outcome: control.AlreadyApplied, Detail: "this order was carried out before"})
@@ -179,6 +205,16 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 		}
 		if o.ID != "" {
 			m.orch.orders[o.ID] = true
+		}
+		if _, why := m.plannerOf(o.By); why != "" {
+			results = append(results, control.Result{Order: o.ID, Outcome: control.Failed, Detail: why})
+			continue
+		}
+		d := byCaller[o.By]
+		if d == nil {
+			d = &decisions{}
+			byCaller[o.By] = d
+			callers = append(callers, o.By)
 		}
 		switch o.Action {
 		case control.Message:
@@ -201,12 +237,19 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 			results = append(results, control.Result{Order: o.ID, Outcome: control.Failed, Detail: "grove doesn't know the action " + o.Action})
 		}
 	}
-	cmd, outs := m.decide(nil, d)
-	for _, o := range outs {
-		if o.order != "" {
-			results = append(results, control.Result{Order: o.order, Outcome: o.result, Detail: o.detail})
+	var cmds []tea.Cmd
+	for _, by := range callers {
+		s, _ := m.plannerOf(by)
+		d, refused := m.scopeDecisions(s, *byCaller[by])
+		cmd, outs := m.decide(s, d)
+		cmds = append(cmds, cmd)
+		for _, o := range append(refused, outs...) {
+			if o.order != "" {
+				results = append(results, control.Result{Order: o.order, Outcome: o.result, Detail: o.detail})
+			}
 		}
 	}
+	cmd := tea.Batch(cmds...)
 	dir, ok := m.controlDir()
 	if !ok || len(results) == 0 {
 		return cmd

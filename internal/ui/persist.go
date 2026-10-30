@@ -292,10 +292,13 @@ func (m *Model) onSessionsLoaded(msg sessionsLoadedMsg) tea.Cmd {
 			m.savedJSON[s.file()] = b
 		}
 	}
+	// Group planners of plans closed or deleted meanwhile go, once the
+	// plans are known (else onPlansLoaded does it).
+	prune := m.pruneCrews()
 	if msg.err != nil {
-		return m.notify("Couldn't restore some agent conversations: "+msg.err.Error(), toastErr)
+		return tea.Batch(prune, m.notify("Couldn't restore some agent conversations: "+msg.err.Error(), toastErr))
 	}
-	return nil
+	return prune
 }
 
 // changedSessions marshals the sessions and plans that differ from what

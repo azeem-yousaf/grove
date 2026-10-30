@@ -262,11 +262,12 @@ func (m *Model) savePlan(p *plan.Plan) tea.Cmd {
 
 func (m *Model) deletePlan(id string) tea.Cmd {
 	delete(m.savedJSON, planFile(id))
+	crews := m.dropCrews(id)
 	if m.store == nil {
-		return nil
+		return crews
 	}
 	st := m.store
-	return func() tea.Msg { return persistMsg{err: plan.Delete(st, id)} }
+	return tea.Batch(crews, func() tea.Msg { return persistMsg{err: plan.Delete(st, id)} })
 }
 
 func (m *Model) loadPlans() tea.Cmd {
@@ -299,7 +300,8 @@ func (m *Model) onPlansLoaded(msg plansLoadedMsg) tea.Cmd {
 		// Their groups gather worktrees in the list.
 		m.rebuildRows()
 	}
-	cmds := []tea.Cmd{m.schedule()}
+	m.plansLoaded = true
+	cmds := []tea.Cmd{m.schedule(), m.pruneCrews()}
 	if msg.err != nil {
 		cmds = append(cmds, m.notify("Couldn't read some saved plans: "+msg.err.Error(), toastErr))
 	}

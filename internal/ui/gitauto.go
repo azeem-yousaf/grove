@@ -337,9 +337,22 @@ func (m *Model) plannerAs() string {
 	return filepath.Join(dir, "planner")
 }
 
+// crewAs is the folder a group's planner's scope and grants are kept
+// under, so it can't use the lead's, or another group's, grants.
+func (m *Model) crewAs(planID, groupID string) string {
+	as := m.plannerAs()
+	if as == "" {
+		return ""
+	}
+	return as + "-" + git.PathKey(planID+"-"+groupID)
+}
+
 // hookAs is who s is to the agent hook and its grants.
 func (m *Model) hookAs(s *session) string {
-	if s.planner {
+	switch {
+	case s.crewGroup != "":
+		return m.crewAs(s.crewPlan, s.crewGroup)
+	case s.planner:
 		return m.plannerAs()
 	}
 	return s.path
@@ -365,17 +378,42 @@ func (m *Model) scopeFor(dir string) gitpolicy.Scope {
 	return sc
 }
 
-// plannerScope is the planner's: it reads the main worktree and may run
-// git in its plans' task and merge worktrees.
-func (m *Model) plannerScope() gitpolicy.Scope {
+// plannerScope is planner s's (nil: the lead's): the lead reads the main
+// worktree and may run git in its plans' task and merge worktrees; a
+// group's planner may run git only in its group's task worktrees, and reads
+// the main worktree and the rest of its plan's.
+func (m *Model) plannerScope(s *session) gitpolicy.Scope {
 	main := m.plannerDir()
 	if m.planner != nil {
 		main = m.planner.path
+	}
+	if s != nil && s.crewGroup != "" {
+		main = s.path
 	}
 	guarded, _, _ := m.guardStatus(main)
 	sc := gitpolicy.Scope{Worktree: m.plannerAs(), Dir: main, Protected: m.protectedBranches(), Guarded: guarded}
 	if main != "" {
 		sc.Readable = []string{main}
+	}
+	if s != nil && s.crewGroup != "" {
+		sc.Worktree = m.crewAs(s.crewPlan, s.crewGroup)
+		p := m.planByID(s.crewPlan)
+		if !watchedLive(p) {
+			return sc
+		}
+		for _, t := range p.Tasks {
+			switch {
+			case t.Path == "":
+			case t.Group == s.crewGroup:
+				sc.Writable = append(sc.Writable, t.Path)
+			default:
+				sc.Readable = append(sc.Readable, t.Path)
+			}
+		}
+		if p.Merge != nil && p.Merge.Path != "" {
+			sc.Readable = append(sc.Readable, p.Merge.Path)
+		}
+		return sc
 	}
 	for _, p := range m.plans {
 		if !watched(p) {
@@ -396,7 +434,7 @@ func (m *Model) plannerScope() gitpolicy.Scope {
 // sessionScope is s's scope.
 func (m *Model) sessionScope(s *session) gitpolicy.Scope {
 	if s.planner {
-		return m.plannerScope()
+		return m.plannerScope(s)
 	}
 	return m.scopeFor(s.path)
 }
@@ -411,7 +449,10 @@ func (m *Model) policy() agenthook.Policy {
 		p.Set(agenthook.AgentScope{Scope: m.scopeFor(dir)})
 	}
 	if as := m.plannerAs(); as != "" && m.plannerDir() != "" {
-		p.Set(agenthook.AgentScope{Scope: m.plannerScope(), Planner: true})
+		p.Set(agenthook.AgentScope{Scope: m.plannerScope(nil), Planner: true})
+		for _, s := range m.crews {
+			p.Set(agenthook.AgentScope{Scope: m.plannerScope(s), Planner: true})
+		}
 	}
 	return p
 }

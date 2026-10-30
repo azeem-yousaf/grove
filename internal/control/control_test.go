@@ -120,7 +120,7 @@ func TestLogActivity(t *testing.T) {
 func call(t *testing.T, dir, tool string, args map[string]any) (string, bool) {
 	t.Helper()
 	b, _ := json.Marshal(args)
-	for _, tl := range server(dir, "test").Tools {
+	for _, tl := range server(dir, Caller{}, "test").Tools {
 		if tl.Name == tool {
 			return tl.Call(b)
 		}
@@ -213,7 +213,10 @@ func TestTools(t *testing.T) {
 		if o.Time.IsZero() || o.ID == "" {
 			t.Errorf("order %d has no time or ID", i)
 		}
-		o.Time, o.ID = want[i].Time, ""
+		if o.By != Lead {
+			t.Errorf("order %d is by %q, want %q", i, o.By, Lead)
+		}
+		o.Time, o.ID, o.By = want[i].Time, "", ""
 		if o != want[i] {
 			t.Errorf("order %d = %+v, want %+v", i, o, want[i])
 		}
@@ -254,5 +257,94 @@ func TestPlanTools(t *testing.T) {
 	orders, _ := Take(dir)
 	if len(orders) != 2 || orders[0].Action != Merge || orders[0].Plan != "p1" || orders[1].Action != Close || orders[1].Note != "looks good" {
 		t.Errorf("orders = %+v", orders)
+	}
+}
+
+func callAs(t *testing.T, dir string, as Caller, tool string, args map[string]any) (string, bool) {
+	t.Helper()
+	b, _ := json.Marshal(args)
+	for _, tl := range server(dir, as, "test").Tools {
+		if tl.Name == tool {
+			return tl.Call(b)
+		}
+	}
+	t.Fatalf("no tool %s", tool)
+	return "", true
+}
+
+// A group's planner sees and acts on its own group only, and its orders
+// say who sent them.
+func TestCrewTools(t *testing.T) {
+	for _, s := range []string{"lead", "crew:p1:checkout", "crew:p1:a:b"} {
+		c, ok := ParseCaller(s)
+		if !ok || c.String() != s {
+			t.Errorf("ParseCaller(%q) = %+v, %v", s, c, ok)
+		}
+	}
+	for _, bad := range []string{"", "crew:", "crew:p1", "crew::g", "planner"} {
+		if _, ok := ParseCaller(bad); ok {
+			t.Errorf("ParseCaller(%q) should fail", bad)
+		}
+	}
+
+	dir := t.TempDir()
+	if err := WriteState(dir, State{Plans: []Plan{
+		{ID: "p1", Title: "Shop", Status: "running", Groups: []string{"checkout", "search"}, Tasks: []Task{
+			{Branch: "feature/cart", Group: "checkout", Status: "working", Path: "/src/cart", Approvals: []Approval{{ID: "c-1", Tool: "Bash", Command: "npm test", Planner: true}}},
+			{Branch: "feature/find", Group: "search", Status: "working", Path: "/src/find", Approvals: []Approval{{ID: "f-1", Tool: "Bash", Command: "make", Planner: true}}},
+			{Branch: "feature/docs", Status: "working", Path: "/src/docs"},
+		}},
+		{ID: "p2", Title: "Other", Status: "running", Tasks: []Task{{Branch: "feature/x", Status: "working", Path: "/src/x"}}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	crew := Caller{"p1", "checkout"}
+	got, _ := callAs(t, dir, crew, "tasks", nil)
+	if !strings.Contains(got, "feature/cart") || !strings.Contains(got, "Group chats: checkout\n") {
+		t.Errorf("crew's tasks is missing its group:\n%s", got)
+	}
+	for _, other := range []string{"feature/find", "f-1", "feature/docs", "feature/x", "Other", "search"} {
+		if strings.Contains(got, other) {
+			t.Errorf("crew's tasks shows %q:\n%s", other, got)
+		}
+	}
+	for _, bad := range []struct {
+		tool string
+		args map[string]any
+		want string
+	}{
+		{"approve", map[string]any{"id": "f-1"}, "No task of your group"},
+		{"deny", map[string]any{"task": "feature/find", "command": "make"}, "No task of your group"},
+		{"message", map[string]any{"task": "feature/docs", "text": "hi"}, "No task of your group"},
+		{"mark", map[string]any{"task": "feature/x", "status": "finished"}, "No task of your group"},
+		{"post", map[string]any{"text": "hi", "group": "search"}, "has no group"},
+		{"post", map[string]any{"text": "hi", "to": "feature/find"}, "has no task"},
+		{"merge", nil, "lead planner merges"},
+		{"close", nil, "lead planner closes"},
+	} {
+		if got, failed := callAs(t, dir, crew, bad.tool, bad.args); !failed || !strings.Contains(got, bad.want) {
+			t.Errorf("crew %s %v = %q, want an error with %q", bad.tool, bad.args, got, bad.want)
+		}
+	}
+	if orders, _ := Take(dir); len(orders) != 0 {
+		t.Fatalf("refused orders were queued: %v", orders)
+	}
+	if got, failed := callAs(t, dir, crew, "post", map[string]any{"text": "hi"}); failed {
+		t.Fatalf("crew post = %q", got)
+	}
+	if got, failed := callAs(t, dir, crew, "post", map[string]any{"text": "all", "group": "plan"}); failed {
+		t.Fatalf("crew post in the plan chat = %q", got)
+	}
+	if got, failed := callAs(t, dir, crew, "mark", map[string]any{"task": "feature/cart", "status": "finished"}); failed {
+		t.Fatalf("crew mark = %q", got)
+	}
+	orders, _ := Take(dir)
+	if len(orders) != 3 || orders[0].Group != "checkout" || orders[1].Group != "plan" || orders[2].Task != "feature/cart" {
+		t.Fatalf("orders = %+v", orders)
+	}
+	for _, o := range orders {
+		if o.By != "crew:p1:checkout" {
+			t.Errorf("order %+v doesn't say the crew sent it", o)
+		}
 	}
 }

@@ -216,7 +216,7 @@ func TestDecisionsByIDAndRepeated(t *testing.T) {
 	s.running = true // it gets its answers when this turn ends
 	a3 := m.newApproval(s, "Bash", "make lint")
 	s.pending = []pendingAction{a3}
-	o := control.Order{ID: "o-1", Action: control.Approve, Task: "feature/a", Item: a3.id, Text: "make lint"}
+	o := control.Order{By: control.Lead, ID: "o-1", Action: control.Approve, Task: "feature/a", Item: a3.id, Text: "make lint"}
 	pump(t, m, m.onControl(controlMsg{orders: []control.Order{o}}))
 	pump(t, m, m.onControl(controlMsg{orders: []control.Order{o}}))
 	dir := control.Dir(m.store.Dir())
