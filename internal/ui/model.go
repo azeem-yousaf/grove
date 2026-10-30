@@ -176,6 +176,7 @@ type Model struct {
 	prPolling      bool
 	lastPRPoll     time.Time
 	crews          map[string]*session // each group's planner, by crewKey (crew.go)
+	lanes          map[string]*session // each planner's approval lane, by its crewKey (lane.go)
 	chatCrew       string              // with chatPlanner: the chat shows that group's planner
 	reviewPolling  bool                // a watched plan's pull request is being read
 	lastReviewPoll time.Time           // when pollReviews last ran
@@ -283,6 +284,7 @@ func New(ctx context.Context, o Options) *Model {
 		gitCmd:       newGitPrompt(),
 		sessions:     map[string]*session{},
 		crews:        map[string]*session{},
+		lanes:        map[string]*session{},
 		savedJSON:    map[string][]byte{},
 		creatingTask: map[string]bool{},
 		mergingPlan:  map[string]bool{},

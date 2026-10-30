@@ -473,7 +473,11 @@ func (m *Model) orchestrate() tea.Cmd {
 		items := byOwner[k]
 		cmd, sent := m.orchestrateOne(items)
 		if !sent {
+			// Approvals and questions needn't wait for a busy owner (lane.go).
+			var lane tea.Cmd
+			lane, items = m.orchestrateLane(items)
 			rest = append(rest, items...)
+			cmds = append(cmds, lane)
 		}
 		cmds = append(cmds, cmd)
 	}

@@ -307,7 +307,9 @@ func (m *Model) changedSessions() map[string][]byte {
 		}
 	}
 	for _, s := range m.allSessions() {
-		add(s.file(), s.saved())
+		if !s.lane { // a lane's short turns aren't kept
+			add(s.file(), s.saved())
+		}
 	}
 	for _, p := range m.plans {
 		add(planFile(p.ID), p)

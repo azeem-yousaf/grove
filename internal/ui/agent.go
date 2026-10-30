@@ -63,6 +63,7 @@ type session struct {
 	stopping   bool // the user stopped the running turn
 	seen       bool // the user has looked since it last finished
 	planner    bool // the planner: reads the repository, never edits it
+	lane       bool // a planner's approval lane (lane.go), in m.lanes, never saved
 
 	// A group's planner (crew.go) is a planner in charge of one group of a
 	// plan the planner watches; the lead planner has neither.
@@ -162,6 +163,7 @@ type (
 		path       string
 		planner    bool   // for the planner rather than path's worktree agent
 		crew       string // for that group's planner (crewKey), with planner
+		lane       bool   // for that planner's approval lane (lane.go)
 		ev         agent.Event
 		checkpoint string
 		turnTree   string // taken before a later turn, for "since the last turn"
@@ -291,7 +293,8 @@ func (m *Model) sessionFor(path string) *session {
 	return nil
 }
 
-// allSessions is every agent: the worktree agents and the planner.
+// allSessions is every agent: the worktree agents, the planners and their
+// approval lanes.
 func (m *Model) allSessions() []*session {
 	out := make([]*session, 0, len(m.sessions)+1)
 	for _, s := range m.sessions {
@@ -301,6 +304,9 @@ func (m *Model) allSessions() []*session {
 		out = append(out, m.planner)
 	}
 	for _, s := range m.crews {
+		out = append(out, s)
+	}
+	for _, s := range m.lanes {
 		out = append(out, s)
 	}
 	return out
@@ -722,14 +728,14 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	}
 	req.Context, req.Message = s.takeNotes(req.Context, req.Message)
 	// The planner changes nothing, so there's nothing to undo.
-	path, planner, crew, needCheckpoint := s.path, s.planner, s.crewKey(), s.checkpoint == "" && !s.planner
+	path, planner, crew, lane, needCheckpoint := s.path, s.planner, s.crewKey(), s.lane, s.checkpoint == "" && !s.planner
 	run := m.runAgent
 	go func() {
 		defer close(ch)
 		if checkGuard != nil {
 			if g, ok := checkGuard().(guardVerifiedMsg); ok {
 				ack := make(chan struct{})
-				ch <- agentMsg{path: path, planner: planner, crew: crew, guard: &g, ack: ack}
+				ch <- agentMsg{path: path, planner: planner, crew: crew, lane: lane, guard: &g, ack: ack}
 				select {
 				case <-ack:
 				case <-time.After(10 * time.Second):
@@ -745,7 +751,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				// still works this session if pinning fails.
 				_ = git.KeepCheckpoint(ctx, path, path, tree)
 			}
-			ch <- agentMsg{path: path, planner: planner, crew: crew, checkpoint: tree, err: err}
+			ch <- agentMsg{path: path, planner: planner, crew: crew, lane: lane, checkpoint: tree, err: err}
 		case !planner:
 			// Cheap: it starts from the real index, so only what changed
 			// is hashed. Without it, v can only show all the changes.
@@ -753,7 +759,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				ch <- agentMsg{path: path, turnTree: tree}
 			}
 		}
-		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, crew: crew, ev: ev} })
+		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, crew: crew, lane: lane, ev: ev} })
 	}()
 	return tea.Batch(listen(ch), m.startAnimating(), registered, policyErr)
 }
@@ -772,7 +778,7 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Model:    s.model,
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,
-		Slot:     s.crewKey(),
+		Slot:     s.slot(),
 		Commands: s.planner && m.orchestrating(),
 		Tools:    append(m.groupTools(s), m.controlTools(s)...),
 		ReadDirs: m.groupmateDirs(s),
@@ -813,6 +819,9 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 		s = m.planner
 		if msg.crew != "" {
 			s = m.crews[msg.crew]
+		}
+		if msg.lane {
+			s = m.lanes[msg.crew]
 		}
 	}
 	if s == nil {
@@ -939,6 +948,12 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	s.seen = viewing
 	cmds := []tea.Cmd{m.startScan(), recordErr, gitCmd, m.checkWatches(s)}
 	switch {
+	case s.lane:
+		// Its owner's chat gets a line about it; it has no chat of its own.
+		cmds = append(cmds, m.applyDecisions(s, reply), m.laneDone(s, ev.Err == nil), m.plannerTurnEnded(s, ev, stopped), m.orchestrate())
+		if ev.Err == nil {
+			return tea.Batch(cmds...)
+		}
 	case s.crewGroup != "":
 		// What the user typed meanwhile goes before grove's next request.
 		cmds = append(cmds, m.applyDecisions(s, reply), m.plannerTurnEnded(s, ev, stopped), m.sendQueued(s), m.orchestrate())

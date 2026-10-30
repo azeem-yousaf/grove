@@ -51,7 +51,7 @@ func (s *session) crewKey() string { return crewKey(s.crewPlan, s.crewGroup) }
 
 // stateOf is s's state as an orchestrator.
 func (m *Model) stateOf(s *session) *plannerState {
-	if s != nil && s.crewGroup != "" {
+	if s != nil && (s.crewGroup != "" || s.lane) {
 		return &s.crew
 	}
 	return &m.orch.plannerState
