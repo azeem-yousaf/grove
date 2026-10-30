@@ -471,9 +471,12 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case controlMsg:
 		return m.onControl(msg)
 
+	case finishedHeadMsg:
+		return m.onFinishedHead(msg)
+
 	case clockMsg:
 		m.now = time.Time(msg)
-		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick(), m.retryUsage(), m.gitAutoTick(), m.pollReviews()}
+		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick(), m.retryUsage(), m.gitAutoTick(), m.pollReviews(), m.idleTick()}
 		if m.termFocused {
 			cmds = append(cmds, m.pollPRs(false))
 		}

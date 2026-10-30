@@ -69,6 +69,8 @@ type session struct {
 
 	// rulesKey of the orchestrating rules its conversation (id) last got.
 	rulesSent string
+	// A task's HEAD when the planner was last told it finished.
+	finishedHead string
 
 	// Token usage (usage.go).
 	uid      string       // grove's id for this agent in the usage ledger

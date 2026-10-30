@@ -64,7 +64,7 @@ func (m *Model) planners() []*session {
 // task's news, and its group chat's messages.
 func (m *Model) ownerOf(it orchItem) string {
 	switch it.kind {
-	case orchApproval, orchQuestion, orchFinished, orchFailed:
+	case orchApproval, orchQuestion, orchFinished, orchFailed, orchIdle:
 		if _, t, _ := m.watchedTask(it.branch); t != nil {
 			return t.Group
 		}

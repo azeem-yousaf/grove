@@ -44,7 +44,8 @@ type savedSession struct {
 	Planner     bool           `json:"planner,omitempty"`
 	CrewPlan    string         `json:"crew_plan,omitempty"` // a group's planner: its plan
 	CrewGroup   string         `json:"crew_group,omitempty"`
-	RulesSent   string         `json:"rules_sent,omitempty"` // the orchestrating rules the conversation has
+	RulesSent   string         `json:"rules_sent,omitempty"`    // the orchestrating rules the conversation has
+	Finished    string         `json:"finished_head,omitempty"` // HEAD when the planner was last told the task finished
 
 	// Token usage (version 2). Version 1 sessions get a new UID on load.
 	UID      string       `json:"uid,omitempty"`
@@ -116,7 +117,7 @@ func (s *session) saved() savedSession {
 		Version: 2, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
 		History: s.history, Checkpoint: s.checkpoint, TurnTree: s.turnTree, Allow: s.allow, Notes: s.notes, Cost: s.cost,
 		Failed: s.failed, Interrupted: s.running, Planner: s.planner, Approvals: s.seq, Answered: s.answered,
-		CrewPlan: s.crewPlan, CrewGroup: s.crewGroup, RulesSent: s.rulesSent,
+		CrewPlan: s.crewPlan, CrewGroup: s.crewGroup, RulesSent: s.rulesSent, Finished: s.finishedHead,
 		UID: s.uid, Created: s.created, Turns: s.turns, Drafting: s.drafting,
 		Unrecorded: s.unrecorded, Unassigned: s.unassigned,
 	}
@@ -153,7 +154,7 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 		kind: v.Kind, path: v.Path, name: v.Name, model: v.Model, id: v.ID,
 		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, cost: v.Cost,
 		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner, seq: v.Approvals, answered: v.Answered,
-		crewPlan: v.CrewPlan, crewGroup: v.CrewGroup, rulesSent: v.RulesSent,
+		crewPlan: v.CrewPlan, crewGroup: v.CrewGroup, rulesSent: v.RulesSent, finishedHead: v.Finished,
 		uid: v.UID, created: v.Created, turns: v.Turns, drafting: v.Drafting,
 		unrecorded: v.Unrecorded, unassigned: v.Unassigned,
 	}

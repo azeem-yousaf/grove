@@ -273,7 +273,7 @@ func (m *Model) leaveUndecided(planner *session) tea.Cmd {
 			if m.awaitsPlanner(s, *a) {
 				if a.asked++; a.asked < askAgain {
 					st.reports = append(st.reports, fmt.Sprintf("You didn't answer %s's `%s` (id %s). Nobody else will: approve or deny it now.", s.name, firstLine(a.text), a.id))
-					m.queueTurn(s)
+					cmds = append(cmds, m.queueTurn(s, false))
 					continue
 				}
 				denied = append(denied, s.name+": "+firstLine(a.text))
