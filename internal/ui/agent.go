@@ -79,6 +79,7 @@ type session struct {
 	turnID   string       // the running turn, until it is recorded
 	turnAttr turnAttr     // what the running turn is for
 	nextPlan string       // the plan the planner's next turn is about, when grove asks it
+	nextKind usage.Kind   // why the next turn happens, when not the default (turnKind)
 	live     usage.Tokens // the running turn's usage so far; shown, not stored
 	liveSeen bool         // the agent has reported usage this turn
 	cutShort *runningTurn // the turn grove was closed during, until it is recorded

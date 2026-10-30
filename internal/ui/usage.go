@@ -23,10 +23,11 @@ import (
 
 // turnAttr is what a turn worked for.
 type turnAttr struct {
-	Plan      string `json:"plan,omitempty"`
-	PlanTitle string `json:"plan_title,omitempty"`
-	Task      string `json:"task,omitempty"`
-	Group     string `json:"group,omitempty"`
+	Plan      string     `json:"plan,omitempty"`
+	PlanTitle string     `json:"plan_title,omitempty"`
+	Task      string     `json:"task,omitempty"`
+	Group     string     `json:"group,omitempty"`
+	Kind      usage.Kind `json:"kind,omitempty"` // why the turn happened, fixed when it starts
 }
 
 // usageReload is how often the usage screen rereads the ledger, which other
@@ -79,7 +80,28 @@ func (m *Model) startTurn(s *session) tea.Cmd {
 		s.nextPlan = ""
 	}
 	s.turnAttr = m.attrFor(s, planID)
+	s.turnAttr.Kind = turnKind(s)
+	s.nextKind = ""
 	return m.registerAgent(s)
+}
+
+// turnKind is why s's next turn happens: what its caller set in s.nextKind
+// just before send, else a message from the user or the plan, which for the
+// planner means planning.
+func turnKind(s *session) usage.Kind {
+	switch {
+	case s.nextKind != "":
+		return s.nextKind
+	case s.planner:
+		return usage.KindPlan
+	}
+	return usage.KindWork
+}
+
+// sendAs starts a turn of kind k.
+func (m *Model) sendAs(s *session, k usage.Kind, text string) tea.Cmd {
+	s.nextKind = k
+	return m.send(s, text)
 }
 
 // watchingPlan is the plan the planner is watching or merging, if any: the
@@ -252,6 +274,7 @@ func (m *Model) endTurn(s *session, ev agent.Event) tea.Cmd {
 	} else {
 		attr = m.attrFor(s, "")
 	}
+	attr.Kind = s.turnAttr.Kind
 	// A turn without an exact session total leaves the old one stale:
 	// passing it back would count this turn twice.
 	if ev.SessionTotal.IsZero() || ev.TokenStatus != usage.Exact {
@@ -261,7 +284,7 @@ func (m *Model) endTurn(s *session, ev agent.Event) tea.Cmd {
 	}
 	m.record(s, usage.Turn{
 		ID: id, Agent: s.uid, Time: time.Now(), Tokens: ev.Tokens, Status: ev.TokenStatus, Failed: ev.Err != nil,
-		Plan: attr.Plan, PlanTitle: attr.PlanTitle, Task: attr.Task, Group: attr.Group,
+		Plan: attr.Plan, PlanTitle: attr.PlanTitle, Task: attr.Task, Group: attr.Group, Kind: attr.Kind,
 	})
 	return m.flushUsage(s)
 }
@@ -300,7 +323,7 @@ func (m *Model) recordCutShort(s *session) bool {
 	s.sessionTotal = usage.Tokens{} // it includes the turn cut short, or not: unknown
 	t := usage.Turn{
 		ID: c.ID, Agent: s.uid, Time: time.Now(), Status: usage.Unknown,
-		Plan: c.Attr.Plan, PlanTitle: c.Attr.PlanTitle, Task: c.Attr.Task, Group: c.Attr.Group,
+		Plan: c.Attr.Plan, PlanTitle: c.Attr.PlanTitle, Task: c.Attr.Task, Group: c.Attr.Group, Kind: c.Attr.Kind,
 	}
 	if c.Tokens != nil {
 		t.Tokens, t.Status = *c.Tokens, usage.Partial
@@ -561,6 +584,35 @@ func (m *Model) usageRows() []usageRow {
 	total := row(st.bold.Render("All agents"), q(func(l *usage.Ledger) usage.Sum { return l.Total() }), func(*session) bool { return true })
 	total.strong = true
 	rows = append(rows, total, usageRow{})
+
+	// Kinds in their fixed order, with their share of everything.
+	sums := map[usage.Kind]usage.Sum{}
+	kinds := slices.Clone(usage.Kinds)
+	if l != nil {
+		for _, k := range l.ByKind() {
+			sums[k.Kind] = k.Sum
+			if !slices.Contains(kinds, k.Kind) {
+				kinds = append(kinds, k.Kind)
+			}
+		}
+	}
+	var byKind []usageRow
+	for _, kind := range kinds {
+		r := row(" "+st.text.Render(string(kind)), sums[kind], func(s *session) bool {
+			return cmp.Or(s.turnAttr.Kind, usage.KindUnknown) == kind
+		})
+		if r.sum.Turns == 0 && !r.running {
+			continue
+		}
+		if r.sum.Turns > 0 {
+			r.label += " " + st.faint.Render(usage.Share(r.sum, total.sum))
+		}
+		byKind = append(byKind, r)
+	}
+	if len(byKind) > 0 {
+		rows = append(rows, usageRow{label: st.muted.Render("By kind"), heading: true})
+		rows = append(append(rows, byKind...), usageRow{})
+	}
 
 	// Plans newest first: those in the ledger, then any whose only usage
 	// is still running.
