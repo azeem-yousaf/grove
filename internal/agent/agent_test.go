@@ -627,7 +627,7 @@ func TestClaudeKeepsItsProcess(t *testing.T) {
 func TestClaudeForkLeavesKeptProcess(t *testing.T) {
 	bin, dir := fakeAgent(t, "claude")
 	r := NewRunner()
-	defer r.Stop(dir)
+	defer r.Stop(ReadOnlyKey(dir, "lead"))
 	ctx := context.Background()
 	req := Request{Kind: Claude, Bin: bin, Dir: dir, Message: "hello", ReadOnly: true, Slot: "lead"}
 	evs := turn(t, r, ctx, req)

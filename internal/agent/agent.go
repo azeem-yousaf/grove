@@ -433,15 +433,18 @@ func (r *Runner) release(dir string, p *claudeProc) {
 	r.idleLater(dir, p)
 }
 
-// drop ends p, a process used for one turn only.
+// drop ends p, a process used for one turn only, and waits for it to exit
+// as Stop does, so nothing holds the folder open (Windows can't delete one
+// in use).
 func (r *Runner) drop(key string, p *claudeProc) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	p.busy = false
 	if r.procs[key] == p {
 		delete(r.procs, key)
 	}
+	r.mu.Unlock()
 	p.end()
+	<-p.exited
 }
 
 // idleLater ends p once it has had nothing to do for r.Idle. Callers hold
