@@ -102,6 +102,7 @@ var helpSections = []helpSection{
 		{"ctrl+z u", "undo its changes"},
 		{"ctrl+a", "claude / codex"},
 		{"/model", "choose its model"},
+		{"/clear", "new conversation, empty chat"},
 	}},
 	{"Diff pane", [][2]string{
 		{"↑↓ ←→", "scroll"},

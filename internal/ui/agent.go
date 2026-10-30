@@ -426,6 +426,8 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	case "ctrl+z":
 		return m.askUndo(s)
+	case "ctrl+k":
+		return m.openActions()
 	case "ctrl+y":
 		return m.copyLastReply(s)
 	case "ctrl+o":
@@ -480,6 +482,10 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.chatInput.SetValue("")
 			return m.modelCommand(s, strings.TrimSpace(arg))
 		}
+		if text == "/clear" {
+			m.chatInput.SetValue("")
+			return m.clearChat(s)
+		}
 		if text == "" {
 			return nil
 		}
@@ -496,6 +502,69 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 	var cmd tea.Cmd
 	m.chatInput, cmd = m.chatInput.Update(msg)
 	return cmd
+}
+
+// clearRefusal says why s's chat can't be cleared now, or "" when it can.
+func (m *Model) clearRefusal(s *session) string {
+	switch {
+	case s.side:
+		return "A side turn's chat can't be cleared"
+	case s.crewGroup != "":
+		return "Clearing a group's planner would make it forget the plan it is running"
+	case s.planner && m.orchestrating():
+		return "Clearing the planner would make it forget the plan it is running"
+	case s.running:
+		return "Stop the agent first (ctrl+x)"
+	}
+	return ""
+}
+
+// clearChat (/clear) empties s's chat and starts its agent on a new
+// conversation, the way switching agents does: no provider session, history,
+// cards, queue, notes or approvals carry over. A worktree agent keeps its
+// checkpoint, so undo still reaches back to before its first turn, and its
+// task, which the next turn's briefing gives it again. Its usage stays in
+// the ledger under the old conversation; the new one gets a new uid.
+func (m *Model) clearChat(s *session) tea.Cmd {
+	if why := m.clearRefusal(s); why != "" {
+		return m.notify(why, toastInfo)
+	}
+	cmds := []tea.Cmd{m.abandonTurn(s), m.flushUsage(s)}
+	m.keepUsage(s)
+	var ns *session
+	proc := s.path
+	if s.planner {
+		ns = m.newPlanner(s.path, s.kind)
+		// Drafting turns not yet given to a plan go to the next one.
+		ns.drafting, s.drafting = s.drafting, nil
+		m.planner = ns
+		proc = agent.ReadOnlyKey(s.path, s.slot())
+	} else {
+		ns = m.newSession(s.path, s.name, s.kind)
+		ns.checkpoint, ns.touched = s.checkpoint, s.touched
+	}
+	ns.model = s.model
+	ns.entries = []chatEntry{{roleNote, "Chat cleared. The agent starts a new conversation."}}
+	delete(m.savedJSON, s.file()) // rewritten without the old conversation
+	m.chatSel = chatSelection{}
+	m.chatFollow = true
+	stop, warm := m.stopAgent, m.warm(ns)
+	cmds = append(cmds, func() tea.Msg {
+		stop(proc) // before warming, so the new process isn't the one stopped
+		if warm != nil {
+			return warm()
+		}
+		return nil
+	})
+	return tea.Batch(cmds...)
+}
+
+// clearable is the chat pane's session when its chat may be cleared.
+func (m *Model) clearable() *session {
+	if s := m.chatSession(); s != nil && m.clearRefusal(s) == "" {
+		return s
+	}
+	return nil
 }
 
 // copyLastReply puts the agent's latest reply on the clipboard as it wrote
