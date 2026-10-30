@@ -99,6 +99,8 @@ func allActions(m *Model) []paletteAction {
 		{"Undo the agent's changes", key(k.Undo), func(m *Model) bool { return m.selectedSession() != nil },
 			func(m *Model) tea.Cmd { return m.askUndo(m.selectedSession()) }},
 		{"Open the group or plan chat", key(k.Group), inGroup, (*Model).openSelectedGroup},
+		{"Clear chat", "/clear", func(m *Model) bool { return m.focus == focusChat && m.clearable() != nil },
+			func(m *Model) tea.Cmd { return m.clearChat(m.clearable()) }},
 		{"Remove the worktree", key(k.Remove), onWorktree, (*Model).askRemove},
 		{"New worktree", key(k.New), nil, (*Model).askCreate},
 		{"Plan tasks with the planner", key(k.Planner), nil, (*Model).openPlanner},
