@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
@@ -29,6 +30,13 @@ type plannerState struct {
 	paused  bool     // stopped at the limit until the user says something
 	asked   []string // approvals in its current turn, by ID
 	reports []string // its decisions that didn't apply, for its next request
+
+	// A failed turn puts what it was sent back in the queue (orchfail.go)
+	// and holds the next one off until retryAt.
+	sent        []orchItem // the items its current turn was asked about
+	fails       int        // failed turns in a row
+	retryAt     time.Time
+	failAlerted bool // the user was told it keeps failing
 }
 
 // crewKey identifies a group's planner; "" for the lead.

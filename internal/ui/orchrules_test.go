@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/plan"
@@ -68,6 +69,8 @@ func TestPlannerGetsItsRulesOnce(t *testing.T) {
 		// A failed turn may not have taken them in.
 		fake.turns = append(fake.turns, []agent.Event{{Kind: agent.EvDone, Session: "s2", Err: errors.New("cut off")}})
 		ask("s2")
+		// Retried later (orchfail.go); here it is asked something new now.
+		m.stateOf(s).retryAt, m.orch.queue = time.Time{}, nil
 		gets("after a failed turn", ask("s2"), true)
 
 		// Codex starts fresh every turn.

@@ -60,6 +60,7 @@ type session struct {
 	queued     []string        // the user's messages typed while it worked, for when it is free
 	cost       string
 	failed     bool
+	stopping   bool // the user stopped the running turn
 	seen       bool // the user has looked since it last finished
 	planner    bool // the planner: reads the repository, never edits it
 
@@ -405,6 +406,7 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "ctrl+x":
 		if s.running && s.cancel != nil {
+			s.stopping = true
 			s.cancel()
 		}
 		return nil
@@ -867,6 +869,8 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 
 func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	s.running, s.cancel, s.stream = false, nil, ""
+	stopped := s.stopping // the user stopped it
+	s.stopping = false
 	if ev.Session != "" {
 		s.setSessionID(ev.Session)
 	}
@@ -915,9 +919,9 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	switch {
 	case s.crewGroup != "":
 		// What the user typed meanwhile goes before grove's next request.
-		cmds = append(cmds, m.applyDecisions(s, reply), m.leaveUndecided(s), m.sendQueued(s), m.orchestrate())
+		cmds = append(cmds, m.applyDecisions(s, reply), m.plannerTurnEnded(s, ev, stopped), m.sendQueued(s), m.orchestrate())
 	case s.planner:
-		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(s, reply), m.leaveUndecided(s), m.sendQueued(s), m.orchestrate())
+		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(s, reply), m.plannerTurnEnded(s, ev, stopped), m.sendQueued(s), m.orchestrate())
 	default:
 		// Answers given while it worked go to it now, which carries on its
 		// turn rather than ending it; so does what the user typed meanwhile.

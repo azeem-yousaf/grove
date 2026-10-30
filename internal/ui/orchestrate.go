@@ -473,6 +473,9 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	if groupID != "" && cur == nil {
 		st = &plannerState{}
 	}
+	if m.now.Before(st.retryAt) {
+		return nil, false // its last turn failed: the clock tries again later
+	}
 	who := "The planner"
 	if groupID != "" {
 		who = "The planner of " + groupTitleOf(m.planByID(planID), groupID)
@@ -499,6 +502,7 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	s.nextPlan = planIDs(items)[0]
 	s.nextKind = usage.KindDecide
 	st.reports = nil
+	st.sent = slices.Clone(items) // back in the queue if the turn fails
 	rules, _ := m.rulesFor(s)
 	cmd := m.send(s, text)
 	s.rulesSent = rulesKey(rules)
