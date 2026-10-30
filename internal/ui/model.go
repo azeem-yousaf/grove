@@ -192,6 +192,7 @@ type Model struct {
 	usageTop       int           // its first line on screen
 	usageLoaded    time.Time     // when the ledger was last reloaded for it
 	turnNonce      string        // this process's part of turn IDs, so two groves never share one
+	usageLeft      []*session    // removed agents whose turns aren't in the ledger yet (keepUsage)
 
 	// Hooks for the agent, replaced in tests.
 	installed func() []agent.Kind

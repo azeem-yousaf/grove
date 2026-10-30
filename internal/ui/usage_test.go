@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
@@ -306,6 +307,79 @@ func TestUsageTwoWindowsKeepTurnsApart(t *testing.T) {
 	}
 	if sum := l.Agent(s.uid); sum.Turns != 3 || sum.Tokens.Total() != 610 {
 		t.Errorf("both windows' turns = %+v, want 3 turns, 610 tokens", sum)
+	}
+}
+
+// Removing a worktree while its agent's usage is being written (and its
+// turn still running) loses nothing: the flush in flight finds the agent,
+// and the abandoned turn is written after it.
+func TestUsageRemovedDuringFlush(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	withLedger(t, m)
+	s := m.newSession(filepath.FromSlash("/src/shop-auth"), "feature/auth", agent.Claude)
+	m.record(s, usage.Turn{ID: "t/1", Agent: s.uid, Tokens: usage.Tokens{Input: 10}, Status: usage.Exact})
+	inFlight := m.flushUsage(s)
+	if inFlight == nil || !s.writing {
+		t.Fatal("no flush started")
+	}
+	m.startTurn(s)
+	s.running = true
+	s.live, s.liveSeen = usage.Tokens{Input: 7}, true
+	cmds := []tea.Cmd{inFlight, m.forgetSession(s.path)}
+	if m.sessionFor(s.path) != nil {
+		t.Fatal("session not forgotten")
+	}
+	for len(cmds) > 0 {
+		var next []tea.Cmd
+		for _, msg := range runCmds(tea.Batch(cmds...)) {
+			if w, ok := msg.(usageWrittenMsg); ok {
+				next = append(next, m.onUsageWritten(w))
+			}
+		}
+		cmds = slices.DeleteFunc(next, func(c tea.Cmd) bool { return c == nil })
+	}
+	if sum := m.usage.Agent(s.uid); sum.Turns != 2 || sum.Partial != 1 || sum.Tokens.Total() != 17 {
+		t.Errorf("removed agent's usage = %+v, want both turns", sum)
+	}
+	if len(m.usageLeft) != 0 {
+		t.Errorf("removed agent kept after its usage was written")
+	}
+}
+
+// A loaded session that loses to one started while loading hands its
+// unwritten usage, its turn cut short included, to the winner.
+func TestUsageLoadedLoserHandsOver(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	withLedger(t, m)
+	live := m.newSession(filepath.FromSlash("/src/shop-auth"), "feature/auth", agent.Claude)
+	old := m.newSession(filepath.FromSlash("/src/shop-auth"), "feature/auth", agent.Claude)
+	m.sessions[live.path] = live
+	old.unrecorded = []usage.Turn{{ID: "old/1", Agent: old.uid, Tokens: usage.Tokens{Input: 5}, Status: usage.Exact}}
+	m.startTurn(old)
+	old.running = true
+	r := restore(old.saved(), true, false)
+
+	livePlanner := m.newPlanner(filepath.FromSlash("/src/shop"), agent.Claude)
+	m.planner = livePlanner
+	oldPlanner := m.newPlanner(filepath.FromSlash("/src/shop"), agent.Claude)
+	oldPlanner.drafting = []string{"plan/1"}
+	oldPlanner.unrecorded = []usage.Turn{{ID: "plan/1", Agent: oldPlanner.uid, Tokens: usage.Tokens{Input: 3}, Status: usage.Exact}}
+	oldPlanner.unassigned = []usage.Assignment{{Plan: "p0", Turns: []string{"plan/0"}}}
+	rp := restore(oldPlanner.saved(), true, false)
+
+	m.onSessionsLoaded(sessionsLoadedMsg{sessions: []*session{r, rp}})
+	if m.sessionFor(live.path) != live || m.planner != livePlanner {
+		t.Fatal("the live sessions should win")
+	}
+	if !slices.Equal(livePlanner.drafting, []string{"plan/1"}) || len(livePlanner.unassigned) != 1 {
+		t.Errorf("planner's drafting %v, assignments %v", livePlanner.drafting, livePlanner.unassigned)
+	}
+	writeUsage(t, m)
+	if sum := m.usage.Agent(old.uid); sum.Turns != 2 || sum.Unknown != 1 {
+		t.Errorf("loser's turns = %+v, want its queued turn and the one cut short", sum)
+	}
+	if sum := m.usage.Agent(oldPlanner.uid); sum.Turns != 1 {
+		t.Errorf("loser planner's turns = %+v", sum)
 	}
 }
 

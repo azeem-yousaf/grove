@@ -179,14 +179,41 @@ type usageWrittenMsg struct {
 	err         error
 }
 
-// sessionByUID finds the agent with grove id uid.
+// sessionByUID finds the agent with grove id uid, removed ones still
+// writing their usage included.
 func (m *Model) sessionByUID(uid string) *session {
 	for _, s := range m.allSessions() {
 		if s.uid == uid {
 			return s
 		}
 	}
+	for _, s := range m.usageLeft {
+		if s.uid == uid {
+			return s
+		}
+	}
 	return nil
+}
+
+// keepUsage holds on to a removed agent until its queued turns and
+// assignments are in the ledger, including those a flush already in flight
+// is writing: its result needs the session to find.
+func (m *Model) keepUsage(s *session) {
+	if m.usage != nil && (s.writing || len(s.unrecorded)+len(s.unassigned) > 0) && !slices.Contains(m.usageLeft, s) {
+		m.usageLeft = append(m.usageLeft, s)
+	}
+}
+
+// takeUsage moves from's usage not yet in the ledger to to, when a loaded
+// session loses to one already there. Its turns keep their agent; the
+// queue writes all turns before any assignment.
+func (m *Model) takeUsage(to, from *session) {
+	to.unrecorded = append(to.unrecorded, from.unrecorded...)
+	to.unassigned = append(to.unassigned, from.unassigned...)
+	if to.planner && to.crewGroup == "" {
+		to.drafting = append(to.drafting, from.drafting...)
+	}
+	from.unrecorded, from.unassigned, from.drafting = nil, nil, nil
 }
 
 func (m *Model) onUsageWritten(msg usageWrittenMsg) tea.Cmd {
@@ -205,6 +232,9 @@ func (m *Model) onUsageWritten(msg usageWrittenMsg) tea.Cmd {
 	s.unassigned = s.unassigned[min(msg.assigned, len(s.unassigned)):]
 	if msg.err != nil {
 		return m.usageFailed(msg.err) // the clock tries again
+	}
+	if len(s.unrecorded)+len(s.unassigned) == 0 {
+		m.usageLeft = slices.DeleteFunc(m.usageLeft, func(o *session) bool { return o == s })
 	}
 	return m.flushUsage(s) // anything queued meanwhile
 }
@@ -244,7 +274,7 @@ func (m *Model) flushUsage(s *session) tea.Cmd {
 // retryUsage writes turns left over from failed writes, or from loading.
 func (m *Model) retryUsage() tea.Cmd {
 	var cmds []tea.Cmd
-	for _, s := range m.allSessions() {
+	for _, s := range append(m.allSessions(), m.usageLeft...) {
 		cmds = append(cmds, m.flushUsage(s))
 	}
 	return tea.Batch(cmds...)

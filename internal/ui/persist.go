@@ -269,15 +269,21 @@ func (m *Model) onSessionsLoaded(msg sessionsLoadedMsg) tea.Cmd {
 		// A turn cut short is saved again without it, so it is recorded once.
 		cut := m.recordCutShort(s)
 		// One the user started while loading wins.
+		// The loser's usage not yet in the ledger goes with the winner.
 		switch {
 		case s.crewGroup != "":
-			if m.crews[s.crewKey()] != nil {
+			if w := m.crews[s.crewKey()]; w != nil {
+				m.takeUsage(w, s)
 				continue
 			}
 			m.crews[s.crewKey()] = s
 		case s.planner && m.planner == nil:
 			m.planner = s
-		case s.planner, m.sessionFor(s.path) != nil:
+		case s.planner:
+			m.takeUsage(m.planner, s)
+			continue
+		case m.sessionFor(s.path) != nil:
+			m.takeUsage(m.sessionFor(s.path), s)
 			continue
 		default:
 			m.sessions[s.path] = s
@@ -375,6 +381,7 @@ func (m *Model) forgetSession(path string) tea.Cmd {
 			// Its usage stays in the ledger; a turn still running is
 			// recorded now, since its end will never be seen.
 			recorded = append(recorded, m.abandonTurn(s))
+			m.keepUsage(s)
 			delete(m.sessions, p)
 			delete(m.savedJSON, sessionFile(p))
 		}
