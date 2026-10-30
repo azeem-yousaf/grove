@@ -191,6 +191,7 @@ type Model struct {
 	usageView      bool          // the token usage screen, in place of both panes
 	usageTop       int           // its first line on screen
 	usageLoaded    time.Time     // when the ledger was last reloaded for it
+	turnNonce      string        // this process's part of turn IDs, so two groves never share one
 
 	// Hooks for the agent, replaced in tests.
 	installed func() []agent.Kind
@@ -263,6 +264,7 @@ func New(ctx context.Context, o Options) *Model {
 		keys:         defaultKeys(),
 		version:      o.Version,
 		baseOverride: o.Base,
+		turnNonce:    newUID(),
 		mode:         o.Mode,
 		collapsed:    map[string]bool{},
 		hereIdx:      -1,

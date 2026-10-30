@@ -69,7 +69,9 @@ func (s *session) setSessionID(id string) {
 // startTurn numbers s's new turn and notes what it is for.
 func (m *Model) startTurn(s *session) tea.Cmd {
 	s.turns++
-	s.turnID = fmt.Sprintf("%s/%d", s.uid, s.turns)
+	// Two grove windows on one repository load the same session, uid and
+	// counter, so the process's nonce keeps their turn IDs apart.
+	s.turnID = fmt.Sprintf("%s/%s/%d", s.uid, m.turnNonce, s.turns)
 	s.live, s.liveSeen = usage.Tokens{}, false
 	planID := ""
 	if s.planner {

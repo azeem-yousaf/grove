@@ -49,7 +49,8 @@ func (a AgentInfo) Name() string {
 	return a.ID
 }
 
-// Turn is what one agent turn used. ID is unique per turn, e.g. agentID+"/"+n.
+// Turn is what one agent turn used. ID is unique per turn, e.g.
+// agentID+"/"+process nonce+"/"+n (older lines: agentID+"/"+n).
 type Turn struct {
 	ID        string    `json:"id"`
 	Agent     string    `json:"agent"`

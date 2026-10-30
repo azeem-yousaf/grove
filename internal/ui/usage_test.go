@@ -235,7 +235,7 @@ func TestUsageWriteFailsThenRetries(t *testing.T) {
 	}
 	// Written again (as after a crash before the result came back): still
 	// one turn.
-	s.unrecorded = []usage.Turn{{ID: s.uid + "/1", Agent: s.uid, Tokens: usage.Tokens{Input: 100, Output: 10}, Status: usage.Exact}}
+	s.unrecorded = []usage.Turn{{ID: s.uid + "/" + m.turnNonce + "/1", Agent: s.uid, Tokens: usage.Tokens{Input: 100, Output: 10}, Status: usage.Exact}}
 	writeUsage(t, m)
 	l, err := usage.Open(dir)
 	if err != nil {
@@ -269,6 +269,43 @@ func TestUsageOldSessionGetsUID(t *testing.T) {
 	r := restore(savedSession{Version: 1, Kind: agent.Claude, Path: "/x"}, true, false)
 	if r.uid == "" {
 		t.Error("a session saved before usage tracking has no uid")
+	}
+}
+
+// Two grove windows on one repository load the same saved session, so the
+// same uid and turn counter: both windows' next turns are counted.
+func TestUsageTwoWindowsKeepTurnsApart(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	dir := withLedger(t, m)
+	fake := &fakeAgent{turns: [][]agent.Event{{done(100, 10, usage.Exact)}}}
+	s := agentSession(m, "/src/shop-auth", "feature/auth", fake)
+	pump(t, m, m.send(s, "one"))
+	saved := s.saved()
+
+	var ids []string
+	for _, in := range []int64{200, 300} {
+		w := fakeModel(t, 140, 36)
+		l, err := usage.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.usage = l
+		w.runAgent = (&fakeAgent{turns: [][]agent.Event{{done(in, 0, usage.Exact)}}}).run
+		r := restore(saved, true, false)
+		r.checkpoint = "taken"
+		w.onSessionsLoaded(sessionsLoadedMsg{sessions: []*session{r}})
+		pump(t, w, w.send(w.sessionFor(r.path), "two"))
+		ids = append(ids, r.uid+"/"+w.turnNonce+"/2")
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("both windows made turn %s", ids[0])
+	}
+	l, err := usage.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := l.Agent(s.uid); sum.Turns != 3 || sum.Tokens.Total() != 610 {
+		t.Errorf("both windows' turns = %+v, want 3 turns, 610 tokens", sum)
 	}
 }
 
