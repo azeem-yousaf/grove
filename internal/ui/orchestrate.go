@@ -519,10 +519,10 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 			}
 			switch it.kind {
 			case orchApproval:
-				_, t, _ := m.watchedTask(it.branch)
+				_, t, ts := m.watchedTask(it.branch)
 				fmt.Fprintf(&b, "\n%s (task %q) wants to run commands it isn't allowed to:\n", it.branch, t.Title)
 				for i, c := range it.lines {
-					fmt.Fprintf(&b, "- id %s: `%s`\n", it.ids[i], c)
+					fmt.Fprintf(&b, "- id %s: `%s`%s\n", it.ids[i], c, m.staleSuffix(ts, it.ids[i]))
 				}
 				what = append(what, fmt.Sprintf("%s wants to run %s", it.branch, plural(len(it.lines), "command")))
 			case orchQuestion:
@@ -636,6 +636,8 @@ func (m *Model) orchRules(s *session) string {
 	}
 	b.WriteString("Approve a command when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for; " +
 		"git the task needs (committing, merging feature branches, pushing a task's own branch) is fine too. " +
+		"Add \"prefix\": true to approve a routine check's whole family (every `go test`, not just this line; never git). " +
+		"If one is marked as the worktree changed since it was asked, check the worktree before approving it: it may no longer do what the agent meant. " +
 		"Deny anything destructive and anything that reaches outside the plan's worktrees, saying what to do instead. " +
 		"Commands grove's policy keeps for the user (deleting branches or worktrees, force pushes, discarding work, protected branches) aren't listed and can't be approved by you. " +
 		"grove reports every decision that doesn't apply. " +
@@ -680,6 +682,7 @@ type decisions struct {
 type (
 	answerDecision struct {
 		ID, Branch, Command, Reason string
+		Prefix                      bool // approve the command's family, not just the line
 		order                       string
 	}
 	replyDecision struct {
@@ -786,7 +789,16 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 			}
 			cmds = append(cmds, m.refuse(s, p))
 		default:
-			cmds = append(cmds, m.answer(s, i, approve, byPlanner, a.Reason))
+			rule := ""
+			if approve && a.Prefix {
+				p := s.pending[i]
+				if r, ok := m.familyRule(s, p.tool, p.text); ok {
+					rule = r
+				} else {
+					o.detail = "approved the exact command only: prefix approval isn't for git, interpreters or more than one command"
+				}
+			}
+			cmds = append(cmds, m.answerWith(s, i, approve, byPlanner, a.Reason, rule))
 			answered = append(answered, applied{len(outs), s, s.running})
 		}
 		outs = append(outs, o)
@@ -801,14 +813,17 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 		cmds = append(cmds, m.resume(s))
 	}
 	for _, a := range answered {
+		detail := "the agent carries on once you answer the rest of what it waits on"
 		switch s := a.s; {
 		case a.busy:
-			outs[a.out].detail = "the agent gets it when its turn ends"
+			detail = "the agent gets it when its turn ends"
 		case s.running:
-			outs[a.out].detail = "the agent was resumed with it"
-		default:
-			outs[a.out].detail = "the agent carries on once you answer the rest of what it waits on"
+			detail = "the agent was resumed with it"
 		}
+		if d := outs[a.out].detail; d != "" {
+			detail = d + "; " + detail
+		}
+		outs[a.out].detail = detail
 	}
 	for _, r := range d.Reply {
 		o := outcome{order: r.order, what: "reply to " + r.Branch, result: control.Applied, detail: "it reaches the agent as soon as it isn't working; you'll hear when its turn ends"}

@@ -88,6 +88,10 @@ type savedPending struct {
 	Refs        []string `json:"refs,omitempty"`
 	Left        bool     `json:"left,omitempty"`  // the planner left it for the user
 	Asked       int      `json:"asked,omitempty"` // planner turns that didn't answer it
+
+	// The worktree when an approval was asked (worktreeMark).
+	Head  string `json:"head,omitempty"`
+	Files string `json:"files,omitempty"`
 }
 
 var roleNames = map[chatRole]string{roleUser: "user", roleAgent: "agent", roleTool: "tool", roleNote: "note", roleError: "error", roleOutput: "output"}
@@ -142,7 +146,7 @@ func (s *session) saved() savedSession {
 	for _, p := range s.pending {
 		pol := p.policy
 		out.Pending = append(out.Pending, savedPending{Command: p.kind == pendingCommand, ID: p.id, Text: p.text, Tool: p.tool,
-			UserOnly: pol.userOnly, Reason: pol.reason, Protected: pol.protected, Destructive: pol.destructive, Refs: pol.refs, Left: p.left, Asked: p.asked})
+			UserOnly: pol.userOnly, Reason: pol.reason, Protected: pol.protected, Destructive: pol.destructive, Refs: pol.refs, Left: p.left, Asked: p.asked, Head: p.head, Files: p.files})
 	}
 	return out
 }
@@ -186,6 +190,9 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 		}
 		a := pendingAction{kind: kind, id: p.ID, text: p.Text, tool: p.Tool, left: p.Left, asked: p.Asked,
 			policy: approvalPolicy{userOnly: p.UserOnly, reason: p.Reason, protected: p.Protected, destructive: p.Destructive, refs: p.Refs}}
+		a.head, a.files = p.Head, p.Files
+		// Saved before grove marked approvals: the next scan marks it.
+		a.rebase = kind == pendingApproval && a.head == "" && a.files == ""
 		if kind == pendingApproval && a.id == "" {
 			// Saved by an older grove.
 			a.id = s.nextApprovalID()
