@@ -90,7 +90,8 @@ func (m *Model) controlState() control.State {
 				ct.LastReply = tail(lastReply(s), 1500)
 				for _, a := range s.pending {
 					if a.kind == pendingApproval {
-						ct.Approvals = append(ct.Approvals, control.Approval{ID: a.id, Tool: a.tool, Command: a.text, Reason: a.policy.reason, Planner: !a.policy.userOnly})
+						ct.Approvals = append(ct.Approvals, control.Approval{ID: a.id, Tool: a.tool, Command: a.text, Reason: a.policy.reason, Planner: !a.policy.userOnly,
+							Stale: m.staleApproval(s, a)})
 					}
 				}
 			}

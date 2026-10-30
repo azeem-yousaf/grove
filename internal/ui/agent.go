@@ -137,6 +137,14 @@ type pendingAction struct {
 	policy approvalPolicy // for approvals: whether only the user may answer, and why
 	left   bool           // the planner was asked and left it for the user
 	asked  int            // planner turns that were asked about it and didn't answer
+
+	// The worktree when an approval was asked (worktreeMark): HEAD and a
+	// fingerprint of its changed files. The first scan started after the
+	// card was made (seq > after) takes them again, since the snapshot
+	// can lag the agent's last edits; rebase says it hasn't yet.
+	head, files string
+	after       int
+	rebase      bool
 }
 
 type (

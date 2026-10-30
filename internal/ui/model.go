@@ -763,6 +763,7 @@ func (m *Model) onScan(msg scanMsg) tea.Cmd {
 		m.scanErr = nil
 		m.predictions = remapPredictions(m.predictions, m.snap, msg.snap)
 		m.snap = msg.snap
+		m.markApprovals(msg.seq)
 		if m.repo.Here != "" {
 			m.hereIdx = m.snap.IndexOf(m.repo.Here)
 		}

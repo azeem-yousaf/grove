@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"hash/fnv"
 	"slices"
 	"strconv"
 	"strings"
@@ -51,13 +52,92 @@ func (s *session) nextApprovalID() string {
 
 // newApproval makes the pending approval for a command s was refused.
 func (m *Model) newApproval(s *session, tool, command string) pendingAction {
-	return pendingAction{
+	a := pendingAction{
 		kind:   pendingApproval,
 		id:     s.nextApprovalID(),
 		text:   command,
 		tool:   tool,
 		policy: m.classify(s, tool, command),
+		after:  m.scanSeq,
+		rebase: true,
 	}
+	if st, ok := m.scanned(s.path); ok {
+		a.head, a.files = worktreeMark(st)
+	}
+	return a
+}
+
+// worktreeMark is what an approval remembers of the worktree: HEAD and a
+// fingerprint of the changed files, both from the scan.
+func worktreeMark(st git.State) (head, files string) {
+	if st.Last != nil {
+		head = st.Last.Hash
+	}
+	h := fnv.New64a()
+	for _, f := range st.Files {
+		fmt.Fprintf(h, "%s:%c:%d:%d:%t|", f.Path, f.Status, f.Added, f.Deleted, f.Uncommitted)
+	}
+	return head, strconv.FormatUint(h.Sum64(), 36)
+}
+
+// scanned is the scanned state of the worktree at path.
+func (m *Model) scanned(path string) (git.State, bool) {
+	if m.snap == nil {
+		return git.State{}, false
+	}
+	i := m.snap.IndexOf(path)
+	if i < 0 || m.snap.States[i].Err != nil {
+		return git.State{}, false
+	}
+	return m.snap.States[i], true
+}
+
+// markApprovals takes the worktree again for approvals made before the
+// scan seq started.
+func (m *Model) markApprovals(seq int) {
+	for _, s := range m.allSessions() {
+		for i := range s.pending {
+			a := &s.pending[i]
+			if a.kind != pendingApproval || !a.rebase || seq <= a.after {
+				continue
+			}
+			if st, ok := m.scanned(s.path); ok {
+				a.head, a.files = worktreeMark(st)
+				a.rebase = false
+			}
+		}
+	}
+}
+
+// staleApproval reports whether s's worktree has moved on since a was
+// asked: new commits or other changes. Running it now may not do what the
+// agent meant.
+func (m *Model) staleApproval(s *session, a pendingAction) bool {
+	if a.kind != pendingApproval || a.head == "" && a.files == "" {
+		return false
+	}
+	st, ok := m.scanned(s.path)
+	if !ok {
+		return false
+	}
+	head, files := worktreeMark(st)
+	return head != a.head || files != a.files
+}
+
+// staleNote is added to a stale approval wherever the planner sees it.
+const staleNote = " (worktree changed since it was asked)"
+
+// staleSuffix is staleNote for s's approval id when it is stale.
+func (m *Model) staleSuffix(s *session, id string) string {
+	if s == nil {
+		return ""
+	}
+	for _, a := range s.pending {
+		if a.id == id && m.staleApproval(s, a) {
+			return staleNote
+		}
+	}
+	return ""
 }
 
 // awaitsPlanner reports whether the planner is still to answer a.

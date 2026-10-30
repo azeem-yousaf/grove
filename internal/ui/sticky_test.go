@@ -1,12 +1,15 @@
 package ui
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/control"
+	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/plan"
 )
 
 func TestPlanChecksArePreApproved(t *testing.T) {
@@ -46,6 +49,65 @@ func TestPlanChecksArePreApproved(t *testing.T) {
 	// Nor does an agent outside the plan.
 	if got := m.planChecks(&session{path: "/elsewhere"}); len(got) != 0 {
 		t.Errorf("checks outside a plan = %q", got)
+	}
+}
+
+func TestStaleApprovals(t *testing.T) {
+	m := fakeModel(t, 120, 40)
+	m.classify = func(*session, string, string) approvalPolicy { return approvalPolicy{} }
+	path := filepath.FromSlash("/src/shop-auth")
+	s := m.newSession(path, "feature/auth", agent.Claude)
+	m.plans = []*plan.Plan{{ID: "p1", Title: "Shop", Status: plan.Running, Orchestrated: true, Agent: "claude",
+		Tasks: []plan.Task{{ID: "a", Branch: "feature/auth", Title: "Auth", Path: path, Status: plan.Working}}}}
+	a := m.newApproval(s, "Bash", "npm test")
+	s.pending = []pendingAction{a}
+	if a.head != "abc1234" || a.files == "" || m.staleApproval(s, a) {
+		t.Fatalf("a new approval marks the worktree and isn't stale: %+v", a)
+	}
+	ask := func() string {
+		got, _ := m.orchPrompt(m.planner, []orchItem{{kind: orchApproval, plan: "p1", branch: "feature/auth", lines: []string{a.text}, ids: []string{a.id}}})
+		return got
+	}
+	m.planner = m.newPlanner(m.plannerDir(), agent.Claude)
+	if strings.Contains(ask(), staleNote) {
+		t.Error("an unchanged worktree isn't stale")
+	}
+
+	// The agent edits a file: the card is stale, wherever the planner sees it.
+	st := &m.snap.States[m.snap.IndexOf(path)]
+	st.Files = append(slices.Clone(st.Files), git.FileChange{Path: "src/auth/test.ts", Status: git.Untracked, Added: 3, Uncommitted: true})
+	if !strings.Contains(ask(), "- id "+a.id+": `npm test`"+staleNote) {
+		t.Errorf("the planner should hear it is stale:\n%s", ask())
+	}
+	if !m.controlState().Plans[0].Tasks[0].Approvals[0].Stale {
+		t.Error("state.json should mark it stale")
+	}
+	if len(s.pending) != 1 {
+		t.Error("a stale approval isn't denied")
+	}
+
+	// The mark is saved with the session.
+	back := restore(s.saved(), true, true)
+	if got := back.pending[0]; got.head != a.head || got.files != a.files || got.rebase {
+		t.Errorf("restored %+v", got)
+	}
+
+	// A scan started after the card was made takes the worktree again, since
+	// the snapshot it was made from may have missed the agent's last edits.
+	s.pending[0].rebase = true
+	m.markApprovals(s.pending[0].after)
+	if !m.staleApproval(s, s.pending[0]) {
+		t.Error("a scan already running when the card was made doesn't count")
+	}
+	m.markApprovals(s.pending[0].after + 1)
+	if m.staleApproval(s, s.pending[0]) || s.pending[0].rebase {
+		t.Errorf("the next scan should mark it again: %+v", s.pending[0])
+	}
+
+	// New commits make it stale too.
+	st.Last = &git.Commit{Hash: "def5678"}
+	if !m.staleApproval(s, s.pending[0]) {
+		t.Error("a new HEAD should make it stale")
 	}
 }
 

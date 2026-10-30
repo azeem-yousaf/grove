@@ -452,10 +452,10 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 			}
 			switch it.kind {
 			case orchApproval:
-				_, t, _ := m.watchedTask(it.branch)
+				_, t, ts := m.watchedTask(it.branch)
 				fmt.Fprintf(&b, "\n%s (task %q) wants to run commands it isn't allowed to:\n", it.branch, t.Title)
 				for i, c := range it.lines {
-					fmt.Fprintf(&b, "- id %s: `%s`\n", it.ids[i], c)
+					fmt.Fprintf(&b, "- id %s: `%s`%s\n", it.ids[i], c, m.staleSuffix(ts, it.ids[i]))
 				}
 				what = append(what, fmt.Sprintf("%s wants to run %s", it.branch, plural(len(it.lines), "command")))
 			case orchQuestion:
@@ -536,6 +536,7 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 	b.WriteString("Approve a command when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for; " +
 		"git the task needs (committing, merging feature branches, pushing a task's own branch) is fine too. " +
 		"Add \"prefix\": true to approve a routine check's whole family (every `go test`, not just this line; never git). " +
+		"If one is marked as the worktree changed since it was asked, check the worktree before approving it: it may no longer do what the agent meant. " +
 		"Deny anything destructive and anything that reaches outside the plan's worktrees, saying what to do instead. " +
 		"Commands grove's policy keeps for the user (deleting branches or worktrees, force pushes, discarding work, protected branches) aren't listed and can't be approved by you. " +
 		"grove reports every decision that doesn't apply. " +

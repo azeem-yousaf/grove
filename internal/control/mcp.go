@@ -154,7 +154,11 @@ func tasks(dir string) (string, bool) {
 				if a.Reason != "" {
 					who += ": " + a.Reason
 				}
-				fmt.Fprintf(&b, "  Waiting for approval, id %s (%s, %s): %s\n", a.ID, a.Tool, who, a.Command)
+				stale := ""
+				if a.Stale {
+					stale = " (worktree changed since it was asked)"
+				}
+				fmt.Fprintf(&b, "  Waiting for approval, id %s (%s, %s): %s%s\n", a.ID, a.Tool, who, a.Command, stale)
 			}
 			if t.LastReply != "" {
 				fmt.Fprintf(&b, "  Last reply:\n%s\n", indent(t.LastReply, "    "))
