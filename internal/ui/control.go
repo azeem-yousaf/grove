@@ -51,7 +51,7 @@ func (m *Model) controlDir() (string, bool) {
 // its orders within that group.
 func (m *Model) controlTools(s *session) []agent.ToolServer {
 	dir, ok := m.controlDir()
-	if !s.planner || !ok || m.groveBin == "" || !m.orchestrating() {
+	if !s.planner || s.side || !ok || m.groveBin == "" || !m.orchestrating() {
 		return nil
 	}
 	return []agent.ToolServer{{
@@ -90,7 +90,7 @@ func (m *Model) controlState() control.State {
 		if !orchestrated(p) {
 			continue
 		}
-		cp := control.Plan{ID: p.ID, Title: p.Title, Status: string(p.Status)}
+		cp := control.Plan{ID: p.ID, Title: p.Title, Status: string(p.Status), Test: m.testCommand(p)}
 		if mg := p.Merge; mg != nil {
 			cp.Merge = "branch " + mg.Branch + " in " + mg.Path
 			switch {
@@ -108,6 +108,9 @@ func (m *Model) controlState() control.State {
 		}
 		for _, t := range p.Tasks {
 			ct := control.Task{Branch: t.Branch, Title: t.Title, Group: t.Group, Status: string(t.Status), Error: t.Error, Path: t.Path}
+			if c := m.checkIn(t.Path); c != nil {
+				ct.Testing = c.command
+			}
 			if s := m.sessionFor(t.Path); t.Path != "" && s != nil {
 				ct.Busy = s.running
 				ct.LastReply = tail(lastReply(s), 1500)
@@ -238,6 +241,8 @@ func (m *Model) onControl(msg controlMsg) tea.Cmd {
 			d.Merge = append(d.Merge, planDecision{o.Plan, "", o.ID})
 		case control.Close:
 			d.Close = append(d.Close, planDecision{o.Plan, o.Note, o.ID})
+		case control.Test:
+			d.Test = append(d.Test, testDecision{o.Task, o.Text, o.ID})
 		default:
 			results = append(results, control.Result{Order: o.ID, Outcome: control.Failed, Detail: "grove doesn't know the action " + o.Action})
 		}

@@ -348,3 +348,43 @@ func TestCrewTools(t *testing.T) {
 		}
 	}
 }
+
+func TestTestTool(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteState(dir, State{Plans: []Plan{{ID: "p1", Title: "Shop", Status: "running", Groups: []string{"g"}, Tasks: []Task{
+		{Branch: "feature/a", Group: "g", Status: "finished", Path: "/src/a"},
+		{Branch: "feature/b", Group: "g", Status: "working", Path: "/src/b", Testing: "go test ./..."},
+		{Branch: "feature/c", Status: "working", Path: "/src/c"},
+		{Branch: "feature/d", Status: "queued"},
+	}}}}); err != nil {
+		t.Fatal(err)
+	}
+	crew := Caller{Plan: "p1", Group: "g"}
+	for _, bad := range []struct {
+		as   Caller
+		args map[string]any
+		want string
+	}{
+		{Caller{}, map[string]any{"task": "feature/d", "command": "make"}, "hasn't started yet"},
+		{Caller{}, map[string]any{"task": "feature/b"}, "already running `go test ./...`"},
+		{Caller{}, map[string]any{"task": "feature/c"}, "no test command"},
+		{crew, map[string]any{"task": "feature/c", "command": "make"}, "No task of your group"},
+	} {
+		if got, failed := callAs(t, dir, bad.as, "test", bad.args); !failed || !strings.Contains(got, bad.want) {
+			t.Errorf("test %v as %v = %q, want an error with %q", bad.args, bad.as, got, bad.want)
+		}
+	}
+	if orders, _ := Take(dir); len(orders) != 0 {
+		t.Fatalf("refused orders were queued: %v", orders)
+	}
+
+	defer func(w time.Duration) { Wait = w }(Wait)
+	Wait = 50 * time.Millisecond
+	if got, failed := callAs(t, dir, crew, "test", map[string]any{"task": "feature/a", "command": " make check "}); failed {
+		t.Errorf("test = %q", got)
+	}
+	orders, _ := Take(dir)
+	if len(orders) != 1 || orders[0].Action != Test || orders[0].Task != "feature/a" || orders[0].Text != "make check" || orders[0].By != "crew:p1:g" {
+		t.Errorf("orders = %+v", orders)
+	}
+}

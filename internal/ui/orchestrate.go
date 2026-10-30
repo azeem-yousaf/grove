@@ -55,6 +55,7 @@ const (
 	orchMerge                    // how merging a plan went
 	orchReview                   // new reviews and comments on a plan's pull request
 	orchIdle                     // a task's turn ended without finishing, asking or waiting for the planner
+	orchCheck                    // how a test run a planner asked for went; group is that planner's
 )
 
 // idleWait is how long an idle task waits for another reason to start a
@@ -246,6 +247,7 @@ func (m *Model) progressed() {
 // or the news that it finished, failed or stopped to the planner. again is
 // set when the task was already finished before the turn: the planner then
 // hears about it only if its HEAD moved since (checked by a command).
+// Finished work is tested first when the plan has a test command.
 func (m *Model) queueTurn(s *session, again bool) tea.Cmd {
 	p, t := m.taskFor(s.path)
 	if t == nil || !watched(p) {
@@ -276,7 +278,8 @@ func (m *Model) queueTurn(s *session, again bool) tea.Cmd {
 	case t.Status == plan.Failed:
 		m.orch.queue = append(m.orch.queue, orchItem{kind: orchFailed, plan: p.ID, branch: t.Branch, lines: []string{t.Error}, urgent: true})
 	case t.Status == plan.Finished:
-		// The planner checks the work before the user merges it.
+		// The planner checks the work before the user merges it, once grove
+		// has run the tests.
 		return m.checkFinished(s, p.ID, t.Branch, tail(reply, 2000), again)
 	case t.Status == plan.Working && !m.gitBusy(s):
 		// Neither done nor asking: the planner looks at it with its next
@@ -300,30 +303,44 @@ type finishedHeadMsg struct {
 // the planner check the same work again.
 func (m *Model) checkFinished(s *session, planID, branch, reply string, again bool) tea.Cmd {
 	ctx, path := m.ctx, s.path
+	m.readingHead[git.PathKey(path)] = planID
 	return func() tea.Msg {
 		return finishedHeadMsg{path: path, plan: planID, branch: branch, reply: reply, head: git.RefHash(ctx, path, "HEAD"), again: again}
 	}
 }
 
 func (m *Model) onFinishedHead(msg finishedHeadMsg) tea.Cmd {
+	// The plan's news that all its tasks are done waited for this read
+	// (checkingFinished), unless a check starts now.
+	delete(m.readingHead, git.PathKey(msg.path))
+	settled := func() tea.Cmd {
+		if p := m.planByID(msg.plan); p != nil {
+			return tea.Batch(m.finishIfSettled(p), m.orchestrate())
+		}
+		return m.orchestrate()
+	}
 	s := m.sessionFor(msg.path)
 	p, t := m.taskFor(msg.path)
 	if s == nil || t == nil || !watched(p) || t.Status != plan.Finished {
-		return nil
+		return settled()
 	}
 	if msg.again && msg.head != "" && msg.head == s.finishedHead {
-		return nil
+		return settled()
 	}
-	// finishedHead is set once the planner is asked (markSent), so news
-	// still queued when grove closes is found again after a restart.
-	it := orchItem{kind: orchFinished, plan: msg.plan, branch: msg.branch, lines: []string{msg.reply}, urgent: true, head: msg.head}
-	if i := slices.IndexFunc(m.orch.queue, func(q orchItem) bool { return q.kind == orchFinished && q.branch == msg.branch }); i >= 0 {
+	check := m.testFinished(p, t, msg.reply, msg.head)
+	return tea.Batch(check, settled())
+}
+
+// queueFinished queues news that a task finished, replacing news about it
+// still waiting. finishedHead is set once the planner is asked (markSent),
+// so news still queued when grove closes is found again after a restart.
+func (m *Model) queueFinished(it orchItem) {
+	if i := slices.IndexFunc(m.orch.queue, func(q orchItem) bool { return q.kind == orchFinished && q.branch == it.branch }); i >= 0 {
 		it.at = m.orch.queue[i].at
 		m.orch.queue[i] = it
-	} else {
-		m.orch.queue = append(m.orch.queue, it)
+		return
 	}
-	return m.orchestrate()
+	m.orch.queue = append(m.orch.queue, it)
 }
 
 // idleTick makes idle tasks urgent once they have waited idleWait.
@@ -414,8 +431,13 @@ func (m *Model) liveItems(items []orchItem) []orchItem {
 		}
 		switch it.kind {
 		case orchGroup, orchMerge, orchReview:
+		case orchCheck:
+			if _, t, _ := m.watchedTask(it.branch); t == nil {
+				continue
+			}
 		case orchSettled:
-			if p.Status != plan.Running || !p.Settled() || m.mergingPlan[p.ID] || p.Merge != nil && p.Merge.Fixing != "" {
+			// Testing a finished task queues it again when it ends.
+			if p.Status != plan.Running || !p.Settled() || m.mergingPlan[p.ID] || p.Merge != nil && p.Merge.Fixing != "" || m.checkingFinished(p) {
 				continue
 			}
 		default:
@@ -471,15 +493,8 @@ func (m *Model) orchestrate() tea.Cmd {
 	var cmds []tea.Cmd
 	var rest []orchItem
 	for _, k := range owners {
-		items := byOwner[k]
-		cmd, sent := m.orchestrateOne(items)
-		if !sent {
-			// Approvals and questions needn't wait for a busy owner (lane.go).
-			var lane tea.Cmd
-			lane, items = m.orchestrateLane(items)
-			rest = append(rest, items...)
-			cmds = append(cmds, lane)
-		}
+		cmd, left := m.orchestrateOne(byOwner[k])
+		rest = append(rest, left...)
 		cmds = append(cmds, cmd)
 	}
 	o.queue = rest
@@ -487,10 +502,11 @@ func (m *Model) orchestrate() tea.Cmd {
 }
 
 // orchestrateOne starts a turn of the planner that owns items, all of one
-// owner, reporting whether it took them.
-func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
+// owner, returning the items still waiting. While that planner is busy,
+// urgent approvals and questions go to a side turn (side.go).
+func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, []orchItem) {
 	if !slices.ContainsFunc(items, func(it orchItem) bool { return it.urgent }) || !m.itemsSettled(items) {
-		return nil, false
+		return nil, items
 	}
 	planID, groupID := items[0].plan, m.ownerOf(items[0])
 	var cur *session
@@ -500,14 +516,14 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 		cur = m.crews[crewKey(planID, groupID)]
 	}
 	if cur != nil && cur.running {
-		return nil, false
+		return m.sideTurn(cur, items)
 	}
 	st := m.stateOf(cur)
 	if groupID != "" && cur == nil {
 		st = &plannerState{}
 	}
 	if m.now.Before(st.retryAt) {
-		return nil, false // its last turn failed: the clock tries again later
+		return nil, items // its last turn failed: the clock tries again later
 	}
 	who := "The planner"
 	if groupID != "" {
@@ -515,16 +531,16 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	}
 	if st.turns >= m.cfg.Planner.Decisions() {
 		if st.paused {
-			return nil, false
+			return nil, items
 		}
 		st.paused = true
 		return tea.Batch(
 			m.notify(fmt.Sprintf("✦ %s paused after %d decisions in a row; say something to it (P) or an agent to let it go on", who, st.turns), toastInfo),
-			m.alert(fmt.Sprintf("%s paused after %d decisions in a row and waits for you", who, st.turns))), false
+			m.alert(fmt.Sprintf("%s paused after %d decisions in a row and waits for you", who, st.turns))), items
 	}
 	s := m.plannerFor(planID, groupID)
 	if s == nil {
-		return nil, false
+		return nil, items
 	}
 	st = m.stateOf(s)
 	st.turns++
@@ -534,7 +550,7 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	}
 	s.nextPlan = planIDs(items)[0]
 	s.nextKind = usage.KindDecide
-	st.reports = nil
+	st.reports, st.whileBusy = nil, nil
 	st.sent = slices.Clone(items) // back in the queue if the turn fails
 	m.markSent(items)
 	rules, _ := m.rulesFor(s)
@@ -542,7 +558,7 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	s.rulesSent = rulesKey(rules)
 	// The chat shows a line about it, not the whole request.
 	s.entries[len(s.entries)-1] = chatEntry{roleNote, summary}
-	return cmd, true
+	return cmd, nil
 }
 
 // itemsSettled reports whether a planner's turn for items may start: no
@@ -613,8 +629,14 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 				what = append(what, it.branch+" asked a question")
 			case orchFinished:
 				_, t, _ := m.watchedTask(it.branch)
-				fmt.Fprintf(&b, "\n%s (task %q) says it is done:\n\n%s\n\nCheck its work, such as its diff and tests, before the user merges it. "+
-					"If something is missing, reply to tell it what; if it can't be done as planned, mark it failed.\n", it.branch, t.Title, quoteText(it.lines[0]))
+				fmt.Fprintf(&b, "\n%s (task %q) says it is done:\n\n%s\n", it.branch, t.Title, quoteText(it.lines[0]))
+				if len(it.lines) > 1 {
+					fmt.Fprintf(&b, "\n%s\ngrove has already run the tests, so don't run the full suite yourself. "+
+						"Check its work, such as its diff, before the user merges it; use the test tool for anything else long, and carry on with other items meanwhile. ", it.lines[1])
+				} else {
+					b.WriteString("\nCheck its work, such as its diff and tests, before the user merges it. ")
+				}
+				b.WriteString("If something is missing, reply to tell it what; if it can't be done as planned, mark it failed.\n")
 				what = append(what, it.branch+" finished")
 			case orchIdle:
 				_, t, _ := m.watchedTask(it.branch)
@@ -648,6 +670,9 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 					"and merge again once they are finished; grove tests it and pushes to the same pull request. " +
 					"Answer questions, or say what you changed, on the pull request with gh pr comment. An approval alone needs nothing from you.\n")
 				what = append(what, fmt.Sprintf("%s on %s's pull request", plural(len(it.lines), "review comment"), p.Title))
+			case orchCheck:
+				fmt.Fprintf(&b, "\nThe test run you asked for in %s's worktree has ended: %s\n", it.branch, it.lines[0])
+				what = append(what, "a test run in "+it.branch+" ended")
 			case orchGroup:
 				name := it.group
 				if g, ok := p.Chat(it.group); ok {
@@ -663,6 +688,12 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 				}
 				what = append(what, fmt.Sprintf("%s in %s", plural(len(it.lines), "message"), name))
 			}
+		}
+	}
+	if busy := m.stateOf(s).whileBusy; len(busy) > 0 {
+		b.WriteString("\nWhile you were busy, a side turn (a fork of this conversation) decided for you:\n")
+		for _, r := range busy {
+			b.WriteString("- " + r + "\n")
 		}
 	}
 	if reports := m.stateOf(s).reports; len(reports) > 0 {
@@ -711,8 +742,9 @@ func (m *Model) orchRules(s *session) string {
   "close": [{"plan": "plan id", "note": "what the user accepted"}]
 }` + "\n```\n\n")
 	if len(m.controlTools(s)) > 0 {
-		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark, post, merge, close) instead of the block, " +
-			"and you may run shell commands without asking, for example to read a task's diff, run its tests, install its dependencies or run git grove allows in its worktree. " +
+		b.WriteString("You can also act during your turn with grove's tools (tasks, message, approve, deny, mark, post, merge, close, test) instead of the block; " +
+			"test runs a command in a task's worktree in the background and grove sends you the result when it ends. " +
+			"and you may run shell commands without asking, for example to read a task's diff, run a quick check, install its dependencies or run git grove allows in its worktree. " +
 			"Don't change any files yourself; the task agents do the work.\n\n")
 	}
 	b.WriteString("Approve a command when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for; " +
@@ -759,6 +791,7 @@ type decisions struct {
 	Mark    []markDecision
 	Merge   []planDecision
 	Close   []planDecision
+	Test    []testDecision
 }
 
 // Each decision may come from a control order, whose outcome grove records
@@ -784,6 +817,10 @@ type (
 	planDecision struct {
 		Plan, Note string
 		order      string
+	}
+	testDecision struct {
+		Branch, Command string // "" for the plan's test command
+		order           string
 	}
 )
 
@@ -818,8 +855,15 @@ func (m *Model) applyDecisions(s *session, reply string) tea.Cmd {
 		st.reports = append(st.reports, "your last grove-orchestrate block wasn't valid JSON, so none of it applied: "+err.Error())
 		return nil
 	}
+	d, kept := scopeSide(s, d)
 	d, refused := m.scopeDecisions(s, d)
+	refused = append(kept, refused...)
+	var told []string
+	if s.side {
+		told = m.sideAccount(d) // before decide takes the approvals away
+	}
 	cmd, outs := m.decide(s, d)
+	m.tellOwner(s, told, outs)
 	for _, o := range append(refused, outs...) {
 		switch o.result {
 		case control.Applied:
@@ -986,6 +1030,13 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 		}
 		outs = append(outs, o)
 	}
+	for _, tc := range d.Test {
+		cmd, o := m.decideTest(by, tc)
+		cmds = append(cmds, cmd)
+		outs = append(outs, o)
+	}
+	// A task reopened above isn't the work its tests were checking.
+	m.pruneChecks()
 	return tea.Batch(cmds...), outs
 }
 

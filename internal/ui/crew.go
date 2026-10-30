@@ -3,6 +3,7 @@ package ui
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -39,6 +40,8 @@ type plannerState struct {
 	fails       int        // failed turns in a row
 	retryAt     time.Time
 	failAlerted bool // the user was told it keeps failing
+	// What its side turns decided while it was busy, for its next request.
+	whileBusy []string
 }
 
 // crewKey identifies a group's planner; "" for the lead.
@@ -51,9 +54,10 @@ func crewKey(planID, groupID string) string {
 
 func (s *session) crewKey() string { return crewKey(s.crewPlan, s.crewGroup) }
 
-// stateOf is s's state as an orchestrator.
+// stateOf is s's state as an orchestrator. A side turn has its own, for
+// what it was asked; its turns count towards its owner's.
 func (m *Model) stateOf(s *session) *plannerState {
-	if s != nil && (s.crewGroup != "" || s.lane) {
+	if s != nil && (s.crewGroup != "" || s.side) {
 		return &s.crew
 	}
 	return &m.orch.plannerState
@@ -83,6 +87,8 @@ func (m *Model) ownerOf(it orchItem) string {
 		if it.group != plan.ChatID {
 			return it.group
 		}
+	case orchCheck:
+		return it.group // the planner that asked
 	}
 	return ""
 }
@@ -226,8 +232,9 @@ func (m *Model) dropCrews(planID string) tea.Cmd {
 			return persistMsg{err: st.Remove(file)}
 		})
 	}
-	// Their approval lanes go too; the lead's stays for its other plans.
-	for key, s := range m.lanes {
+	// Their side turns go too (their process ends with the turn); the
+	// lead's stays for its other plans.
+	for key, s := range m.sides {
 		if s.crewPlan != planID || s.crewGroup == "" {
 			continue
 		}
@@ -236,9 +243,11 @@ func (m *Model) dropCrews(planID string) tea.Cmd {
 		if s.running && s.cancel != nil {
 			s.cancel()
 		}
-		delete(m.lanes, key)
-		stop, proc := m.stopAgent, agent.ReadOnlyKey(s.path, s.slot())
-		cmds = append(cmds, func() tea.Msg { stop(proc); return nil })
+		delete(m.sides, key)
+		delete(m.savedJSON, s.file())
+		if st, file := m.store, s.file(); st != nil {
+			cmds = append(cmds, func() tea.Msg { return persistMsg{err: st.Remove(file)} })
+		}
 	}
 	if len(cmds) > 0 {
 		cmds = append(cmds, m.writePolicy())
@@ -254,7 +263,10 @@ func (m *Model) pruneCrews() tea.Cmd {
 	}
 	var cmds []tea.Cmd
 	seen := map[string]bool{}
-	for _, s := range m.crews {
+	for _, s := range slices.Concat(slices.Collect(maps.Values(m.crews)), slices.Collect(maps.Values(m.sides))) {
+		if s.crewGroup == "" {
+			continue // the lead's side turn stays with the lead
+		}
 		if p := m.planByID(s.crewPlan); (p == nil || p.Status == plan.Done) && !seen[s.crewPlan] {
 			seen[s.crewPlan] = true
 			cmds = append(cmds, m.dropCrews(s.crewPlan))
@@ -313,6 +325,15 @@ func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
 		}
 	}
 	d.Mark = marks
+	var tests []testDecision
+	for _, tc := range d.Test {
+		if m.inCrew(s, tc.Branch) {
+			tests = append(tests, tc)
+		} else {
+			out(tc.order, "test "+tc.Branch)
+		}
+	}
+	d.Test = tests
 	for i := range d.Post {
 		d.Post[i].Plan = s.crewPlan
 		if d.Post[i].Group != plan.ChatID {
@@ -340,8 +361,11 @@ func (m *Model) ownerPlanner(path string) *session {
 	return m.planner
 }
 
-// noteTo adds a line to planner s's chat.
+// noteTo adds a line to planner s's chat: its owner's, for a side turn.
 func noteTo(s *session, role chatRole, text string) {
+	if s != nil && s.sideOf != nil {
+		s = s.sideOf
+	}
 	if s != nil {
 		s.entries = append(s.entries, chatEntry{role, text})
 	}

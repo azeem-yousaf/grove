@@ -101,6 +101,19 @@ func server(dir string, as Caller, version string) mcp.Server {
 				},
 			},
 			{
+				Name: "test",
+				Description: "Run the plan's test command, or the command you give, in a task's worktree in the background, and return at once. " +
+					"When it ends grove sends you a new request with whether it passed and the end of its output; carry on with other things meanwhile. " +
+					"Use it for anything long (test suites, builds) instead of running it yourself. One run per worktree at a time; git commands aren't allowed.",
+				Schema: mcp.Object(map[string]any{
+					"task":    task,
+					"command": str("The command to run, through sh (cmd.exe on Windows). Leave out for the plan's test command."),
+				}, "task"),
+				Call: func(args json.RawMessage) (string, bool) {
+					return c.order(Test, args)
+				},
+			},
+			{
 				Name: "post",
 				Description: "Post in a plan's chat: the plan chat, where the user gives you feedback on the plan and you answer them, " +
 					"or one of its group chats. Address one task's agent with `to`, or leave it out for everyone.",
@@ -150,10 +163,16 @@ func (c caller) tasks() (string, bool) {
 		if p.Merge != "" {
 			fmt.Fprintf(&b, "Merge: %s\n", p.Merge)
 		}
+		if p.Test != "" {
+			fmt.Fprintf(&b, "Test command: %s\n", p.Test)
+		}
 		for _, t := range p.Tasks {
 			fmt.Fprintf(&b, "\n- %s: %s · %s", t.Branch, t.Title, t.Status)
 			if t.Busy {
 				b.WriteString(" · agent working")
+			}
+			if t.Testing != "" {
+				fmt.Fprintf(&b, " · grove is running `%s`", t.Testing)
 			}
 			if t.Group != "" {
 				fmt.Fprintf(&b, " · group %s", t.Group)
@@ -218,7 +237,7 @@ func (c caller) order(action string, args json.RawMessage) (string, bool) {
 			a.Task = t.Branch
 		}
 	}
-	t, ok := st.Find(a.Task)
+	p, t, ok := st.FindTask(a.Task)
 	if !ok {
 		if c.as.Group != "" {
 			return fmt.Sprintf("No task of your group has the branch %q (or that approval id); use the tasks tool to see them.", a.Task), true
@@ -228,6 +247,18 @@ func (c caller) order(action string, args json.RawMessage) (string, bool) {
 	o := Order{ID: NewID(), Action: action, Task: t.Branch}
 	done := ""
 	switch action {
+	case Test:
+		if t.Path == "" {
+			return t.Branch + " hasn't started yet: its worktree is still to be made.", true
+		}
+		if t.Testing != "" {
+			return fmt.Sprintf("grove is already running `%s` in %s's worktree; wait for its result.", t.Testing, t.Branch), true
+		}
+		if strings.TrimSpace(a.Command) == "" && p.Test == "" {
+			return fmt.Sprintf("Plan %q has no test command: give the command to run.", p.Title), true
+		}
+		// grove checks the command isn't git and has the last word.
+		o.Text = strings.TrimSpace(a.Command)
 	case Message:
 		if strings.TrimSpace(a.Text) == "" {
 			return "The message is empty.", true

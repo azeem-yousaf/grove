@@ -135,6 +135,9 @@ type Model struct {
 	creatingTask   map[string]bool        // plan tasks whose worktree is being made, by plan+task ID
 	mergingPlan    map[string]bool        // plans grove is merging, by ID
 	testingPlan    map[string]bool        // plans whose merge grove is testing, by ID
+	checks         map[string]*taskCheck  // commands grove runs in tasks' worktrees for planners, by git.PathKey
+	readingHead    map[string]string      // finished tasks whose HEAD is being read (checkFinished): plan ID by git.PathKey
+	checkSeq       int                    // numbers the checks, so a cancelled one's result is dropped
 	branchNames    []string               // existing branches, for the planner's briefing
 	planBranches   git.Branches           // branches when the last plan started, for creating its worktrees
 	groveBin       string                 // this program, which agents start for group tools
@@ -176,7 +179,7 @@ type Model struct {
 	prPolling      bool
 	lastPRPoll     time.Time
 	crews          map[string]*session // each group's planner, by crewKey (crew.go)
-	lanes          map[string]*session // each planner's approval lane, by its crewKey (lane.go)
+	sides          map[string]*session // planners' side turns, by sideKey (side.go)
 	chatCrew       string              // with chatPlanner: the chat shows that group's planner
 	reviewPolling  bool                // a watched plan's pull request is being read
 	lastReviewPoll time.Time           // when pollReviews last ran
@@ -287,11 +290,13 @@ func New(ctx context.Context, o Options) *Model {
 		gitCmd:       newGitPrompt(),
 		sessions:     map[string]*session{},
 		crews:        map[string]*session{},
-		lanes:        map[string]*session{},
+		sides:        map[string]*session{},
 		savedJSON:    map[string][]byte{},
 		creatingTask: map[string]bool{},
 		mergingPlan:  map[string]bool{},
 		testingPlan:  map[string]bool{},
+		checks:       map[string]*taskCheck{},
+		readingHead:  map[string]string{},
 		groups:       map[string]*groupState{},
 		groveBin:     groveExecutable(),
 		predictor:    git.NewPredictor(),
@@ -489,6 +494,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case clockMsg:
 		m.now = time.Time(msg)
+		m.pruneChecks()
 		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick(), m.retryUsage(), m.gitAutoTick(), m.pollReviews(), m.idleTick()}
 		if m.termFocused {
 			cmds = append(cmds, m.pollPRs(false))
@@ -507,7 +513,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		busy := m.scanning || m.diffPending() || m.removing != nil || m.anyAgentRunning() ||
 			m.creating != nil && m.creating.running || m.undo != nil && m.undo.running ||
 			m.conflicts != nil && m.conflicts.busy() ||
-			m.review != nil && m.review.checking || len(m.creatingTask) > 0 || len(m.mergingPlan) > 0 || len(m.testingPlan) > 0
+			m.review != nil && m.review.checking || len(m.creatingTask) > 0 || len(m.mergingPlan) > 0 || len(m.testingPlan) > 0 || len(m.checks) > 0
 		if !busy {
 			m.animating = false
 			return nil
@@ -579,6 +585,9 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 
 	case testsDoneMsg:
 		return m.onTestsDone(msg)
+
+	case checkDoneMsg:
+		return m.onCheckDone(msg)
 
 	case planPRMsg:
 		return m.onPlanPR(msg)

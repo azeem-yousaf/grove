@@ -28,8 +28,8 @@ func TestPlannerGetsItsRulesOnce(t *testing.T) {
 			t.Helper()
 			fake.turns = append(fake.turns, []agent.Event{{Kind: agent.EvDone, Session: session}})
 			n := len(fake.reqs)
-			cmd, sent := m.orchestrateOne([]orchItem{{kind: orchGroup, plan: p.ID, group: chat, lines: []string{"you: hi"}, urgent: true}})
-			if !sent {
+			cmd, left := m.orchestrateOne([]orchItem{{kind: orchGroup, plan: p.ID, group: chat, lines: []string{"you: hi"}, urgent: true}})
+			if len(left) > 0 {
 				t.Fatalf("group %q: the planner wasn't asked", groupID)
 			}
 			pump(t, m, cmd)

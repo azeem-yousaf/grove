@@ -50,6 +50,9 @@ func claudeArgs(req Request) []string {
 	}
 	if req.Session != "" {
 		args = append(args, "--resume", req.Session)
+		if req.Fork {
+			args = append(args, "--fork-session")
+		}
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)

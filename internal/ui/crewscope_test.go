@@ -141,9 +141,8 @@ func TestClosedPlansDropTheirCrews(t *testing.T) {
 	}
 	saved := crew.saved()
 	m.showChat(crew)
-	lane := m.newPlanner(crew.path, crew.kind)
-	lane.lane, lane.crewPlan, lane.crewGroup = true, crew.crewPlan, crew.crewGroup
-	m.lanes[crew.crewKey()] = lane
+	side := &session{side: true, planner: true, uid: newUID(), path: crew.path, crewPlan: crew.crewPlan, crewGroup: crew.crewGroup}
+	m.sides[side.slot()] = side
 
 	pump(t, m, m.closePlan(p, "good"))
 	if len(m.crews) != 0 {
@@ -153,14 +152,11 @@ func TestClosedPlansDropTheirCrews(t *testing.T) {
 		t.Errorf("crew's file is still there: %v", err)
 	}
 	mu.Lock()
-	want := []string{agent.ReadOnlyKey(crew.path, crew.crewKey()), agent.ReadOnlyKey(lane.path, lane.slot())}
-	slices.Sort(stopped)
-	slices.Sort(want)
-	if !slices.Equal(stopped, want) {
+	if want := agent.ReadOnlyKey(crew.path, crew.crewKey()); !slices.Equal(stopped, []string{want}) {
 		t.Errorf("stopped %q, want %q", stopped, want)
 	}
-	if len(m.lanes) != 0 {
-		t.Errorf("lanes left: %v", m.lanes)
+	if len(m.sides) != 0 {
+		t.Errorf("side turns left: %v", m.sides)
 	}
 	mu.Unlock()
 	if sum := m.usage.Agent(crew.uid); sum.Turns != 1 || sum.Tokens.Total() != 12 {

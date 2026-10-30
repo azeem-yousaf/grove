@@ -60,6 +60,13 @@ func fakeClaude() {
 		b, _ := json.Marshal(s)
 		os.WriteFile(sessionFile, b, 0o644)
 	}
+	// A fork gets a session ID of its own.
+	say := func(line string) {
+		if slices.Contains(os.Args, "--fork-session") {
+			line = strings.ReplaceAll(line, `"s-123"`, `"s-fork"`)
+		}
+		fmt.Println(line)
+	}
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(nil, 1<<20)
 	n := 0 // turns this process has had
@@ -97,11 +104,11 @@ func fakeClaude() {
 				continue
 			}
 			if strings.HasSuffix(msg, "quiet") {
-				fmt.Println(`{"type":"system","subtype":"init","session_id":"s-123"}`)
-				fmt.Println(`{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s-123"}`)
+				say(`{"type":"system","subtype":"init","session_id":"s-123"}`)
+				say(`{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s-123"}`)
 				continue
 			}
-			fmt.Println(fakeTurn(n, &s))
+			say(fakeTurn(n, &s))
 			save()
 		case in.Type == "control_request" && in.Request.Subtype == "interrupt":
 			fmt.Fprintln(rec, "interrupt")
@@ -614,6 +621,67 @@ func TestClaudeKeepsItsProcess(t *testing.T) {
 	evs = turn(t, r3, ctx, req)
 	if done := evs[len(evs)-1]; done.Tokens != turnTokens(2) || done.TokenStatus != usage.Exact {
 		t.Errorf("turn after that = %+v %v", done.Tokens, done.TokenStatus)
+	}
+}
+
+func TestClaudeForkLeavesKeptProcess(t *testing.T) {
+	bin, dir := fakeAgent(t, "claude")
+	r := NewRunner()
+	defer r.Stop(dir)
+	ctx := context.Background()
+	req := Request{Kind: Claude, Bin: bin, Dir: dir, Message: "hello", ReadOnly: true, Slot: "lead"}
+	evs := turn(t, r, ctx, req)
+	req.Session = evs[len(evs)-1].Session
+
+	// The main session is busy with a long turn.
+	mainCtx, stopMain := context.WithCancel(ctx)
+	busy, mainDone := make(chan struct{}), make(chan []Event)
+	go func() {
+		var evs []Event
+		once := false
+		main := req
+		main.Message = "wait"
+		r.Run(mainCtx, main, func(ev Event) {
+			evs = append(evs, ev)
+			if ev.Kind == EvDelta && !once {
+				once = true
+				close(busy)
+			}
+		})
+		mainDone <- evs
+	}()
+	<-busy
+
+	fork := req
+	fork.Message, fork.Fork = "quick", true
+	evs = turn(t, r, ctx, fork)
+	if done := evs[len(evs)-1]; done.Err != nil || done.Session != "s-fork" {
+		t.Fatalf("fork turn = %+v", done)
+	}
+	rec := record(t)
+	if !strings.Contains(rec, "--resume s-123 --fork-session") {
+		t.Errorf("the fork should resume the session with --fork-session:\n%s", rec)
+	}
+	r.mu.Lock()
+	n := len(r.procs)
+	r.mu.Unlock()
+	if n != 1 {
+		t.Errorf("the fork's process should end with its turn; %d kept", n)
+	}
+
+	// The main turn was never disturbed, and its process is kept.
+	stopMain()
+	evs = <-mainDone
+	if done := evs[len(evs)-1]; done.Session != "s-123" {
+		t.Errorf("main turn = %+v", done)
+	}
+	req.Message = "again"
+	evs = turn(t, r, ctx, req)
+	if done := evs[len(evs)-1]; done.Err != nil || done.Session != "s-123" {
+		t.Fatalf("main turn after the fork = %+v", done)
+	}
+	if rec := record(t); strings.Count(rec, "start ") != 2 {
+		t.Errorf("want the kept process and one fork:\n%s", rec)
 	}
 }
 

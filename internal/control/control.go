@@ -36,6 +36,7 @@ type Plan struct {
 	Groups []string `json:"groups,omitempty"` // its group chats' IDs
 	Tasks  []Task   `json:"tasks"`
 	Merge  string   `json:"merge,omitempty"` // what its merge worktree holds, once there is one
+	Test   string   `json:"test,omitempty"`  // its test command, which test runs when given none
 }
 
 // Task is one task of a plan and what its agent is doing.
@@ -49,6 +50,7 @@ type Task struct {
 	Busy      bool       `json:"busy,omitempty"` // its agent is in a turn
 	LastReply string     `json:"last_reply,omitempty"`
 	Approvals []Approval `json:"approvals,omitempty"` // commands it waits to run
+	Testing   string     `json:"testing,omitempty"`   // the command grove is running in its worktree
 }
 
 // Approval is a command a task's agent was refused and waits on.
@@ -74,6 +76,7 @@ const (
 	Post    = "post"    // Text goes to a chat of Plan: Group ("" for the plan chat), To one member or everyone
 	Merge   = "merge"   // merge Plan's finished tasks into its own worktree
 	Close   = "close"   // end Plan in review, Note why
+	Test    = "test"    // run Text, or the plan's test command, in Task's worktree in the background
 )
 
 // Order is something the planner asked grove to do.
@@ -446,12 +449,18 @@ func (s State) FindPlan(name string) (Plan, bool) {
 
 // Find looks a task up by its branch.
 func (s State) Find(branch string) (Task, bool) {
+	_, t, ok := s.FindTask(branch)
+	return t, ok
+}
+
+// FindTask looks a task up by its branch, with its plan.
+func (s State) FindTask(branch string) (Plan, Task, bool) {
 	for _, p := range s.Plans {
 		for _, t := range p.Tasks {
 			if strings.EqualFold(t.Branch, branch) {
-				return t, true
+				return p, t, true
 			}
 		}
 	}
-	return Task{}, false
+	return Plan{}, Task{}, false
 }

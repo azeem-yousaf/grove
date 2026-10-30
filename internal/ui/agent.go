@@ -63,7 +63,6 @@ type session struct {
 	stopping   bool // the user stopped the running turn
 	seen       bool // the user has looked since it last finished
 	planner    bool // the planner: reads the repository, never edits it
-	lane       bool // a planner's approval lane (lane.go), in m.lanes, never saved
 
 	// A group's planner (crew.go) is a planner in charge of one group of a
 	// plan the planner watches; the lead planner has neither.
@@ -97,6 +96,11 @@ type session struct {
 	// Claude's figures for its whole session so far, passed back each turn
 	// so the next turn's own share can be worked out.
 	sessionTotal usage.Tokens
+
+	// A planner's side turn (side.go) answers urgent items in a fork of its
+	// owner's conversation while the owner is busy.
+	side   bool
+	sideOf *session // its owner, once it has run
 
 	rendered chatCache // entries as the chat pane last drew them
 }
@@ -163,7 +167,6 @@ type (
 		path       string
 		planner    bool   // for the planner rather than path's worktree agent
 		crew       string // for that group's planner (crewKey), with planner
-		lane       bool   // for that planner's approval lane (lane.go)
 		ev         agent.Event
 		checkpoint string
 		turnTree   string // taken before a later turn, for "since the last turn"
@@ -294,7 +297,7 @@ func (m *Model) sessionFor(path string) *session {
 }
 
 // allSessions is every agent: the worktree agents, the planners and their
-// approval lanes.
+// side turns.
 func (m *Model) allSessions() []*session {
 	out := make([]*session, 0, len(m.sessions)+1)
 	for _, s := range m.sessions {
@@ -306,7 +309,7 @@ func (m *Model) allSessions() []*session {
 	for _, s := range m.crews {
 		out = append(out, s)
 	}
-	for _, s := range m.lanes {
+	for _, s := range m.sides {
 		out = append(out, s)
 	}
 	return out
@@ -728,14 +731,14 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	}
 	req.Context, req.Message = s.takeNotes(req.Context, req.Message)
 	// The planner changes nothing, so there's nothing to undo.
-	path, planner, crew, lane, needCheckpoint := s.path, s.planner, s.crewKey(), s.lane, s.checkpoint == "" && !s.planner
+	path, planner, crew, needCheckpoint := s.path, s.planner, s.slot(), s.checkpoint == "" && !s.planner
 	run := m.runAgent
 	go func() {
 		defer close(ch)
 		if checkGuard != nil {
 			if g, ok := checkGuard().(guardVerifiedMsg); ok {
 				ack := make(chan struct{})
-				ch <- agentMsg{path: path, planner: planner, crew: crew, lane: lane, guard: &g, ack: ack}
+				ch <- agentMsg{path: path, planner: planner, crew: crew, guard: &g, ack: ack}
 				select {
 				case <-ack:
 				case <-time.After(10 * time.Second):
@@ -751,7 +754,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				// still works this session if pinning fails.
 				_ = git.KeepCheckpoint(ctx, path, path, tree)
 			}
-			ch <- agentMsg{path: path, planner: planner, crew: crew, lane: lane, checkpoint: tree, err: err}
+			ch <- agentMsg{path: path, planner: planner, crew: crew, checkpoint: tree, err: err}
 		case !planner:
 			// Cheap: it starts from the real index, so only what changed
 			// is hashed. Without it, v can only show all the changes.
@@ -759,7 +762,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				ch <- agentMsg{path: path, turnTree: tree}
 			}
 		}
-		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, crew: crew, lane: lane, ev: ev} })
+		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, crew: crew, ev: ev} })
 	}()
 	return tea.Batch(listen(ch), m.startAnimating(), registered, policyErr)
 }
@@ -779,6 +782,7 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,
 		Slot:     s.slot(),
+		Fork:     s.side,
 		Commands: s.planner && m.orchestrating(),
 		Tools:    append(m.groupTools(s), m.controlTools(s)...),
 		ReadDirs: m.groupmateDirs(s),
@@ -820,8 +824,8 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 		if msg.crew != "" {
 			s = m.crews[msg.crew]
 		}
-		if msg.lane {
-			s = m.lanes[msg.crew]
+		if side := m.sides[msg.crew]; side != nil {
+			s = side
 		}
 	}
 	if s == nil {
@@ -894,6 +898,9 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	recordErr := m.endTurn(s, ev)
 	reply := s.lastReply.String()
 	s.history = append(s.history, agent.Turn{User: s.lastUser, Agent: reply})
+	if s.side {
+		return m.onSideDone(s, ev, reply, recordErr)
+	}
 
 	var needsYou []pendingAction // only the user may answer these
 	for _, d := range ev.Denied {
@@ -948,12 +955,6 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	s.seen = viewing
 	cmds := []tea.Cmd{m.startScan(), recordErr, gitCmd, m.checkWatches(s)}
 	switch {
-	case s.lane:
-		// Its owner's chat gets a line about it; it has no chat of its own.
-		cmds = append(cmds, m.applyDecisions(s, reply), m.laneDone(s, ev.Err == nil), m.plannerTurnEnded(s, ev, stopped), m.orchestrate())
-		if ev.Err == nil {
-			return tea.Batch(cmds...)
-		}
 	case s.crewGroup != "":
 		// What the user typed meanwhile goes before grove's next request.
 		cmds = append(cmds, m.applyDecisions(s, reply), m.plannerTurnEnded(s, ev, stopped), m.sendQueued(s), m.orchestrate())
