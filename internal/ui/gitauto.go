@@ -468,7 +468,10 @@ func plannerGitRules() string {
 		"approve what the task needs (including git that grove couldn't check on its own, once you've read it and it is safe), deny the rest with what to do instead. " +
 		"Only destructive git (deleting branches, worktrees or the repository, force pushes, discarding work) and changes to protected branches " +
 		"(main, master, the default branch and the configured ones) are the user's; grove won't let you approve those. " +
-		"The work reaches the base branch through the plan's pull request, so no agent needs to touch a protected branch.\n"
+		"The work reaches the base branch through the plan's pull request, so no agent needs to touch a protected branch.\n" +
+		"- While you watch a plan, your turn holds up everything else you are asked, so don't run anything long in it: when a task finishes grove runs the plan's tests in its worktree " +
+		"and tells you the result with the news, and grove's test tool runs any other long command (a build, a suite) in a task's worktree in the background " +
+		"and sends you the result when it ends.\n"
 }
 
 // policyOf is a gitpolicy decision as an approval's policy: only the user

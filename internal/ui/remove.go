@@ -106,9 +106,10 @@ func (m *Model) runRemoval() tea.Cmd {
 			s.cancel()
 		}
 	}
-	stop := m.stopAgent
+	stop, check := m.stopAgent, m.stopCheck(r.st.Path)
 	run := func() tea.Msg {
 		stop(dir)
+		check()
 		ctx, cancel := context.WithTimeout(m.ctx, 5*time.Minute)
 		defer cancel()
 		res, err := git.RemoveWorktree(ctx, repo, r.st.Worktree, opt)
