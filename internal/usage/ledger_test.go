@@ -2,11 +2,16 @@ package usage
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/azeem-yousaf/grove/internal/fslock"
 )
 
 var t0 = time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
@@ -373,6 +378,66 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A write waiting for another process's lock must not hold up queries,
+// and when it gets the lock it still sees that process's lines first.
+func TestWriteWaitDoesNotBlockReads(t *testing.T) {
+	dir := t.TempDir()
+	l := open(t, dir)
+	add(t, l, exact("a/1", "a", 10, 1))
+	unlock, err := fslock.Lock(filepath.Join(dir, "lock"))
+	must(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := l.Add(exact("b/1", "b", 5, 1))
+		done <- err
+	}()
+	// Wait until the writer is in write, waiting for the file lock.
+	for l.wmu.TryLock() {
+		l.wmu.Unlock()
+		runtime.Gosched()
+	}
+	got := make(chan Sum, 1)
+	go func() { got <- l.Total() }()
+	select {
+	case s := <-got:
+		if s.Turns != 1 {
+			t.Errorf("total while waiting = %+v", s)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Total waited for the file lock")
+	}
+	// Another process writes the same turn while we wait: the waiting
+	// writer catches up and doesn't add it again.
+	appendRaw(t, dir, `{"v":1,"turn":{"id":"b/1","agent":"b","tokens":{"input":5,"output":1},"status":"exact"}}`+"\n")
+	unlock()
+	must(t, <-done)
+	if s := l.Total(); s.Turns != 2 {
+		t.Errorf("total = %+v, want 2 turns", s)
+	}
+	if s := open(t, dir).Total(); s.Turns != 2 {
+		t.Errorf("file's total = %+v, want 2 turns", s)
+	}
+}
+
+// Writers in one process take turns.
+func TestConcurrentWrites(t *testing.T) {
+	dir := t.TempDir()
+	l := open(t, dir)
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Go(func() {
+			if _, err := l.Add(exact(fmt.Sprintf("a/%d", i%10), "a", 1, 1)); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	fresh := open(t, dir)
+	if s := fresh.Total(); s.Turns != 10 || fresh.Skipped() != 0 {
+		t.Errorf("total = %+v, skipped %d", s, fresh.Skipped())
 	}
 }
 

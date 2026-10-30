@@ -188,6 +188,10 @@ type planTotals struct {
 type Ledger struct {
 	dir string
 
+	// wmu serialises this process's writers, which wait for the file lock
+	// without holding mu, so readers never wait for another grove.
+	wmu sync.Mutex
+
 	mu      sync.Mutex
 	offset  int64 // bytes of the file read, always at a line start
 	skipped int
@@ -416,9 +420,11 @@ func (l *Ledger) applyAssign(a Assignment) {
 
 // write appends one record under the lock, after catching up with other
 // writers. check, called once caught up, says whether to write at all.
+// Waiting for the lock holds only wmu; mu is held while reading, checking
+// and appending, so queries never wait for another process.
 func (l *Ledger) write(r record, check func() bool) (bool, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.wmu.Lock()
+	defer l.wmu.Unlock()
 	if err := os.MkdirAll(l.dir, 0o755); err != nil {
 		return false, err
 	}
@@ -430,6 +436,8 @@ func (l *Ledger) write(r record, check func() bool) (bool, error) {
 		return false, err
 	}
 	defer unlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if err := l.readNew(); err != nil {
 		return false, err
 	}
