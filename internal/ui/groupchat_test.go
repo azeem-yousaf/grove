@@ -391,7 +391,9 @@ func TestWakeLimitGoesToTheWatchingPlanner(t *testing.T) {
 	m.termFocused = false
 	m.cfg.Planner.MaxWakeups = 1
 	log, _ := m.groupLog(p, "g")
-	if err := log.Post(group.Message{From: "feature/a", Text: "Which port?"}); err != nil {
+	// Addressed to b, so it is woken again after its first wake marks its
+	// task finished.
+	if err := log.Post(group.Message{From: "feature/a", To: "feature/b", Text: "Which port?"}); err != nil {
 		t.Fatal(err)
 	}
 	poll(t, m, fake)
