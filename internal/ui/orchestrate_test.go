@@ -163,7 +163,7 @@ func TestFinishedAgainNeedsANewCommit(t *testing.T) {
 	}
 
 	// A new commit is news.
-	gitOut(t, s.path,"commit", "--allow-empty", "-qm", "more")
+	gitOut(t, s.path, "commit", "--allow-empty", "-qm", "more")
 	finish()
 	if checks() != 2 {
 		t.Fatalf("checked %d times after a new commit", checks())
