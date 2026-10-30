@@ -63,7 +63,7 @@ func TestPlanChatThroughTheControlTools(t *testing.T) {
 	if err != nil || len(st.Plans) != 1 || st.Plans[0].ID != "p1" || len(st.Plans[0].Groups) != 1 {
 		t.Fatalf("state = %+v, %v", st, err)
 	}
-	if err := control.Queue(dir, control.Order{Action: control.Post, Plan: "p1", Text: "Merged; have a look."}); err != nil {
+	if err := control.Queue(dir, control.Order{By: control.Lead, Action: control.Post, Plan: "p1", Text: "Merged; have a look."}); err != nil {
 		t.Fatal(err)
 	}
 	m.pollingControl = false

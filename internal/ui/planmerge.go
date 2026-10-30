@@ -486,7 +486,7 @@ func (m *Model) closePlan(p *plan.Plan, note string) tea.Cmd {
 		text += " Its work is on " + p.Merge.Branch + ", in " + p.Merge.Path + "; ship it from there (s)."
 	}
 	m.plannerNote(roleNote, text)
-	return tea.Batch(m.savePlan(p), m.grovePost(p, text), m.notify("✦ "+p.Title+" is closed", toastOK))
+	return tea.Batch(m.savePlan(p), m.grovePost(p, text), m.notify("✦ "+p.Title+" is closed", toastOK), m.dropCrews(p.ID))
 }
 
 // planTask finds a plan's task by branch.

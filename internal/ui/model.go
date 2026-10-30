@@ -177,6 +177,7 @@ type Model struct {
 	lastPRPoll     time.Time
 	crews          map[string]*session // each group's planner, by crewKey (crew.go)
 	chatCrew       string              // with chatPlanner: the chat shows that group's planner
+	plansLoaded    bool                // the saved plans are loaded (pruneCrews)
 	reviewPolling  bool                // a watched plan's pull request is being read
 	lastReviewPoll time.Time           // when pollReviews last ran
 	reviewErr      string              // the last error reading one, shown once

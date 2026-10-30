@@ -30,7 +30,7 @@ func TestWatchingPlannerGetsCommandsAndTools(t *testing.T) {
 	}
 	p.Orchestrated = true
 	req := m.agentRequest(m.planner)
-	if !req.ReadOnly || !req.Commands || len(req.Tools) != 1 || strings.Join(req.Tools[0].Args, " ") != "mcp-plan --dir "+control.Dir(m.store.Dir()) {
+	if !req.ReadOnly || !req.Commands || len(req.Tools) != 1 || strings.Join(req.Tools[0].Args, " ") != "mcp-plan --dir "+control.Dir(m.store.Dir())+" --as lead" {
 		t.Fatalf("while it watches a running plan the planner may run commands and has its tools: %+v", req)
 	}
 	if a := m.agentRequest(m.sessionFor(m.taskPath(p, "feature/a"))); a.Commands {
@@ -70,10 +70,10 @@ func TestControlOrdersAreCarriedOut(t *testing.T) {
 	}
 
 	for _, o := range []control.Order{
-		{Action: control.Approve, Task: "feature/a", Text: "npm test"},
-		{Action: control.Deny, Task: "feature/a", Text: "git push", Note: "the user pushes"},
-		{Action: control.Message, Task: "feature/b", Text: "Add a test too."},
-		{Action: control.Fail, Task: "feature/c", Note: "not needed"},
+		{By: control.Lead, Action: control.Approve, Task: "feature/a", Text: "npm test"},
+		{By: control.Lead, Action: control.Deny, Task: "feature/a", Text: "git push", Note: "the user pushes"},
+		{By: control.Lead, Action: control.Message, Task: "feature/b", Text: "Add a test too."},
+		{By: control.Lead, Action: control.Fail, Task: "feature/c", Note: "not needed"},
 	} {
 		if err := control.Queue(dir, o); err != nil {
 			t.Fatal(err)

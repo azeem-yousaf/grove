@@ -200,10 +200,11 @@ func (m *Model) watchedBy(path string) bool {
 	return t != nil && watched(p)
 }
 
-// watchedTask finds a task of a watched plan by branch, and its agent.
+// watchedTask finds a task of a watched plan that isn't done by branch,
+// and its agent. A closed plan's branch name may be reused by a later one.
 func (m *Model) watchedTask(branch string) (*plan.Plan, *plan.Task, *session) {
 	for _, p := range m.plans {
-		if !watched(p) {
+		if !watchedLive(p) {
 			continue
 		}
 		for i := range p.Tasks {

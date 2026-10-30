@@ -145,7 +145,7 @@ func TestPrefixApproval(t *testing.T) {
 	s.allow = nil
 	vet := m.newApproval(s, "Bash", "go vet ./internal/...")
 	s.pending = []pendingAction{vet}
-	m.onControl(controlMsg{orders: []control.Order{{ID: "o-1", Action: control.Approve, Task: "feature/a", Item: vet.id, Text: vet.text, Prefix: true}}})
+	m.onControl(controlMsg{orders: []control.Order{{By: control.Lead, ID: "o-1", Action: control.Approve, Task: "feature/a", Item: vet.id, Text: vet.text, Prefix: true}}})
 	if !slices.Equal(s.allow, []string{"Bash(go vet:*)"}) {
 		t.Errorf("allow after the control order = %q", s.allow)
 	}
