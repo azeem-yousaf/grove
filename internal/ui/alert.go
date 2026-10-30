@@ -41,7 +41,7 @@ func (m *Model) alert(text string) tea.Cmd {
 		return nil
 	}
 	m.alertWaiting = true
-	return tea.Tick(alertDelay, func(time.Time) tea.Msg { return alertFlushMsg{} })
+	return tick(alertDelay, func(time.Time) tea.Msg { return alertFlushMsg{} })
 }
 
 // flushAlerts sends what alert queued, unless the user has come back.

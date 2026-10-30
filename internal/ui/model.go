@@ -344,8 +344,12 @@ func (m *Model) detectBase() tea.Cmd {
 	}
 }
 
+// tick is tea.Tick for the clock, toasts and alerts. Tests replace it so
+// commands that only wait for a timer return at once.
+var tick = tea.Tick
+
 func clockTick() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return clockMsg(t) })
+	return tick(time.Second, func(t time.Time) tea.Msg { return clockMsg(t) })
 }
 
 func (m *Model) startAnimating() tea.Cmd {
@@ -400,7 +404,7 @@ func (m *Model) notify(text string, kind toastKind) tea.Cmd {
 	if kind == toastErr {
 		d = 6 * time.Second
 	}
-	return tea.Tick(d, func(time.Time) tea.Msg { return toastClearMsg{id} })
+	return tick(d, func(time.Time) tea.Msg { return toastClearMsg{id} })
 }
 
 // Update handles every message.

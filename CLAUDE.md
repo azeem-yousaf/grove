@@ -106,7 +106,7 @@ Opt-in tests, skipped unless their environment variable is set:
 - Releases (`.github/workflows/release.yml`) follow a CI run that passed for a push to master: `.github/scripts/next-release.sh <commit> [notes]` picks the next tag (from v0.1.0; patch by default, `[minor]`, `[major]`/`BREAKING CHANGE` in commit messages) and writes notes from the commit subjects, and `gh release create` tags that commit. Run the script locally to preview the next release.
 - CI (`.github/workflows/ci.yml`) runs build, vet and `go test ./... -count=1` on Windows, Linux and macOS for every push to master and every pull request into it, plus a gofmt check on Linux. Keep tests passing on Windows: paths, line endings and what counts as an absolute path differ there.
 
-- UI tests drive the model directly with no terminal: `fakeModel` builds a hand-made `Snapshot`, `press()` sends keys, and `plain()` renders with ANSI stripped. `TestRenderFitsScreen` checks every screen at several sizes; add new overlays or screens to it.
+- UI tests drive the model directly with no terminal: `fakeModel` builds a hand-made `Snapshot`, `press()` sends keys, and `plain()` renders with ANSI stripped. The clock, toast and alert timers go through `tick`, which tests replace with one that returns at once; `pump` returns as soon as every command it started has returned. Don't make tests wait on real timers: the package must stay well inside `go test`'s 10-minute limit on Windows. `TestRenderFitsScreen` checks every screen at several sizes; add new overlays or screens to it.
 - Git tests build real temporary repositories (`testRepo`: main plus `feature/a` and `feature/b` worktrees that both touch `shared.txt`) and skip if git is missing.
 
 ## Gotchas

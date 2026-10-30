@@ -47,19 +47,23 @@ func (f *fakeAgent) run(_ context.Context, req agent.Request, emit func(agent.Ev
 func pump(t *testing.T, m *Model, cmd tea.Cmd) {
 	t.Helper()
 	// Every command runs concurrently; ticks and toasts simply never matter.
-	// The loop ends once nothing relevant has arrived for a while.
+	// The loop ends once every command has returned, or once nothing
+	// relevant has arrived for a while (a long tick still running).
 	results := make(chan tea.Msg, 256)
+	running := 0
 	start := func(c tea.Cmd) {
 		if c != nil {
+			running++
 			go func() { results <- c() }()
 		}
 	}
 	start(cmd)
 	idle := time.NewTimer(3 * time.Second)
 	deadline := time.After(30 * time.Second)
-	for {
+	for running > 0 {
 		select {
 		case msg := <-results:
+			running--
 			switch msg := msg.(type) {
 			case tea.BatchMsg:
 				for _, c := range msg {

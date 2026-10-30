@@ -629,6 +629,15 @@ func TestCreateEndToEnd(t *testing.T) {
 
 // runCmds runs a command and any batch it returns, collecting the messages.
 // Ticks are skipped so the test doesn't wait on animations.
+// No test waits for the clock, a toast to clear or an alert to flush, so
+// those timers return nothing at once instead of holding up runCmds, pump
+// and the driver for seconds.
+func init() {
+	tick = func(time.Duration, func(time.Time) tea.Msg) tea.Cmd {
+		return func() tea.Msg { return nil }
+	}
+}
+
 func runCmds(cmd tea.Cmd) []tea.Msg {
 	if cmd == nil {
 		return nil
