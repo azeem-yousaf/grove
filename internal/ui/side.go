@@ -42,7 +42,8 @@ func (s *session) slot() string {
 // sideAsk ends a side turn's request.
 const sideAsk = "This is a side turn: a fork of your conversation, made because your main turn is still busy. " +
 	"Answer only these, quickly. Don't run long commands such as test suites or builds, and don't message agents or post in chats " +
-	"unless an answer needs it. Merging and closing wait for your main turn, which hears what you decided here."
+	"unless an answer needs it. grove's tools aren't available here: answer in the grove-orchestrate block. " +
+	"Merging and closing wait for your main turn, which hears what you decided here."
 
 // sideItem reports whether it may be answered in a side turn.
 func sideItem(it orchItem) bool {
@@ -77,8 +78,14 @@ func (m *Model) sideTurn(owner *session, items []orchItem) (tea.Cmd, []orchItem)
 	side.crewPlan, side.crewGroup = owner.crewPlan, owner.crewGroup
 	side.allow, side.history, side.entries = slices.Clone(owner.allow), slices.Clone(owner.history), nil
 	side.setSessionID(owner.id)
-	// The fork has what its owner's conversation had.
-	side.sessionTotal, side.rulesSent = owner.sessionTotal, owner.rulesSent
+	side.sessionTotal = owner.sessionTotal
+	// The fork has the rules its owner's conversation has, so it gets the
+	// short line whenever its owner would. Its rules differ only by the
+	// control tools, which sideAsk says it doesn't have.
+	side.rulesSent = ""
+	if _, full := m.rulesFor(owner); !full {
+		side.rulesSent = rulesKey(m.orchRules(side))
+	}
 	st.turns++
 
 	own := m.stateOf(side)
@@ -87,10 +94,8 @@ func (m *Model) sideTurn(owner *session, items []orchItem) (tea.Cmd, []orchItem)
 	for _, it := range take {
 		own.asked = append(own.asked, it.ids...)
 	}
-	side.nextPlan, side.nextKind = take[0].plan, usage.KindDecide
-	rules, _ := m.rulesFor(side)
-	cmd := m.send(side, text+"\n"+sideAsk+"\n")
-	side.rulesSent = rulesKey(rules)
+	side.nextPlan = take[0].plan
+	cmd := m.sendAs(side, usage.KindDecide, text+"\n"+sideAsk+"\n")
 	noteTo(owner, roleNote, "While you work, a side turn decides: "+strings.TrimPrefix(summary, "Asked to decide: "))
 	return cmd, rest
 }
