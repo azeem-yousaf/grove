@@ -409,7 +409,7 @@ func TestWakeLimitGoesToTheWatchingPlanner(t *testing.T) {
 		t.Errorf("the user shouldn't be asked: %q", m.alerts)
 	}
 	// The planner's post lets grove wake them again.
-	pump(t, m, m.plannerPost(p.ID, "g", "", "Use 8080."))
+	pump(t, m, m.plannerPost(group.PlannerOf("g"), p.ID, "g", "", "Use 8080."))
 	if g := m.groups[log.Dir]; g.paused || g.wakeups != 0 {
 		t.Errorf("a planner post should reset wake-ups: %+v", g)
 	}

@@ -342,9 +342,11 @@ func (m *Model) queueGroups() {
 				continue
 			}
 			it := orchItem{kind: orchGroup, plan: p.ID, group: grp.ID}
+			owner := group.PlannerOf(chatOwner(grp.ID))
 			for _, msg := range g.msgs[seen:] {
-				// The planner hears about merges and tests directly.
-				if msg.From == group.Planner || grp.ID == plan.ChatID && msg.From == group.Grove {
+				// The owner doesn't hear its own posts, and the lead hears
+				// about merges and tests directly.
+				if msg.From == owner || grp.ID == plan.ChatID && msg.From == group.Grove {
 					continue
 				}
 				to := ""
@@ -357,8 +359,12 @@ func (m *Model) queueGroups() {
 					// The user talks to the planner in charge of that chat,
 					// and waits for its answer.
 					it.urgent, it.now = true, true
+				case group.IsPlanner(msg.From), group.IsPlanner(msg.To), msg.To == group.User:
+					// Another planner, or an agent asking for a decision: the
+					// planner in charge answers for the user.
+					it.urgent = true
 				default:
-					it.urgent = it.urgent || msg.To == "" && msg.From != group.User
+					it.urgent = it.urgent || msg.To == ""
 				}
 			}
 			if len(it.lines) > 0 {
@@ -682,6 +688,8 @@ func (m *Model) orchRules(s *session) string {
 		"When an agent is struggling (errors, failing builds or tests, missing tools or dependencies, going round in circles), take it on: look at its worktree, " +
 		"run the commands it needs there yourself, and tell it exactly what to do next. Don't edit files yourself; the agents do. " +
 		"Post in a group chat to settle anything the agents are stuck on or disagree about. " +
+		"The lead planner posts as \"planner\" and each group's planner as \"planner:<group id>\"; planners hear each other's posts, " +
+		"so a group's planner reaches the lead in the plan chat and the lead reaches a group's planner in that group's chat. " +
 		"Answer the user in the plan chat (group \"plan\"), not in your reply: they read the plan chat. Keep messages short.\n")
 	return b.String()
 }
@@ -904,7 +912,7 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 	}
 	for _, p := range d.Post {
 		o := outcome{order: p.order, what: "post in " + cmp.Or(p.Group, plan.ChatID), result: control.Applied}
-		if cmd := m.plannerPost(p.Plan, p.Group, p.To, p.Message); cmd != nil {
+		if cmd := m.plannerPost(plannerName(by), p.Plan, p.Group, p.To, p.Message); cmd != nil {
 			cmds = append(cmds, cmd)
 		} else {
 			o.result, o.detail = control.NotFound, "no watched plan has that chat, or the message is empty"
@@ -968,10 +976,10 @@ func replyKind(p *plan.Plan) usage.Kind {
 	return usage.KindWork
 }
 
-// plannerPost posts the planner's message in a watched plan's chat. Every
-// plan has a plan chat, so without planID it goes to the newest one still
-// going.
-func (m *Model) plannerPost(planID, groupID, to, text string) tea.Cmd {
+// plannerPost posts a planner's message in a watched plan's chat, from
+// group.Planner (the lead) or "planner:<group>" (plannerName). Every plan
+// has a plan chat, so without planID it goes to the newest one still going.
+func (m *Model) plannerPost(from, planID, groupID, to, text string) tea.Cmd {
 	text = strings.TrimSpace(text)
 	if groupID == "" {
 		groupID = plan.ChatID
@@ -991,13 +999,13 @@ func (m *Model) plannerPost(planID, groupID, to, text string) tea.Cmd {
 		if !ok {
 			return nil
 		}
-		if !slices.ContainsFunc(p.ChatMembers(groupID), func(t *plan.Task) bool { return t.Branch == to }) {
+		if to != group.User && !group.IsPlanner(to) && !slices.ContainsFunc(p.ChatMembers(groupID), func(t *plan.Task) bool { return t.Branch == to }) {
 			to = ""
 		}
 		if g := m.groups[log.Dir]; g != nil {
 			g.wakeups, g.paused = 0, false
 		}
-		msg := group.Message{From: group.Planner, To: to, Text: text}
+		msg := group.Message{From: from, To: to, Text: text}
 		return func() tea.Msg {
 			if err := log.Post(msg); err != nil {
 				return actionMsg{err: fmt.Errorf("couldn't post the planner's message: %w", err)}

@@ -122,6 +122,24 @@ func (m *Model) groupTools(s *session) []agent.ToolServer {
 	return append(out, server("plan", plan.ChatID)...)
 }
 
+// chatOwner is the group whose planner owns a chat: "" (the lead) for the
+// plan chat.
+func chatOwner(groupID string) string {
+	if groupID == plan.ChatID {
+		return ""
+	}
+	return groupID
+}
+
+// plannerName is who planner s posts as: group.Planner for the lead (or
+// nil), "planner:<group>" for a group's planner.
+func plannerName(s *session) string {
+	if s == nil {
+		return group.Planner
+	}
+	return group.PlannerOf(s.crewGroup)
+}
+
 // groupmateDirs are the worktrees of s's groupmates that exist, which its
 // agent may read but not change.
 func (m *Model) groupmateDirs(s *session) []string {
@@ -141,6 +159,9 @@ func (m *Model) groupmateDirs(s *session) []string {
 // groupInfo is who is in a chat, for the members tool.
 func groupInfo(p *plan.Plan, g plan.Group) group.Info {
 	info := group.Info{Plan: p.Title, Name: g.Name}
+	if watched(p) {
+		info.Planner = group.PlannerOf(chatOwner(g.ID))
+	}
 	for _, t := range p.ChatMembers(g.ID) {
 		info.Members = append(info.Members, group.Member{Name: t.Branch, Task: t.Title, Brief: t.Brief, Path: t.Path, Status: string(t.Status)})
 	}
@@ -200,8 +221,8 @@ func (m *Model) groupContext(p *plan.Plan, t *plan.Task) string {
 		"Keep messages short and specific. The user can read and post in the chat too; their name is \"you\". " +
 		"grove itself posts as \"grove\", for example when your worktree starts conflicting with another.\n")
 	if watched(p) {
-		b.WriteString("The planner is watching this plan for the user and reads the chat; it posts as \"planner\". " +
-			"Post to everyone when you need a decision from it.\n")
+		fmt.Fprintf(&b, "Your group's planner is in charge of it for the user and reads the chat; it posts as %q (the lead planner as %q). "+
+			"Post with `to` \"planner\" when you need a decision from it, or to everyone if the group needs to hear it too.\n", group.PlannerOf(g.ID), group.Planner)
 	}
 	return b.String()
 }
@@ -606,8 +627,10 @@ func (m *Model) groupMessageLines(gc *groupChat, msgs []group.Message, inner int
 			name = st.accent.Bold(true).Render("you")
 		case group.Grove:
 			name = st.warn.Bold(true).Render("grove")
-		case group.Planner:
-			name = st.accent.Render("planner")
+		default:
+			if group.IsPlanner(msg.From) {
+				name = st.accent.Render(msg.From)
+			}
 		}
 		head := " " + st.faint.Render(msg.Time.Local().Format("15:04")) + " " + name
 		if msg.To != "" {

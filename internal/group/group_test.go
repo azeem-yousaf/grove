@@ -149,6 +149,26 @@ func TestServe(t *testing.T) {
 	if _, failed := text(ui("tools/call", map[string]any{"name": "post", "arguments": map[string]any{"text": "hi", "to": "feature/nobody"}})); !failed {
 		t.Error("posting to a stranger should fail")
 	}
+	if _, failed := text(ui("tools/call", map[string]any{"name": "post", "arguments": map[string]any{"text": "hi", "to": Planner}})); !failed {
+		t.Error("no planner watches this plan, so it can't be addressed")
+	}
+
+	// Once the planner watches it, agents can address it.
+	if err := l.WriteInfo(Info{Plan: "Guest checkout", Name: "Checkout", Planner: PlannerOf("g"), Members: []Member{
+		{Name: "feature/api", Task: "Guest API", Path: "/src/shop-api"},
+		{Name: "feature/ui", Task: "Guest page"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := text(ui("tools/call", map[string]any{"name": "members", "arguments": map[string]any{}})); !strings.Contains(got, "posts as planner:g; post with to \"planner\"") {
+		t.Errorf("members = %q", got)
+	}
+	if got, failed := text(ui("tools/call", map[string]any{"name": "post", "arguments": map[string]any{"text": "Which port?", "to": Planner}})); failed {
+		t.Fatalf("post to the planner: %s", got)
+	}
+	if msgs, _ := l.All(); len(msgs) != 1 || msgs[0].To != Planner {
+		t.Fatalf("messages = %+v", msgs)
+	}
 	if got, failed := text(ui("tools/call", map[string]any{"name": "post", "arguments": map[string]any{"text": "What does POST /guest return?", "to": "feature/api"}})); failed {
 		t.Fatalf("post: %s", got)
 	}

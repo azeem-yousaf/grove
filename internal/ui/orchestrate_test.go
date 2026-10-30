@@ -296,10 +296,10 @@ func TestPlannerFollowsGroupChat(t *testing.T) {
 		t.Fatalf("planner requests: %+v", r)
 	}
 	msgs, _ := log.All()
-	if last := msgs[len(msgs)-1]; last.From != group.Planner || last.To != "feature/b" || last.Text != "Use v2 of the API." {
+	if last := msgs[len(msgs)-1]; last.From != group.PlannerOf("g") || last.To != "feature/b" || last.Text != "Use v2 of the API." {
 		t.Errorf("last message = %+v", last)
 	}
-	if ctx := m.agentContext(m.sessionFor(m.taskPath(p, "feature/a"))); !strings.Contains(ctx, "The planner is watching this plan") {
+	if ctx := m.agentContext(m.sessionFor(m.taskPath(p, "feature/a"))); !strings.Contains(ctx, "Your group's planner is in charge of it") {
 		t.Error("grouped agents should know the planner reads their chat")
 	}
 }

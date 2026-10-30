@@ -605,6 +605,10 @@ func (m *Model) taskContext(s *session) string {
 	if m.groveBin != "" {
 		b.WriteString("\nThe plan also has a plan chat for the user, the planner and every task's agent, through the plan tools (`members`, `post`, `read`). " +
 			"The user gives feedback on the whole plan there. Read it when you are woken for a message in it; post there only for what the user or the whole plan needs to know.\n")
+		if watched(p) {
+			b.WriteString("The planner is in charge of this plan for the user. To ask it for a decision, post with `to` \"planner\"; " +
+				"in your group chat that reaches your group's planner, in the plan chat the lead planner.\n")
+		}
 	}
 	b.WriteString("\nWhen the task is done, say so plainly and list what you changed. If you need a decision from the user, end your reply with the question.\n")
 	return b.String()
