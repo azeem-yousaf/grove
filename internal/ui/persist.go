@@ -37,7 +37,8 @@ type savedSession struct {
 	Pending     []savedPending `json:"pending,omitempty"`
 	Approvals   int            `json:"approvals,omitempty"` // approvals so far, for their IDs
 	Answered    []answerRec    `json:"answered,omitempty"`
-	Notes       []string       `json:"notes,omitempty"` // news from grove not yet given to the agent
+	Notes       []string       `json:"notes,omitempty"`  // news from grove not yet given to the agent
+	Queued      []string       `json:"queued,omitempty"` // the user's messages typed while the agent worked
 	Cost        string         `json:"cost,omitempty"`
 	Failed      bool           `json:"failed,omitempty"`
 	Interrupted bool           `json:"interrupted,omitempty"` // saved while the agent was working
@@ -119,7 +120,7 @@ func (s *session) file() string {
 func (s *session) saved() savedSession {
 	out := savedSession{
 		Version: 2, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
-		History: s.history, Checkpoint: s.checkpoint, TurnTree: s.turnTree, Allow: s.allow, Notes: s.notes, Cost: s.cost,
+		History: s.history, Checkpoint: s.checkpoint, TurnTree: s.turnTree, Allow: s.allow, Notes: s.notes, Queued: s.queued, Cost: s.cost,
 		Failed: s.failed, Interrupted: s.running, Planner: s.planner, Approvals: s.seq, Answered: s.answered,
 		CrewPlan: s.crewPlan, CrewGroup: s.crewGroup, RulesSent: s.rulesSent, Finished: s.finishedHead,
 		UID: s.uid, Created: s.created, Turns: s.turns, Drafting: s.drafting,
@@ -156,7 +157,7 @@ func (s *session) saved() savedSession {
 func restore(v savedSession, checkpointOK, turnOK bool) *session {
 	s := &session{
 		kind: v.Kind, path: v.Path, name: v.Name, model: v.Model, id: v.ID,
-		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, cost: v.Cost,
+		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, queued: v.Queued, cost: v.Cost,
 		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner, seq: v.Approvals, answered: v.Answered,
 		crewPlan: v.CrewPlan, crewGroup: v.CrewGroup, rulesSent: v.RulesSent, finishedHead: v.Finished,
 		uid: v.UID, created: v.Created, turns: v.Turns, drafting: v.Drafting,
