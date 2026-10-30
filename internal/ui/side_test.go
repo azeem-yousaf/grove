@@ -84,7 +84,7 @@ func TestNoSideTurnWithoutASession(t *testing.T) {
 		t.Fatalf("side %v, turns %d, queue %+v", side != nil, m.orch.turns, m.orch.queue)
 	}
 	side.running = false
-	m.queueTurn(c)
+	m.queueTurn(c, false)
 	m.orchestrate()
 	if side.turns != 1 || len(m.orch.queue) != 1 {
 		t.Errorf("past the limit: side turns %d, queue %+v", side.turns, m.orch.queue)

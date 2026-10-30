@@ -13,8 +13,8 @@ import (
 
 // When conflict prediction finds that a plan task's worktree has started
 // conflicting with another worktree, grove tells that task's agent: in its
-// group chat, from group.Grove, when the task is grouped, otherwise as a
-// note given with the agent's next turn. Each side of a pair is told once
+// group chat, from group.Grove, when the task is grouped and still working,
+// otherwise as a note given with the agent's next turn. Each side of a pair is told once
 // per set of files; m.conflictsTold remembers what, keyed by the two
 // worktree paths, and forgets a pair once it stops conflicting, so a later
 // conflict is told again.
@@ -95,7 +95,9 @@ func (m *Model) tellConflict(self, other git.State, files []git.FileConflict, is
 	op, ot := m.taskFor(other.Path)
 	groupmate := t.Group != "" && ot != nil && op == p && ot.Group == t.Group
 	text := conflictText(other, files, isA, t.Group != "", groupmate)
-	if t.Group != "" {
+	// A finished or failed task hears of it with its next message, rather
+	// than being woken for it.
+	if t.Group != "" && !taskDone(t) {
 		if log, ok := m.groupLog(p, t.Group); ok {
 			msg := group.Message{From: group.Grove, To: t.Branch, Text: text}
 			return func() tea.Msg {

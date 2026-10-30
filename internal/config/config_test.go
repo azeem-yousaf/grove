@@ -71,6 +71,48 @@ func TestModelFor(t *testing.T) {
 	}
 }
 
+func TestRoleModels(t *testing.T) {
+	var cfg Config
+	if _, err := toml.Decode(setKey(Template, "planner", "crew_model", `"sonnet"`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Planner.CrewModel != "sonnet" || cfg.Planner.Model != "" || cfg.Planner.TaskModel != "" {
+		t.Fatalf("planner = %+v", cfg.Planner)
+	}
+	ai := AI{ClaudeModel: "opus", CodexModel: "gpt-5"}
+	p := Planner{Model: "claude-opus-4-1", CrewModel: "sonnet", TaskModel: "o3"}
+	cases := []struct{ role, agent, want string }{
+		{RoleLead, "claude", "claude-opus-4-1"},
+		{RoleLead, "codex", "gpt-5"}, // a Claude name isn't given to Codex
+		{RoleCrew, "claude", "sonnet"},
+		{RoleCrew, "codex", "gpt-5"},
+		{RoleTask, "codex", "o3"},
+		{RoleTask, "claude", "opus"}, // nor a Codex one to Claude
+	}
+	for _, c := range cases {
+		if got := p.ModelFor(c.role, c.agent, ai); got != c.want {
+			t.Errorf("%s/%s = %q, want %q", c.role, c.agent, got, c.want)
+		}
+	}
+	// Empty falls back to [ai]; a name that doesn't tell applies to both;
+	// a prefix says which agent explicitly.
+	if got := (Planner{}).ModelFor(RoleCrew, "claude", ai); got != "opus" {
+		t.Errorf("empty = %q", got)
+	}
+	p = Planner{CrewModel: "my-model", TaskModel: "codex:gpt-5-mini"}
+	if p.ModelFor(RoleCrew, "claude", ai) != "my-model" || p.ModelFor(RoleCrew, "codex", ai) != "my-model" {
+		t.Errorf("unknown name = %q, %q", p.ModelFor(RoleCrew, "claude", ai), p.ModelFor(RoleCrew, "codex", ai))
+	}
+	if p.ModelFor(RoleTask, "codex", ai) != "gpt-5-mini" || p.ModelFor(RoleTask, "claude", ai) != "opus" {
+		t.Errorf("prefixed = %q, %q", p.ModelFor(RoleTask, "codex", ai), p.ModelFor(RoleTask, "claude", ai))
+	}
+	for name, want := range map[string]string{"Sonnet": "claude", "haiku": "claude", "opus[1m]": "claude", "gpt-5-codex": "codex", "o4-mini": "codex", "llama": ""} {
+		if got := ModelAgent(name); got != want {
+			t.Errorf("ModelAgent(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestGitProtected(t *testing.T) {
 	var cfg Config
 	if _, err := toml.Decode(Template, &cfg); err != nil {
@@ -89,6 +131,23 @@ func TestGitProtected(t *testing.T) {
 	off := false
 	if (Planner{PullRequests: &off}).OpenPRs() {
 		t.Error("pull_requests = false ignored")
+	}
+}
+
+func TestSettle(t *testing.T) {
+	var cfg Config
+	if _, err := toml.Decode(setKey(Template, "planner", "settle", `"0s"`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Planner.SettleDelay(); got != 0 || cfg.Planner.PlannerSettle() != 0 {
+		t.Errorf("settle 0 = %v", got)
+	}
+	if got := (Planner{}).SettleDelay(); got != 15*time.Second || (Planner{}).PlannerSettle() != 5*time.Second {
+		t.Errorf("default = %v, planner %v", got, (Planner{}).PlannerSettle())
+	}
+	short := Planner{Settle: &Duration{2 * time.Second}}
+	if short.SettleDelay() != 2*time.Second || short.PlannerSettle() != 2*time.Second {
+		t.Errorf("2s = %v, planner %v", short.SettleDelay(), short.PlannerSettle())
 	}
 }
 

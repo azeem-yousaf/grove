@@ -1,12 +1,14 @@
 package ui
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
+	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/plan"
 )
@@ -106,4 +108,54 @@ func TestOpenAGroupsPlanner(t *testing.T) {
 		t.Errorf("P should open the lead planner: %+v", s)
 	}
 	_ = plan.ChatID
+}
+
+func TestRoleModels(t *testing.T) {
+	m, p, _ := groupedPlan(t)
+	p.Orchestrated = true
+	m.cfg.AI = config.AI{ClaudeModel: "opus"}
+	m.cfg.Planner.Model, m.cfg.Planner.CrewModel, m.cfg.Planner.TaskModel = "claude-opus-4-1", "sonnet", "haiku"
+
+	lead, crew := m.plannerFor(p.ID, ""), m.plannerFor(p.ID, "g")
+	if lead == nil || crew == nil || lead.model != "claude-opus-4-1" || crew.model != "sonnet" {
+		t.Fatalf("lead %+v crew %+v", lead, crew)
+	}
+	path := m.taskPath(p, "feature/a")
+	delete(m.sessions, path)
+	task := m.newSession(path, "feature/a", agent.Claude)
+	if task.model != "haiku" {
+		t.Errorf("task model = %q", task.model)
+	}
+	// A worktree outside the plan keeps [ai]'s.
+	if s := m.newSession(m.plannerDir(), "main", agent.Claude); s.model != "opus" {
+		t.Errorf("worktree agent model = %q", s.model)
+	}
+	// Each keeps a Claude process of its own, so their models never make
+	// another's restart.
+	keys := map[string]bool{}
+	for _, s := range []*session{lead, crew, task, m.sessionFor(m.plannerDir())} {
+		r := m.agentRequest(s)
+		keys[r.Dir+"\x00"+fmt.Sprint(r.ReadOnly)+"\x00"+r.Slot] = true
+	}
+	if len(keys) != 4 {
+		t.Errorf("kept processes = %d, want 4", len(keys))
+	}
+
+	// Claude names aren't given to Codex: it falls back to [ai].
+	m.cfg.AI.CodexModel = "gpt-5"
+	m.crews = map[string]*session{}
+	p.Agent = "codex"
+	if s := m.plannerFor(p.ID, "g"); s == nil || s.model != "gpt-5" {
+		t.Errorf("codex crew = %+v", s)
+	}
+	delete(m.sessions, path)
+	if s := m.newSession(path, "feature/a", agent.Codex); s.model != "gpt-5" {
+		t.Errorf("codex task model = %q", s.model)
+	}
+
+	// /model still changes it for that chat.
+	pump(t, m, m.setModel(crew, "haiku"))
+	if r := m.agentRequest(crew); r.Model != "haiku" {
+		t.Errorf("after /model: %q", r.Model)
+	}
 }

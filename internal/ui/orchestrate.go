@@ -2,17 +2,23 @@ package ui
 
 import (
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/control"
+	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/usage"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -48,17 +54,27 @@ const (
 	orchSettled                  // every task of a plan is finished or failed
 	orchMerge                    // how merging a plan went
 	orchReview                   // new reviews and comments on a plan's pull request
+	orchIdle                     // a task's turn ended without finishing, asking or waiting for the planner
 )
+
+// idleWait is how long an idle task waits for another reason to start a
+// planner turn before it starts one itself.
+const idleWait = 2 * time.Minute
 
 // orchItem is one thing waiting for the planner.
 type orchItem struct {
 	kind   orchKind
-	plan   string   // plan ID
-	branch string   // the task's, for approvals, questions, finished and failed tasks
-	group  string   // group ID, for group messages
-	lines  []string // the commands, the question, or the messages
-	ids    []string // the approvals', alongside lines
-	urgent bool     // starts a planner turn; other items wait for one
+	plan   string    // plan ID
+	branch string    // the task's, for approvals, questions, finished, failed and idle tasks
+	group  string    // group ID, for group messages
+	lines  []string  // the commands, the question, or the messages
+	ids    []string  // the approvals', alongside lines
+	urgent bool      // starts a planner turn; other items wait for one
+	now    bool      // starts it without waiting for more items (the user is involved)
+	idle   time.Time // when an idle task was queued, to make it urgent after idleWait
+
+	// When orchestrate first saw it, for waiting until items settle.
+	at time.Time
 }
 
 // orchestrator is grove's state for the planners watching plans: what
@@ -215,12 +231,14 @@ func (m *Model) progressed() {
 	}
 }
 
-// queueTurn hands a watched task's refused commands, or its closing
-// question, to the planner.
-func (m *Model) queueTurn(s *session) {
+// queueTurn hands a watched task's refused commands, its closing question,
+// or the news that it finished, failed or stopped to the planner. again is
+// set when the task was already finished before the turn: the planner then
+// hears about it only if its HEAD moved since (checked by a command).
+func (m *Model) queueTurn(s *session, again bool) tea.Cmd {
 	p, t := m.taskFor(s.path)
 	if t == nil || !watched(p) {
-		return
+		return nil
 	}
 	var cmds, ids []string
 	for _, a := range s.pending {
@@ -231,7 +249,8 @@ func (m *Model) queueTurn(s *session) {
 	reply := strings.TrimSpace(s.lastReply.String())
 	switch {
 	case len(cmds) > 0:
-		m.orch.queue = append(m.orch.queue, orchItem{kind: orchApproval, plan: p.ID, branch: t.Branch, lines: cmds, ids: ids, urgent: true})
+		userToo := slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval && a.policy.userOnly })
+		m.orch.queue = append(m.orch.queue, orchItem{kind: orchApproval, plan: p.ID, branch: t.Branch, lines: cmds, ids: ids, urgent: true, now: userToo})
 	case slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval }):
 		// Only the user can answer what it waits on.
 	case t.Status == plan.Working && !s.failed && endsWithQuestion(reply):
@@ -243,8 +262,60 @@ func (m *Model) queueTurn(s *session) {
 		m.orch.queue = append(m.orch.queue, orchItem{kind: orchFailed, plan: p.ID, branch: t.Branch, lines: []string{t.Error}, urgent: true})
 	case t.Status == plan.Finished:
 		// The planner checks the work before the user merges it.
-		m.orch.queue = append(m.orch.queue, orchItem{kind: orchFinished, plan: p.ID, branch: t.Branch, lines: []string{tail(reply, 2000)}, urgent: true})
+		return m.checkFinished(s, p.ID, t.Branch, tail(reply, 2000), again)
+	case t.Status == plan.Working && !m.gitBusy(s):
+		// Neither done nor asking: the planner looks at it with its next
+		// turn, or after idleWait.
+		if !slices.ContainsFunc(m.orch.queue, func(it orchItem) bool { return it.kind == orchIdle && it.branch == t.Branch }) {
+			m.orch.queue = append(m.orch.queue, orchItem{kind: orchIdle, plan: p.ID, branch: t.Branch, lines: []string{tail(reply, 2000)}, idle: m.now})
+		}
 	}
+	return nil
+}
+
+// finishedHeadMsg is the HEAD of a task that says it is finished.
+type finishedHeadMsg struct {
+	path, plan, branch, reply string
+	head                      string // "" when it couldn't be read
+	again                     bool
+}
+
+// checkFinished reads the HEAD of a task that says it is finished, so a
+// task that was already finished and committed nothing since doesn't make
+// the planner check the same work again.
+func (m *Model) checkFinished(s *session, planID, branch, reply string, again bool) tea.Cmd {
+	ctx, path := m.ctx, s.path
+	return func() tea.Msg {
+		return finishedHeadMsg{path: path, plan: planID, branch: branch, reply: reply, head: git.RefHash(ctx, path, "HEAD"), again: again}
+	}
+}
+
+func (m *Model) onFinishedHead(msg finishedHeadMsg) tea.Cmd {
+	s := m.sessionFor(msg.path)
+	p, t := m.taskFor(msg.path)
+	if s == nil || t == nil || !watched(p) || t.Status != plan.Finished {
+		return nil
+	}
+	if msg.again && msg.head != "" && msg.head == s.finishedHead {
+		return nil
+	}
+	s.finishedHead = msg.head
+	m.orch.queue = append(m.orch.queue, orchItem{kind: orchFinished, plan: msg.plan, branch: msg.branch, lines: []string{msg.reply}, urgent: true})
+	return m.orchestrate()
+}
+
+// idleTick makes idle tasks urgent once they have waited idleWait.
+func (m *Model) idleTick() tea.Cmd {
+	woke := false
+	for i := range m.orch.queue {
+		if it := &m.orch.queue[i]; it.kind == orchIdle && !it.urgent && m.now.Sub(it.idle) >= idleWait {
+			it.urgent, woke = true, true
+		}
+	}
+	if !woke {
+		return nil
+	}
+	return m.orchestrate()
 }
 
 // queueGroups passes new messages in watched plans' chats to the planner.
@@ -283,8 +354,9 @@ func (m *Model) queueGroups() {
 				it.lines = append(it.lines, msg.From+to+": "+msg.Text)
 				switch {
 				case msg.From == group.User:
-					// The user talks to the planner in charge of that chat.
-					it.urgent = true
+					// The user talks to the planner in charge of that chat,
+					// and waits for its answer.
+					it.urgent, it.now = true, true
 				default:
 					it.urgent = it.urgent || msg.To == "" && msg.From != group.User
 				}
@@ -330,7 +402,7 @@ func (m *Model) liveItems(items []orchItem) []orchItem {
 					continue
 				}
 			}
-			if it.kind == orchQuestion && t.Status != plan.Working ||
+			if (it.kind == orchQuestion || it.kind == orchIdle) && t.Status != plan.Working ||
 				it.kind == orchFinished && t.Status != plan.Finished ||
 				it.kind == orchFailed && t.Status != plan.Failed {
 				continue
@@ -347,6 +419,11 @@ func (m *Model) liveItems(items []orchItem) []orchItem {
 func (m *Model) orchestrate() tea.Cmd {
 	o := &m.orch
 	o.queue = m.liveItems(o.queue)
+	for i := range o.queue {
+		if o.queue[i].at.IsZero() {
+			o.queue[i].at = m.now
+		}
+	}
 	var owners []string // crewKey, "" for the lead, in queue order
 	byOwner := map[string][]orchItem{}
 	for _, it := range o.queue {
@@ -371,7 +448,7 @@ func (m *Model) orchestrate() tea.Cmd {
 // owner, returning the items still waiting. While that planner is busy,
 // urgent approvals and questions go to a side turn (side.go).
 func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, []orchItem) {
-	if !slices.ContainsFunc(items, func(it orchItem) bool { return it.urgent }) {
+	if !slices.ContainsFunc(items, func(it orchItem) bool { return it.urgent }) || !m.itemsSettled(items) {
 		return nil, items
 	}
 	planID, groupID := items[0].plan, m.ownerOf(items[0])
@@ -412,11 +489,38 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, []orchItem) {
 		st.asked = append(st.asked, it.ids...)
 	}
 	s.nextPlan = planIDs(items)[0]
+	s.nextKind = usage.KindDecide
 	st.reports, st.whileBusy = nil, nil
+	rules, _ := m.rulesFor(s)
 	cmd := m.send(s, text)
+	s.rulesSent = rulesKey(rules)
 	// The chat shows a line about it, not the whole request.
 	s.entries[len(s.entries)-1] = chatEntry{roleNote, summary}
 	return cmd, nil
+}
+
+// itemsSettled reports whether a planner's turn for items may start: no
+// item has come in for the planner's settle delay, so items arriving
+// together go in one turn, or the oldest has waited the longest it may, or
+// one involves the user.
+func (m *Model) itemsSettled(items []orchItem) bool {
+	delay := m.cfg.Planner.PlannerSettle()
+	if delay <= 0 || slices.ContainsFunc(items, func(it orchItem) bool { return it.urgent && it.now }) {
+		return true
+	}
+	var oldest, newest time.Time
+	for _, it := range items {
+		if !it.urgent {
+			continue // waits for a turn anyway
+		}
+		if oldest.IsZero() || it.at.Before(oldest) {
+			oldest = it.at
+		}
+		if it.at.After(newest) {
+			newest = it.at
+		}
+	}
+	return m.now.Sub(newest) >= delay || m.now.Sub(oldest) >= config.SettleMax
 }
 
 // groupTitleOf is a group's name, or its ID when it isn't known.
@@ -450,10 +554,10 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 			}
 			switch it.kind {
 			case orchApproval:
-				_, t, _ := m.watchedTask(it.branch)
+				_, t, ts := m.watchedTask(it.branch)
 				fmt.Fprintf(&b, "\n%s (task %q) wants to run commands it isn't allowed to:\n", it.branch, t.Title)
 				for i, c := range it.lines {
-					fmt.Fprintf(&b, "- id %s: `%s`\n", it.ids[i], c)
+					fmt.Fprintf(&b, "- id %s: `%s`%s\n", it.ids[i], c, m.staleSuffix(ts, it.ids[i]))
 				}
 				what = append(what, fmt.Sprintf("%s wants to run %s", it.branch, plural(len(it.lines), "command")))
 			case orchQuestion:
@@ -466,6 +570,12 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 				fmt.Fprintf(&b, "\n%s (task %q) says it is done:\n\n%s\n\nCheck its work, such as its diff and tests, before the user merges it. "+
 					"If something is missing, reply to tell it what; if it can't be done as planned, mark it failed.\n", it.branch, t.Title, quoteText(it.lines[0]))
 				what = append(what, it.branch+" finished")
+			case orchIdle:
+				_, t, _ := m.watchedTask(it.branch)
+				fmt.Fprintf(&b, "\n%s (task %q) ended its turn without finishing or asking anything; it ended with:\n\n%s\n\n"+
+					"Check whether it is done or stuck: read its chat's end in the tasks tool and its worktree. "+
+					"Reply to it with what to do next, or mark it finished or failed.\n", it.branch, t.Title, quoteText(it.lines[0]))
+				what = append(what, it.branch+" stopped")
 			case orchFailed:
 				_, t, _ := m.watchedTask(it.branch)
 				fmt.Fprintf(&b, "\n%s (task %q) failed: %s\nFind out why: read its chat's end in the tasks tool, its worktree and its diff, and run what you need there. "+
@@ -521,7 +631,35 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 			b.WriteString("- " + r + "\n")
 		}
 	}
-	b.WriteString("\nAnswer with one fenced code block whose language is grove-orchestrate, containing JSON; leave out the lists you don't need. " +
+	if rules, full := m.rulesFor(s); full {
+		b.WriteString("\n" + rules)
+	} else {
+		b.WriteString("\nAnswer with a grove-orchestrate block as before (or grove's tools), following the rules you were given.\n")
+	}
+	return b.String(), "Asked to decide: " + strings.Join(what, "; ")
+}
+
+// rulesFor is the planner's standing instructions for deciding, and whether
+// its request needs them: Claude keeps the conversation, so it gets them
+// again only when they changed since it last did; Codex starts fresh every
+// turn.
+func (m *Model) rulesFor(s *session) (string, bool) {
+	rules := m.orchRules(s)
+	return rules, s.id == "" || s.kind == agent.Codex || s.rulesSent != rulesKey(rules)
+}
+
+// rulesKey fingerprints standing instructions, to tell whether a
+// conversation already has them.
+func rulesKey(rules string) string {
+	sum := sha256.Sum256([]byte(rules))
+	return hex.EncodeToString(sum[:8])
+}
+
+// orchRules is what doesn't change from one decision to the next: the
+// block's format, the control tools and the rules for approvals.
+func (m *Model) orchRules(s *session) string {
+	var b strings.Builder
+	b.WriteString("Answer with one fenced code block whose language is grove-orchestrate, containing JSON; leave out the lists you don't need. " +
 		"Name commands by their id:\n\n")
 	b.WriteString("```grove-orchestrate\n" + `{
   "approve": [{"branch": "feature/api", "id": "3fa2c1-1"}],
@@ -539,6 +677,8 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 	}
 	b.WriteString("Approve a command when it is safe and needed for the task: builds, tests, linters, formatters, installing what the task calls for; " +
 		"git the task needs (committing, merging feature branches, pushing a task's own branch) is fine too. " +
+		"Add \"prefix\": true to approve a routine check's whole family (every `go test`, not just this line; never git). " +
+		"If one is marked as the worktree changed since it was asked, check the worktree before approving it: it may no longer do what the agent meant. " +
 		"Deny anything destructive and anything that reaches outside the plan's worktrees, saying what to do instead. " +
 		"Commands grove's policy keeps for the user (deleting branches or worktrees, force pushes, discarding work, protected branches) aren't listed and can't be approved by you. " +
 		"grove reports every decision that doesn't apply. " +
@@ -547,7 +687,7 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 		"run the commands it needs there yourself, and tell it exactly what to do next. Don't edit files yourself; the agents do. " +
 		"Post in a group chat to settle anything the agents are stuck on or disagree about. " +
 		"Answer the user in the plan chat (group \"plan\"), not in your reply: they read the plan chat. Keep messages short.\n")
-	return b.String(), "Asked to decide: " + strings.Join(what, "; ")
+	return b.String()
 }
 
 func planIDs(items []orchItem) []string {
@@ -583,6 +723,7 @@ type decisions struct {
 type (
 	answerDecision struct {
 		ID, Branch, Command, Reason string
+		Prefix                      bool // approve the command's family, not just the line
 		order                       string
 	}
 	replyDecision struct {
@@ -696,7 +837,16 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 			}
 			cmds = append(cmds, m.refuse(s, p))
 		default:
-			cmds = append(cmds, m.answer(s, i, approve, byPlanner, a.Reason))
+			rule := ""
+			if approve && a.Prefix {
+				p := s.pending[i]
+				if r, ok := m.familyRule(s, p.tool, p.text); ok {
+					rule = r
+				} else {
+					o.detail = "approved the exact command only: prefix approval isn't for git, interpreters or more than one command"
+				}
+			}
+			cmds = append(cmds, m.answerWith(s, i, approve, byPlanner, a.Reason, rule))
 			answered = append(answered, applied{len(outs), s, s.running})
 		}
 		outs = append(outs, o)
@@ -711,14 +861,17 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 		cmds = append(cmds, m.resume(s))
 	}
 	for _, a := range answered {
+		detail := "the agent carries on once you answer the rest of what it waits on"
 		switch s := a.s; {
 		case a.busy:
-			outs[a.out].detail = "the agent gets it when its turn ends"
+			detail = "the agent gets it when its turn ends"
 		case s.running:
-			outs[a.out].detail = "the agent was resumed with it"
-		default:
-			outs[a.out].detail = "the agent carries on once you answer the rest of what it waits on"
+			detail = "the agent was resumed with it"
 		}
+		if d := outs[a.out].detail; d != "" {
+			detail = d + "; " + detail
+		}
+		outs[a.out].detail = detail
 	}
 	for _, r := range d.Reply {
 		o := outcome{order: r.order, what: "reply to " + r.Branch, result: control.Applied, detail: "it reaches the agent as soon as it isn't working; you'll hear when its turn ends"}
@@ -734,7 +887,7 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 				t.Status, t.Error, p.Status = plan.Working, "", plan.Running
 				cmds = append(cmds, m.savePlan(p))
 			}
-			cmds = append(cmds, m.tell(s, "From the planner, who is watching this plan for the user: "+strings.TrimSpace(r.Message)))
+			cmds = append(cmds, m.tellAs(s, replyKind(p), "From the planner, who is watching this plan for the user: "+strings.TrimSpace(r.Message)))
 		}
 		outs = append(outs, o)
 	}
@@ -804,11 +957,26 @@ func uniqueSessions[T any](items []T, of func(T) *session) []*session {
 // tell sends a task's agent a message from grove or the planner: now if
 // it is free, otherwise with its next turn.
 func (m *Model) tell(s *session, text string) tea.Cmd {
+	return m.tellAs(s, usage.KindWork, text)
+}
+
+// tellAs is tell for a turn of kind k; a message that waits for the next
+// turn leaves that turn's kind alone.
+func (m *Model) tellAs(s *session, k usage.Kind, text string) tea.Cmd {
 	if s.running {
 		s.notes = append(s.notes, text)
 		return nil
 	}
-	return m.send(s, text)
+	return m.sendAs(s, k, text)
+}
+
+// replyKind is the kind of a planner's reply to a task of p: fixing, after
+// p's merged work failed its tests, else work.
+func replyKind(p *plan.Plan) usage.Kind {
+	if p.Merge != nil && p.Merge.Tests == plan.TestsFailed {
+		return usage.KindFix
+	}
+	return usage.KindWork
 }
 
 // plannerPost posts the planner's message in a watched plan's chat. Every

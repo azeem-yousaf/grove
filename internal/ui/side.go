@@ -10,6 +10,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // A planner's turn can take many minutes, for example while it runs a test
@@ -76,7 +77,8 @@ func (m *Model) sideTurn(owner *session, items []orchItem) (tea.Cmd, []orchItem)
 	side.crewPlan, side.crewGroup = owner.crewPlan, owner.crewGroup
 	side.allow, side.history, side.entries = slices.Clone(owner.allow), slices.Clone(owner.history), nil
 	side.setSessionID(owner.id)
-	side.sessionTotal = owner.sessionTotal
+	// The fork has what its owner's conversation had.
+	side.sessionTotal, side.rulesSent = owner.sessionTotal, owner.rulesSent
 	st.turns++
 
 	own := m.stateOf(side)
@@ -85,8 +87,10 @@ func (m *Model) sideTurn(owner *session, items []orchItem) (tea.Cmd, []orchItem)
 	for _, it := range take {
 		own.asked = append(own.asked, it.ids...)
 	}
-	side.nextPlan = take[0].plan
+	side.nextPlan, side.nextKind = take[0].plan, usage.KindDecide
+	rules, _ := m.rulesFor(side)
 	cmd := m.send(side, text+"\n"+sideAsk+"\n")
+	side.rulesSent = rulesKey(rules)
 	noteTo(owner, roleNote, "While you work, a side turn decides: "+strings.TrimPrefix(summary, "Asked to decide: "))
 	return cmd, rest
 }

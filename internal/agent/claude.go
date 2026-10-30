@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -383,6 +384,76 @@ func (p *claudeProc) turn(ctx context.Context, req Request, base *usage.Tokens, 
 // ClaudeRule is the permission rule that lets Claude run exactly command
 // with shell, the tool it asked for: "Bash", or "PowerShell" on Windows.
 func ClaudeRule(shell, command string) string { return shell + "(" + command + ")" }
+
+// ClaudePrefixRule is the permission rule that lets Claude run command's
+// family: its program and first subcommand with any arguments, such as
+// "Bash(go test:*)" for "go test ./... -run X". It fails for a command
+// without a plain program and subcommand, for git (grove's git policy
+// judges git) and for interpreters and wrappers, whose subcommand could be
+// anything.
+func ClaudePrefixRule(shell, command string) (string, bool) {
+	prefix, ok := CommandPrefix(command)
+	if !ok {
+		return "", false
+	}
+	return shell + "(" + prefix + ":*)", true
+}
+
+// CommandPrefix is command's program and first subcommand ("go test"),
+// as ClaudePrefixRule uses it.
+func CommandPrefix(command string) (string, bool) {
+	words := strings.Fields(command)
+	if len(words) < 2 || !plainWord(words[0]) || !plainWord(words[1]) || strings.HasPrefix(words[1], "-") {
+		return "", false
+	}
+	prog := strings.TrimSuffix(strings.ToLower(words[0]), ".exe")
+	if slices.Contains(noPrefix, prog) || strings.HasPrefix(prog, "python") || slices.Contains(noPrefixPair, prog+" "+strings.ToLower(words[1])) {
+		return "", false
+	}
+	return words[0] + " " + words[1], true
+}
+
+// noPrefix are programs whose first argument is code, a script or another
+// command, so "program subcommand" doesn't name a family of commands.
+var noPrefix = []string{
+	"git", "sh", "bash", "zsh", "fish", "dash", "ksh", "cmd", "pwsh", "powershell",
+	"node", "npx", "pnpx", "bunx", "deno", "bun", "ruby", "perl", "php", "lua", "tsx", "ts-node",
+	"env", "sudo", "doas", "xargs", "eval", "exec", "command", "nohup", "time", "timeout", "nice", "watch",
+	"iex", "invoke-expression", "start-process", "call", "start", "source", ".",
+}
+
+// noPrefixPair are subcommands that run whatever code they are given, like
+// an interpreter.
+var noPrefixPair = []string{
+	"go run", "go generate", "go tool", "npm exec", "npm x", "pnpm dlx", "pnpm exec",
+	"yarn dlx", "yarn exec", "bun x", "cargo run", "dotnet run", "uv run", "pipx run",
+	"poetry run", "deno run",
+}
+
+// CommandParts splits a command line on &&, || and ; into its commands.
+func CommandParts(line string) []string {
+	var parts []string
+	for _, p := range splitParts.Split(line, -1) {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return parts
+}
+
+var splitParts = regexp.MustCompile(`&&|\|\||;|\r?\n`)
+
+// plainWord holds nothing a shell would expand, quote or redirect, and no
+// path, so a script can't pass for a program or subcommand.
+func plainWord(w string) bool {
+	for _, r := range w {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_.:+@", r)
+		if !ok {
+			return false
+		}
+	}
+	return w != "" && w != "." && w != ".."
+}
 
 // claudeParser reads one turn of Claude Code's stream-json output.
 //
