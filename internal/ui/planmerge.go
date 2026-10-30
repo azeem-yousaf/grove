@@ -15,6 +15,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
 	"github.com/azeem-yousaf/grove/internal/shell"
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // The watching planner merges a plan for the user once its tasks are
@@ -418,7 +419,7 @@ func (m *Model) onFixStarted(msg fixStartedMsg) tea.Cmd {
 		t.Status = plan.Finished
 		return tea.Batch(m.savePlan(p), m.mergePlan(p))
 	}
-	return tea.Batch(m.savePlan(p), m.tell(s, fmt.Sprintf("Your branch has to be merged with the plan's other finished work, which is on the branch %s. "+
+	return tea.Batch(m.savePlan(p), m.tellAs(s, usage.KindFix, fmt.Sprintf("Your branch has to be merged with the plan's other finished work, which is on the branch %s. "+
 		"grove has started merging %s into your worktree, and it conflicts in: %s. "+
 		"Resolve the conflict markers in those files so that both your task and the merged work keep working, and check that it builds. "+
 		"Don't run git yourself: when you say you are done, grove commits the merge and merges the plan again.",
@@ -462,7 +463,7 @@ func (m *Model) onFixDone(msg fixDoneMsg) tea.Cmd {
 		return tea.Batch(m.savePlan(p), m.notify(t.Title+": "+t.Error, toastErr), m.orchestrate())
 	case len(msg.left) > 0 && s != nil:
 		t.Status = plan.Working
-		return tea.Batch(m.savePlan(p), m.tell(s, "These files still have conflict markers: "+strings.Join(msg.left, ", ")+
+		return tea.Batch(m.savePlan(p), m.tellAs(s, usage.KindFix, "These files still have conflict markers: "+strings.Join(msg.left, ", ")+
 			". Resolve them all, then say you are done."))
 	}
 	p.Merge.Fixing = ""

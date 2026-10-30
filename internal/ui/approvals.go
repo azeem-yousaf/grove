@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"hash/fnv"
 	"slices"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/agent"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/git"
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // Approvals: a command a task's agent was refused becomes a pendingAction
@@ -51,13 +53,92 @@ func (s *session) nextApprovalID() string {
 
 // newApproval makes the pending approval for a command s was refused.
 func (m *Model) newApproval(s *session, tool, command string) pendingAction {
-	return pendingAction{
+	a := pendingAction{
 		kind:   pendingApproval,
 		id:     s.nextApprovalID(),
 		text:   command,
 		tool:   tool,
 		policy: m.classify(s, tool, command),
+		after:  m.scanSeq,
+		rebase: true,
 	}
+	if st, ok := m.scanned(s.path); ok {
+		a.head, a.files = worktreeMark(st)
+	}
+	return a
+}
+
+// worktreeMark is what an approval remembers of the worktree: HEAD and a
+// fingerprint of the changed files, both from the scan.
+func worktreeMark(st git.State) (head, files string) {
+	if st.Last != nil {
+		head = st.Last.Hash
+	}
+	h := fnv.New64a()
+	for _, f := range st.Files {
+		fmt.Fprintf(h, "%s:%c:%d:%d:%t|", f.Path, f.Status, f.Added, f.Deleted, f.Uncommitted)
+	}
+	return head, strconv.FormatUint(h.Sum64(), 36)
+}
+
+// scanned is the scanned state of the worktree at path.
+func (m *Model) scanned(path string) (git.State, bool) {
+	if m.snap == nil {
+		return git.State{}, false
+	}
+	i := m.snap.IndexOf(path)
+	if i < 0 || m.snap.States[i].Err != nil {
+		return git.State{}, false
+	}
+	return m.snap.States[i], true
+}
+
+// markApprovals takes the worktree again for approvals made before the
+// scan seq started.
+func (m *Model) markApprovals(seq int) {
+	for _, s := range m.allSessions() {
+		for i := range s.pending {
+			a := &s.pending[i]
+			if a.kind != pendingApproval || !a.rebase || seq <= a.after {
+				continue
+			}
+			if st, ok := m.scanned(s.path); ok {
+				a.head, a.files = worktreeMark(st)
+				a.rebase = false
+			}
+		}
+	}
+}
+
+// staleApproval reports whether s's worktree has moved on since a was
+// asked: new commits or other changes. Running it now may not do what the
+// agent meant.
+func (m *Model) staleApproval(s *session, a pendingAction) bool {
+	if a.kind != pendingApproval || a.head == "" && a.files == "" {
+		return false
+	}
+	st, ok := m.scanned(s.path)
+	if !ok {
+		return false
+	}
+	head, files := worktreeMark(st)
+	return head != a.head || files != a.files
+}
+
+// staleNote is added to a stale approval wherever the planner sees it.
+const staleNote = " (worktree changed since it was asked)"
+
+// staleSuffix is staleNote for s's approval id when it is stale.
+func (m *Model) staleSuffix(s *session, id string) string {
+	if s == nil {
+		return ""
+	}
+	for _, a := range s.pending {
+		if a.id == id && m.staleApproval(s, a) {
+			return staleNote
+		}
+	}
+	return ""
 }
 
 // awaitsPlanner reports whether the planner is still to answer a.
@@ -67,6 +148,12 @@ func (m *Model) awaitsPlanner(s *session, a pendingAction) bool {
 
 // answer approves or denies s.pending[i] on behalf of by.
 func (m *Model) answer(s *session, i int, approve bool, by, why string) tea.Cmd {
+	return m.answerWith(s, i, approve, by, why, "")
+}
+
+// answerWith is answer, approving with rule (familyRule's) in place of the
+// exact command's when it is set.
+func (m *Model) answerWith(s *session, i int, approve bool, by, why, rule string) tea.Cmd {
 	a := s.pending[i]
 	s.pending = slices.Delete(s.pending, i, i+1)
 	why = strings.TrimSpace(why)
@@ -85,9 +172,15 @@ func (m *Model) answer(s *session, i int, approve bool, by, why string) tea.Cmd 
 	verdict, done := "deny", "denied"
 	if approve {
 		verdict, done = "approve", "approved"
-		s.allow = append(s.allow, agent.ClaudeRule(a.tool, a.text))
+		note := "Allowed" + who + ": " + a.text
+		if rule == "" {
+			rule = agent.ClaudeRule(a.tool, a.text)
+		} else {
+			note += " (and the rest of its family: " + rule + ")"
+		}
+		s.allow = append(s.allow, rule)
 		s.approved = append(s.approved, a.text)
-		s.entries = append(s.entries, chatEntry{roleNote, "Allowed" + who + ": " + a.text})
+		s.entries = append(s.entries, chatEntry{roleNote, note})
 		// Called right away: the agent may be resumed before a command runs.
 		if err := m.grant(s, a.tool, a.text, a.policy, by); err != nil {
 			cmds = append(cmds, m.grantFailed(s, a.text, err))
@@ -190,7 +283,7 @@ func (m *Model) resume(s *session) tea.Cmd {
 	approved, denied, planner := s.approved, s.denied, s.byPlanner
 	s.approved, s.denied, s.byPlanner = nil, nil, false
 	if !planner && len(denied) == 0 && len(waiting) == 0 {
-		return m.send(s, "I approved `"+strings.Join(approved, "`, `")+"`. Run it now and carry on.")
+		return m.sendAs(s, usage.KindResume, "I approved `"+strings.Join(approved, "`, `")+"`. Run it now and carry on.")
 	}
 	var parts []string
 	if len(approved) > 0 {
@@ -202,7 +295,7 @@ func (m *Model) resume(s *session) tea.Cmd {
 	if len(waiting) > 0 {
 		parts = append(parts, "Still waiting for the user: `"+strings.Join(waiting, "`, `")+"`. Don't run it until you hear; get on with what you can.")
 	}
-	return m.send(s, strings.Join(parts, " ")+" Then carry on with your task.")
+	return m.sendAs(s, usage.KindResume, strings.Join(parts, " ")+" Then carry on with your task.")
 }
 
 // findApproval finds the approval an answer names: by ID among every
@@ -273,7 +366,7 @@ func (m *Model) leaveUndecided(planner *session) tea.Cmd {
 			if m.awaitsPlanner(s, *a) {
 				if a.asked++; a.asked < askAgain {
 					st.reports = append(st.reports, fmt.Sprintf("You didn't answer %s's `%s` (id %s). Nobody else will: approve or deny it now.", s.name, firstLine(a.text), a.id))
-					cmds = append(cmds, m.queueTurn(s))
+					cmds = append(cmds, m.queueTurn(s, false))
 					continue
 				}
 				denied = append(denied, s.name+": "+firstLine(a.text))

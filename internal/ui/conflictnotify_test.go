@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/group"
+	"github.com/azeem-yousaf/grove/internal/plan"
 )
 
 // stateIndex is the m.snap.States index of branch.
@@ -52,7 +53,8 @@ func TestGroupedTasksHearOfNewConflictsOnce(t *testing.T) {
 	a, b := stateIndex(t, m, "feature/a"), stateIndex(t, m, "feature/b")
 	next := []git.Prediction{conflict(a, b, "shared.txt")}
 
-	// Count wake-ups from 1, to see grove's posts don't reset them.
+	// Count wake-ups from 1, to see grove's posts neither reset nor add to
+	// them.
 	m.groups[log.Dir] = &groupState{wakeups: 1}
 	var pollAgain tea.Cmd
 	for _, msg := range runCmds(m.onConflictsChanged(nil, next)) {
@@ -85,15 +87,15 @@ func TestGroupedTasksHearOfNewConflictsOnce(t *testing.T) {
 	}
 
 	// Posting reads the group again, which wakes both agents, as a post
-	// would, counting wake-ups rather than resetting them.
+	// would, without counting toward the wake-up limit.
 	if pollAgain == nil {
 		t.Fatal("posting should read the group again")
 	}
 	_, wake := m.Update(pollAgain())
 	pump(t, m, wake)
 	g := m.groups[log.Dir]
-	if len(fake.reqs) != 2 || g.wakeups != 3 {
-		t.Errorf("woken %d agents, wake-ups %d; want both woken and the count at 3", len(fake.reqs), g.wakeups)
+	if len(fake.reqs) != 2 || g.wakeups != 1 {
+		t.Errorf("woken %d agents, wake-ups %d; want both woken and the count still 1", len(fake.reqs), g.wakeups)
 	}
 
 	// The same conflict again is not news.
@@ -109,6 +111,24 @@ func TestGroupedTasksHearOfNewConflictsOnce(t *testing.T) {
 	drive(t, m).until(open, func() bool { return !m.pollingGroups })
 	if out := plain(m); !strings.Contains(out, "grove → feature/a") {
 		t.Errorf("group chat:\n%s", out)
+	}
+}
+
+func TestFinishedTaskGetsConflictNoteNotAWake(t *testing.T) {
+	m, p, _ := groupedPlan(t)
+	for i := range p.Tasks {
+		if p.Tasks[i].Branch == "feature/b" {
+			p.Tasks[i].Status = plan.Finished
+		}
+	}
+	log, _ := m.groupLog(p, "g")
+	a, b := stateIndex(t, m, "feature/a"), stateIndex(t, m, "feature/b")
+	runCmds(m.onConflictsChanged(nil, []git.Prediction{conflict(a, b, "shared.txt")}))
+	if msgs := groveMessages(t, log); len(msgs) != 1 || msgs[0].To != "feature/a" {
+		t.Errorf("only the working side is told in the chat: %+v", msgs)
+	}
+	if s := m.sessionFor(m.taskPath(p, "feature/b")); len(s.notes) != 1 || !strings.Contains(s.notes[0], "conflicts with feature/a") {
+		t.Errorf("the finished side gets a note: %q", s.notes)
 	}
 }
 

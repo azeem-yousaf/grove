@@ -59,6 +59,7 @@ type Approval struct {
 	Command string `json:"command"`
 	Reason  string `json:"reason,omitempty"` // why only the user may answer it, or what it does
 	Planner bool   `json:"planner"`          // the planner may answer it; otherwise only the user
+	Stale   bool   `json:"stale,omitempty"`  // the worktree changed since it was asked
 }
 
 // Order actions.
@@ -94,6 +95,7 @@ type Order struct {
 	To     string    `json:"to,omitempty"`
 	Text   string    `json:"text,omitempty"`
 	Note   string    `json:"note,omitempty"`
+	Prefix bool      `json:"prefix,omitempty"` // for Approve: the command's family, not just the line
 }
 
 // Outcomes of an order, or of a decision in a grove-orchestrate block.

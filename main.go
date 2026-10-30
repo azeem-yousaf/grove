@@ -333,6 +333,11 @@ func printUsage(repo *git.Repo) error {
 		row(0, "Planner", s)
 	}
 
+	fmt.Println("\nBy kind")
+	for _, k := range l.ByKind() {
+		row(1, fmt.Sprintf("%-8s %6s", k.Kind, usage.Share(k.Sum, total)), k.Sum)
+	}
+
 	for _, p := range l.Plans() {
 		title := p.Title
 		if title == "" {

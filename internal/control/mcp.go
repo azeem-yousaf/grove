@@ -52,7 +52,11 @@ func server(dir, version string, as Caller) mcp.Server {
 				Name: "approve",
 				Description: "Let a task's agent run a command it is waiting on (see tasks). It may run that exact command from then on without asking. " +
 					"Only commands tasks marks as yours to answer; the rest wait for the user. You get grove's answer: applied, already applied, not found or needs the user.",
-				Schema: mcp.Object(map[string]any{"task": task, "id": id, "command": command}),
+				Schema: mcp.Object(map[string]any{"task": task, "id": id, "command": command, "prefix": map[string]any{
+					"type": "boolean",
+					"description": "Allow the command's whole family (program and subcommand with any arguments, e.g. every `go test`) instead of the exact line. " +
+						"Not for git, interpreters or more than one command; those get the exact line.",
+				}}),
 				Call: func(args json.RawMessage) (string, bool) {
 					return order(dir, as, Approve, args)
 				},
@@ -169,7 +173,11 @@ func tasks(dir string) (string, bool) {
 				if a.Reason != "" {
 					who += ": " + a.Reason
 				}
-				fmt.Fprintf(&b, "  Waiting for approval, id %s (%s, %s): %s\n", a.ID, a.Tool, who, a.Command)
+				stale := ""
+				if a.Stale {
+					stale = " (worktree changed since it was asked)"
+				}
+				fmt.Fprintf(&b, "  Waiting for approval, id %s (%s, %s): %s%s\n", a.ID, a.Tool, who, a.Command, stale)
 			}
 			if t.LastReply != "" {
 				fmt.Fprintf(&b, "  Last reply:\n%s\n", indent(t.LastReply, "    "))
@@ -191,7 +199,10 @@ var Wait = 5 * time.Second
 // order checks an order against the tasks grove last described and
 // queues it.
 func order(dir string, as Caller, action string, args json.RawMessage) (string, bool) {
-	var a struct{ Task, ID, Text, Command, Reason, Status, Note string }
+	var a struct {
+		Task, ID, Text, Command, Reason, Status, Note string
+		Prefix                                        bool
+	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "Invalid arguments: " + err.Error(), true
 	}
@@ -247,7 +258,7 @@ func order(dir string, as Caller, action string, args json.RawMessage) (string, 
 		} else {
 			o.Item, o.Text = a.ID, strings.TrimSpace(a.Command)
 		}
-		o.Note = a.Reason
+		o.Note, o.Prefix = a.Reason, action == Approve && a.Prefix
 	case "mark":
 		switch a.Status {
 		case "finished":

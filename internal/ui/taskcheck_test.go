@@ -106,7 +106,7 @@ func TestReopeningCancelsTheCheck(t *testing.T) {
 	m.cfg.Planner.Test = slowCommand()
 	c, _ := p.Task("feature/c")
 	c.Status = plan.Finished
-	cmd := m.checkFinished(p, c, "Done.")
+	cmd := m.testFinished(p, c, "Done.")
 	if cmd == nil || m.checkIn(c.Path) == nil {
 		t.Fatal("no check started")
 	}
@@ -130,7 +130,7 @@ func TestNoTestCommandQueuesAtOnce(t *testing.T) {
 	p.Orchestrated = true
 	c, _ := p.Task("feature/c")
 	c.Status = plan.Finished
-	if cmd := m.checkFinished(p, c, "Done."); cmd != nil || len(m.checks) != 0 || len(m.orch.queue) != 1 || m.orch.queue[0].kind != orchFinished {
+	if cmd := m.testFinished(p, c, "Done."); cmd != nil || len(m.checks) != 0 || len(m.orch.queue) != 1 || m.orch.queue[0].kind != orchFinished {
 		t.Errorf("checks %v, queue %+v", m.checks, m.orch.queue)
 	}
 }

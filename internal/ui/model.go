@@ -178,6 +178,7 @@ type Model struct {
 	prPolling      bool
 	lastPRPoll     time.Time
 	crews          map[string]*session // each group's planner, by crewKey (crew.go)
+	sides          map[string]*session // planners' side turns, by sideKey (side.go)
 	chatCrew       string              // with chatPlanner: the chat shows that group's planner
 	reviewPolling  bool                // a watched plan's pull request is being read
 	lastReviewPoll time.Time           // when pollReviews last ran
@@ -281,6 +282,7 @@ func New(ctx context.Context, o Options) *Model {
 		gitCmd:       newGitPrompt(),
 		sessions:     map[string]*session{},
 		crews:        map[string]*session{},
+		sides:        map[string]*session{},
 		savedJSON:    map[string][]byte{},
 		creatingTask: map[string]bool{},
 		mergingPlan:  map[string]bool{},
@@ -474,12 +476,19 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case controlMsg:
 		return m.onControl(msg)
 
+	case finishedHeadMsg:
+		return m.onFinishedHead(msg)
+
 	case clockMsg:
 		m.now = time.Time(msg)
 		m.pruneChecks()
-		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick(), m.retryUsage(), m.gitAutoTick(), m.pollReviews()}
+		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick(), m.retryUsage(), m.gitAutoTick(), m.pollReviews(), m.idleTick()}
 		if m.termFocused {
 			cmds = append(cmds, m.pollPRs(false))
+		}
+		if len(m.orch.queue) > 0 {
+			// Items held back until they settle.
+			cmds = append(cmds, m.orchestrate())
 		}
 		if m.baseReady && !m.scanning && m.now.Sub(m.lastScan) >= m.refreshInterval() {
 			cmds = append(cmds, m.startScan())
@@ -770,6 +779,7 @@ func (m *Model) onScan(msg scanMsg) tea.Cmd {
 		m.scanErr = nil
 		m.predictions = remapPredictions(m.predictions, m.snap, msg.snap)
 		m.snap = msg.snap
+		m.markApprovals(msg.seq)
 		if m.repo.Here != "" {
 			m.hereIdx = m.snap.IndexOf(m.repo.Here)
 		}

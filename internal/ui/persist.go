@@ -44,6 +44,8 @@ type savedSession struct {
 	Planner     bool           `json:"planner,omitempty"`
 	CrewPlan    string         `json:"crew_plan,omitempty"` // a group's planner: its plan
 	CrewGroup   string         `json:"crew_group,omitempty"`
+	RulesSent   string         `json:"rules_sent,omitempty"`    // the orchestrating rules the conversation has
+	Finished    string         `json:"finished_head,omitempty"` // HEAD when the planner was last told the task finished
 
 	// Token usage (version 2). Version 1 sessions get a new UID on load.
 	UID      string       `json:"uid,omitempty"`
@@ -57,6 +59,9 @@ type savedSession struct {
 	// Ledger writes that hadn't succeeded yet.
 	Unrecorded []usage.Turn       `json:"unrecorded,omitempty"`
 	Unassigned []usage.Assignment `json:"unassigned,omitempty"`
+
+	// A planner's side turn (side.go), saved for its usage only.
+	Side bool `json:"side,omitempty"`
 }
 
 // runningTurn is the turn a session was saved in the middle of, recorded as
@@ -86,6 +91,10 @@ type savedPending struct {
 	Refs        []string `json:"refs,omitempty"`
 	Left        bool     `json:"left,omitempty"`  // the planner left it for the user
 	Asked       int      `json:"asked,omitempty"` // planner turns that didn't answer it
+
+	// The worktree when an approval was asked (worktreeMark).
+	Head  string `json:"head,omitempty"`
+	Files string `json:"files,omitempty"`
 }
 
 var roleNames = map[chatRole]string{roleUser: "user", roleAgent: "agent", roleTool: "tool", roleNote: "note", roleError: "error", roleOutput: "output"}
@@ -97,11 +106,16 @@ func sessionFile(path string) string { return "sessions/" + git.PathKey(path) + 
 const (
 	plannerFile = "planner/session.json"
 	crewDir     = "planner/groups"
+	sideDir     = "planner/sides"
 )
 
 // file is where s is saved.
 func (s *session) file() string {
 	switch {
+	case s.side && s.crewGroup == "":
+		return sideDir + "/lead.json"
+	case s.side:
+		return sideDir + "/" + git.PathKey(s.crewPlan+"-"+s.crewGroup) + ".json"
 	case s.crewGroup != "":
 		return crewDir + "/" + git.PathKey(s.crewPlan+"-"+s.crewGroup) + ".json"
 	case s.planner:
@@ -115,7 +129,7 @@ func (s *session) saved() savedSession {
 		Version: 2, Kind: s.kind, Path: s.path, Name: s.name, Model: s.model, ID: s.id,
 		History: s.history, Checkpoint: s.checkpoint, TurnTree: s.turnTree, Allow: s.allow, Notes: s.notes, Cost: s.cost,
 		Failed: s.failed, Interrupted: s.running, Planner: s.planner, Approvals: s.seq, Answered: s.answered,
-		CrewPlan: s.crewPlan, CrewGroup: s.crewGroup,
+		CrewPlan: s.crewPlan, CrewGroup: s.crewGroup, Side: s.side, RulesSent: s.rulesSent, Finished: s.finishedHead,
 		UID: s.uid, Created: s.created, Turns: s.turns, Drafting: s.drafting,
 		Unrecorded: s.unrecorded, Unassigned: s.unassigned,
 	}
@@ -130,6 +144,10 @@ func (s *session) saved() savedSession {
 			out.Running.Tokens = &t
 		}
 	}
+	if s.side {
+		out.History = nil // only its usage is worth keeping
+		return out
+	}
 	for _, e := range s.entries {
 		out.Entries = append(out.Entries, savedEntry{roleNames[e.role], e.text})
 	}
@@ -140,7 +158,7 @@ func (s *session) saved() savedSession {
 	for _, p := range s.pending {
 		pol := p.policy
 		out.Pending = append(out.Pending, savedPending{Command: p.kind == pendingCommand, ID: p.id, Text: p.text, Tool: p.tool,
-			UserOnly: pol.userOnly, Reason: pol.reason, Protected: pol.protected, Destructive: pol.destructive, Refs: pol.refs, Left: p.left, Asked: p.asked})
+			UserOnly: pol.userOnly, Reason: pol.reason, Protected: pol.protected, Destructive: pol.destructive, Refs: pol.refs, Left: p.left, Asked: p.asked, Head: p.head, Files: p.files})
 	}
 	return out
 }
@@ -152,7 +170,7 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 		kind: v.Kind, path: v.Path, name: v.Name, model: v.Model, id: v.ID,
 		history: v.History, checkpoint: v.Checkpoint, allow: v.Allow, notes: v.Notes, cost: v.Cost,
 		failed: v.Failed, touched: map[string]bool{}, seen: true, planner: v.Planner, seq: v.Approvals, answered: v.Answered,
-		crewPlan: v.CrewPlan, crewGroup: v.CrewGroup,
+		crewPlan: v.CrewPlan, crewGroup: v.CrewGroup, side: v.Side, rulesSent: v.RulesSent, finishedHead: v.Finished,
 		uid: v.UID, created: v.Created, turns: v.Turns, drafting: v.Drafting,
 		unrecorded: v.Unrecorded, unassigned: v.Unassigned,
 	}
@@ -184,6 +202,9 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 		}
 		a := pendingAction{kind: kind, id: p.ID, text: p.Text, tool: p.Tool, left: p.Left, asked: p.Asked,
 			policy: approvalPolicy{userOnly: p.UserOnly, reason: p.Reason, protected: p.Protected, destructive: p.Destructive, refs: p.Refs}}
+		a.head, a.files = p.Head, p.Files
+		// Saved before grove marked approvals: the next scan marks it.
+		a.rebase = kind == pendingApproval && a.head == "" && a.files == ""
 		if kind == pendingApproval && a.id == "" {
 			// Saved by an older grove.
 			a.id = s.nextApprovalID()
@@ -231,6 +252,9 @@ func (m *Model) loadSessions() tea.Cmd {
 		if crews, cerr := st.List(crewDir); cerr == nil {
 			names = append(names, crews...)
 		}
+		if sides, serr := st.List(sideDir); serr == nil {
+			names = append(names, sides...)
+		}
 		var out []*session
 		var errs []error
 		if err != nil {
@@ -261,6 +285,11 @@ func (m *Model) onSessionsLoaded(msg sessionsLoadedMsg) tea.Cmd {
 		cut := m.recordCutShort(s)
 		// One the user started while loading wins.
 		switch {
+		case s.side:
+			if m.sides[s.slot()] != nil {
+				continue
+			}
+			m.sides[s.slot()] = s
 		case s.crewGroup != "":
 			if m.crews[s.crewKey()] != nil {
 				continue

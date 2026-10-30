@@ -64,7 +64,13 @@ func (m *Model) plannerDir() string {
 }
 
 func (m *Model) newPlanner(dir string, k agent.Kind) *session {
-	return &session{kind: k, path: dir, name: "planner", model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true, planner: true, uid: newUID(), created: time.Now()}
+	return &session{kind: k, path: dir, name: "planner", model: m.roleModel(config.RoleLead, k), touched: map[string]bool{}, seen: true, planner: true, uid: newUID(), created: time.Now()}
+}
+
+// roleModel is the model for a plan's agent with role (config.RoleLead,
+// RoleCrew or RoleTask) when it runs k.
+func (m *Model) roleModel(role string, k agent.Kind) string {
+	return m.cfg.Planner.ModelFor(role, string(k), m.cfg.AI)
 }
 
 // openPlanner shows the planner, starting one if needed. Before the next
@@ -496,6 +502,7 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 	if t == nil {
 		return nil
 	}
+	again := t.Status == plan.Finished
 	// While grove runs the agent's git for it, the agent carries on with
 	// the output.
 	if t.Status == plan.Working && len(s.pending) == 0 && !m.gitBusy(s) {
@@ -513,8 +520,8 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 	if t.Status == plan.Finished && watched(p) {
 		m.progressed()
 	}
-	check := m.queueTurn(s)
-	return tea.Batch(check, m.finishIfSettled(p), m.savePlan(p), m.schedule(), m.orchestrate())
+	queued := m.queueTurn(s, again)
+	return tea.Batch(queued, m.finishIfSettled(p), m.savePlan(p), m.schedule(), m.orchestrate())
 }
 
 func endsWithQuestion(reply string) bool {

@@ -374,7 +374,9 @@ Press `t` on a group's header or one of its worktrees (or `ctrl+g` in a
 grouped agent's chat) to open the group chat. You see every message and
 can post too; start with `@branch` to address one agent. When a message
 arrives for an agent that isn't working, grove starts a turn so it can
-answer. To keep agents from waking each other forever, grove stops after
+answer, once the chat has been quiet for `[planner] settle` (default 15 s,
+never more than a minute after the first message), so a burst of messages
+costs one turn. To keep agents from waking each other forever, grove stops after
 `[planner] max_wakeups` (default 6) wake-ups in a row in a group: then the
 group's planner settles it if the planner is in charge, and otherwise grove
 waits for you to post.
@@ -585,10 +587,14 @@ model = ""           # passed to the agent; "" = its default
 max_agents = 3       # task agents working at once; the rest wait
 max_wakeups = 6      # wake-ups in a row in a group chat before waiting for you
 max_decisions = 20   # turns in a row a planner takes without the plan moving forward
+settle = "15s"       # quiet time in a chat before agents are woken (planner: at most 5s); "0s" = at once
 watcher = ""         # who watches a plan's agents: "you" or "planner" (in charge); "" = ask before each plan
 test = ""            # run in a merged plan's worktree, e.g. "go test ./..."; "" = the planner's suggestion
 test_minutes = 20    # how long that may run before it is stopped
 pull_requests = true # push a merged plan's branch and open a pull request with gh
+model = ""           # the planner's model; "" = [ai]'s
+crew_model = "sonnet" # group planners' model (a Claude alias is ignored for Codex)
+task_model = ""      # the model of task agents a plan starts
 
 [git]                # what agents may do with git on their own
 protected = ["release/*"]  # branches agents never change without you; main, master and the base always are

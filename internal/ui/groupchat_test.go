@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
+	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
 )
@@ -110,9 +111,20 @@ func poll(t *testing.T, m *Model, fake *fakeAgent) {
 	pump(t, m, next)
 }
 
+// asking is n agent turns that end with a question, which keeps a task
+// working rather than finished.
+func asking(n int) [][]agent.Event {
+	out := make([][]agent.Event, n)
+	for i := range out {
+		out[i] = []agent.Event{{Kind: agent.EvText, Text: "Shall I go on?"}, {Kind: agent.EvDone}}
+	}
+	return out
+}
+
 func TestIdleAgentsWakeForMessagesUpToTheLimit(t *testing.T) {
 	m, p, fake := groupedPlan(t)
 	m.cfg.Planner.MaxWakeups = 2
+	fake.turns = asking(3)
 	log, _ := m.groupLog(p, "g")
 	if err := log.Post(group.Message{From: "feature/a", Text: "The API returns {orderId}."}); err != nil {
 		t.Fatal(err)
@@ -177,6 +189,113 @@ func TestIdleAgentsWakeForMessagesUpToTheLimit(t *testing.T) {
 		if strings.Contains(r.Dir, "shop-a") {
 			t.Error("a was woken for its own message")
 		}
+	}
+}
+
+func TestWakeWaitsForTheChatToSettle(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	m.cfg.Planner.Settle = nil // the default, 15 s
+	log, _ := m.groupLog(p, "g")
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) {
+		m.now = t0.Add(d)
+		m.pollingGroups = false
+	}
+	at(0)
+	log.Post(group.Message{From: "feature/a", Text: "first"})
+	poll(t, m, fake)
+	at(5 * time.Second)
+	log.Post(group.Message{From: "feature/a", Text: "second"})
+	poll(t, m, fake)
+	at(19 * time.Second)
+	poll(t, m, fake)
+	if len(fake.reqs) != 0 {
+		t.Fatalf("woken before the chat was quiet for 15 s: %+v", fake.reqs)
+	}
+	at(20 * time.Second)
+	poll(t, m, fake)
+	if len(fake.reqs) != 1 || !strings.Contains(fake.reqs[0].Message, "2 new messages") {
+		t.Fatalf("both messages should wake b once: %+v", fake.reqs)
+	}
+	if g := m.groups[log.Dir]; g.wakeups != 1 {
+		t.Errorf("a batched wake counts once: %d", g.wakeups)
+	}
+}
+
+func TestSteadyChatWakesAtTheMaximum(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	m.cfg.Planner.Settle = nil
+	log, _ := m.groupLog(p, "g")
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for d := time.Duration(0); d < config.SettleMax; d += 5 * time.Second {
+		m.now, m.pollingGroups = t0.Add(d), false
+		log.Post(group.Message{From: "feature/a", Text: "more"})
+		poll(t, m, fake)
+	}
+	if len(fake.reqs) != 0 {
+		t.Fatalf("woken while the chat kept going: %d", len(fake.reqs))
+	}
+	m.now, m.pollingGroups = t0.Add(config.SettleMax), false
+	log.Post(group.Message{From: "feature/a", Text: "still more"})
+	poll(t, m, fake)
+	if len(fake.reqs) != 1 || !strings.Contains(fake.reqs[0].Dir, "shop-b") {
+		t.Fatalf("b should be woken once the oldest message waited the maximum: %+v", fake.reqs)
+	}
+}
+
+func TestSettleZeroWakesAtOnce(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	m.cfg.Planner.Settle = &config.Duration{}
+	m.now = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	log, _ := m.groupLog(p, "g")
+	log.Post(group.Message{From: "feature/a", Text: "hello"})
+	poll(t, m, fake)
+	if len(fake.reqs) != 1 {
+		t.Fatalf("settle 0 wakes at once: %+v", fake.reqs)
+	}
+}
+
+func TestFinishedTaskWakesOnlyForItsOwnMessages(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	for i := range p.Tasks {
+		if p.Tasks[i].Branch == "feature/b" {
+			p.Tasks[i].Status = plan.Finished
+		}
+	}
+	log, _ := m.groupLog(p, "g")
+	log.Post(group.Message{From: "feature/a", Text: "I renamed the type"})
+	poll(t, m, fake)
+	if len(fake.reqs) != 0 {
+		t.Fatalf("a finished task isn't woken by a groupmate's post: %+v", fake.reqs)
+	}
+	m.pollingGroups = false
+	log.Post(group.Message{From: "feature/a", To: "feature/b", Text: "please update your call"})
+	poll(t, m, fake)
+	if len(fake.reqs) != 1 || !strings.Contains(fake.reqs[0].Dir, "shop-b") {
+		t.Fatalf("a post to it wakes a finished task: %+v", fake.reqs)
+	}
+}
+
+func TestGroveNoticesDontCountTowardTheLimit(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	m.cfg.Planner.MaxWakeups = 1
+	fake.turns = asking(4)
+	log, _ := m.groupLog(p, "g")
+	log.Post(group.Message{From: group.Grove, To: "feature/b", Text: "you now conflict with feature/c"})
+	// The fake never reads, so each poll wakes b again.
+	for range 3 {
+		m.pollingGroups = false
+		poll(t, m, fake)
+	}
+	g := m.groups[log.Dir]
+	if len(fake.reqs) != 3 || g.wakeups != 0 || g.paused {
+		t.Fatalf("grove's notices count: %d wakes, %d counted, paused %v", len(fake.reqs), g.wakeups, g.paused)
+	}
+	log.Post(group.Message{From: "feature/a", Text: "hello"})
+	m.pollingGroups = false
+	poll(t, m, fake)
+	if len(fake.reqs) != 4 || g.wakeups != 1 {
+		t.Errorf("a groupmate's post counts: %d wakes, %d counted", len(fake.reqs), g.wakeups)
 	}
 }
 
@@ -272,7 +391,9 @@ func TestWakeLimitGoesToTheWatchingPlanner(t *testing.T) {
 	m.termFocused = false
 	m.cfg.Planner.MaxWakeups = 1
 	log, _ := m.groupLog(p, "g")
-	if err := log.Post(group.Message{From: "feature/a", Text: "Which port?"}); err != nil {
+	// Addressed to b, so it is woken again after its first wake marks its
+	// task finished.
+	if err := log.Post(group.Message{From: "feature/a", To: "feature/b", Text: "Which port?"}); err != nil {
 		t.Fatal(err)
 	}
 	poll(t, m, fake)

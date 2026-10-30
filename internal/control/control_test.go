@@ -136,7 +136,7 @@ func TestTools(t *testing.T) {
 	}
 	if err := WriteState(dir, State{Plans: []Plan{{ID: "p1", Title: "Shop", Status: "running", Groups: []string{"checkout"}, Tasks: []Task{
 		{Branch: "feature/api", Title: "API", Status: "working", Path: "/src/api", Busy: true,
-			Approvals: []Approval{{ID: "ab12-1", Tool: "Bash", Command: "npm test", Planner: true}, {ID: "ab12-2", Tool: "Bash", Command: "git push origin main", Reason: "pushes protected branch main"}},
+			Approvals: []Approval{{ID: "ab12-1", Tool: "Bash", Command: "npm test", Planner: true, Stale: true}, {ID: "ab12-2", Tool: "Bash", Command: "git push origin main", Reason: "pushes protected branch main"}},
 			LastReply: "Running the tests."},
 		{Branch: "feature/ui", Title: "UI", Status: "queued"},
 	}}}}); err != nil {
@@ -144,8 +144,8 @@ func TestTools(t *testing.T) {
 	}
 
 	got, failed := call(t, dir, "tasks", nil)
-	for _, want := range []string{`Plan "Shop" (id p1, running)`, "Group chats: checkout", "- feature/api: API · working · agent working · worktree /src/api", "Waiting for approval, id ab12-1 (Bash, yours to answer): npm test",
-		"Waiting for approval, id ab12-2 (Bash, only the user may answer: pushes protected branch main): git push origin main", "    Running the tests.", "- feature/ui: UI · queued"} {
+	for _, want := range []string{`Plan "Shop" (id p1, running)`, "Group chats: checkout", "- feature/api: API · working · agent working · worktree /src/api", "Waiting for approval, id ab12-1 (Bash, yours to answer): npm test (worktree changed since it was asked)",
+		"Waiting for approval, id ab12-2 (Bash, only the user may answer: pushes protected branch main): git push origin main\n", "    Running the tests.", "- feature/ui: UI · queued"} {
 		if failed || !strings.Contains(got, want) {
 			t.Errorf("tasks is missing %q:\n%s", want, got)
 		}

@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
+	"github.com/azeem-yousaf/grove/internal/config"
 	"github.com/azeem-yousaf/grove/internal/control"
 	"github.com/azeem-yousaf/grove/internal/plan"
 )
@@ -28,6 +29,8 @@ type plannerState struct {
 	paused  bool     // stopped at the limit until the user says something
 	asked   []string // approvals in its current turn, by ID
 	reports []string // its decisions that didn't apply, for its next request
+	// What its side turns decided while it was busy, for its next request.
+	whileBusy []string
 }
 
 // crewKey identifies a group's planner; "" for the lead.
@@ -40,9 +43,10 @@ func crewKey(planID, groupID string) string {
 
 func (s *session) crewKey() string { return crewKey(s.crewPlan, s.crewGroup) }
 
-// stateOf is s's state as an orchestrator.
+// stateOf is s's state as an orchestrator. A side turn has its own, for
+// what it was asked; its turns count towards its owner's.
 func (m *Model) stateOf(s *session) *plannerState {
-	if s != nil && s.crewGroup != "" {
+	if s != nil && (s.crewGroup != "" || s.side) {
 		return &s.crew
 	}
 	return &m.orch.plannerState
@@ -64,7 +68,7 @@ func (m *Model) planners() []*session {
 // task's news, and its group chat's messages.
 func (m *Model) ownerOf(it orchItem) string {
 	switch it.kind {
-	case orchApproval, orchQuestion, orchFinished, orchFailed:
+	case orchApproval, orchQuestion, orchFinished, orchFailed, orchIdle:
 		if _, t, _ := m.watchedTask(it.branch); t != nil {
 			return t.Group
 		}
@@ -103,7 +107,7 @@ func (m *Model) plannerFor(planID, groupID string) *session {
 		return nil
 	}
 	s := m.newPlanner(dir, k)
-	s.name = "planner · " + g.Name
+	s.name, s.model = "planner · "+g.Name, m.roleModel(config.RoleCrew, k)
 	s.crewPlan, s.crewGroup = planID, groupID
 	m.crews[s.crewKey()] = s
 	return s
@@ -244,8 +248,11 @@ func (m *Model) ownerPlanner(path string) *session {
 	return m.planner
 }
 
-// noteTo adds a line to planner s's chat.
+// noteTo adds a line to planner s's chat: its owner's, for a side turn.
 func noteTo(s *session, role chatRole, text string) {
+	if s != nil && s.sideOf != nil {
+		s = s.sideOf
+	}
 	if s != nil {
 		s.entries = append(s.entries, chatEntry{role, text})
 	}

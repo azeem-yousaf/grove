@@ -932,6 +932,9 @@ func (m *Model) agentLines(s git.State, width int) []string {
 		state = st.muted.Render("idle")
 	}
 	out := []string{"", m.summaryLabel("Agent") + st.text.Render(ses.kind.Label()) + st.faint.Render(" · ") + state}
+	if u := m.agentUsageCost(ses); len(u) > 0 {
+		out = append(out, m.summaryLabel("Usage")+ansi.Truncate(strings.Join(u, st.faint.Render(" · ")), max(width-20, 10), "…"))
+	}
 	for i := len(ses.entries) - 1; i >= 0; i-- {
 		if ses.entries[i].role == roleAgent {
 			return append(out, m.summaryText(ses.entries[i].text, width, 3, st.muted)...)

@@ -98,9 +98,9 @@ func (m *Model) checkOwner(c *taskCheck) *session {
 	return m.ownerPlanner(c.path)
 }
 
-// checkFinished hands a finished task to its planner: after its tests when
+// testFinished hands a finished task to its planner: after its tests when
 // the plan has a test command, else at once.
-func (m *Model) checkFinished(p *plan.Plan, t *plan.Task, reply string) tea.Cmd {
+func (m *Model) testFinished(p *plan.Plan, t *plan.Task, reply string) tea.Cmd {
 	item := orchItem{kind: orchFinished, plan: p.ID, branch: t.Branch, lines: []string{reply}, urgent: true}
 	command := m.testCommand(p)
 	switch c := m.checkIn(t.Path); {

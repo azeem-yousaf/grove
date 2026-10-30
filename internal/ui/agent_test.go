@@ -65,7 +65,7 @@ func pump(t *testing.T, m *Model, cmd tea.Cmd) {
 				for _, c := range msg {
 					start(c)
 				}
-			case agentMsg, undoReadyMsg, undoDoneMsg, agentSavedMsg, usageWrittenMsg:
+			case agentMsg, undoReadyMsg, undoDoneMsg, agentSavedMsg, usageWrittenMsg, finishedHeadMsg:
 				_, next := m.Update(msg)
 				start(next)
 				idle.Reset(3 * time.Second)
@@ -433,6 +433,30 @@ func TestCreateStartsAgentWithTask(t *testing.T) {
 	}
 	if m.focus != focusChat || m.chatPath != path {
 		t.Error("the new worktree's agent should be on screen")
+	}
+}
+
+// /model in a planner's chat changes that chat only: planners have their
+// own model settings, so [ai] stays as it is.
+func TestPlannerModelStaysInItsChat(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	m.cfg.AI.ClaudeModel = "opus"
+	m.cfg.Planner.CrewModel = "sonnet"
+	var saved []string
+	m.saveModel = func(k, model string) error { saved = append(saved, k+"="+model); return nil }
+	lead := m.newPlanner("/src/shop", agent.Claude)
+	if lead.model != "opus" {
+		t.Fatalf("lead without [planner] model = %q", lead.model)
+	}
+	pump(t, m, m.setModel(lead, "haiku"))
+	if lead.model != "haiku" || m.agentRequest(lead).Model != "haiku" {
+		t.Errorf("lead after /model = %q", lead.model)
+	}
+	if m.cfg.AI.ClaudeModel != "opus" || len(saved) != 0 {
+		t.Errorf("[ai] changed: %q, saved %v", m.cfg.AI.ClaudeModel, saved)
+	}
+	if s := m.newPlanner("/src/shop", agent.Claude); s.model != "opus" {
+		t.Errorf("a new planner = %q", s.model)
 	}
 }
 

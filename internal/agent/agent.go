@@ -105,6 +105,12 @@ type Request struct {
 	// Slot keeps a separate Claude process for one of several read-only
 	// agents in the same folder: each group's planner beside the lead.
 	Slot string
+	// Fork runs the turn in a branch of Session rather than in Session
+	// itself (Claude: --resume <Session> --fork-session), in a process of its
+	// own that ends with the turn, so the session's kept process is left
+	// alone even while it is busy. EvDone carries the fork's new session ID.
+	// Codex ignores it: every turn starts fresh anyway.
+	Fork bool
 	// Commands lets a read-only agent run any shell command without asking:
 	// the planner while it runs a plan the user started. Claude still can't
 	// edit files with its own tools; Codex gets the workspace-write sandbox.
@@ -143,12 +149,16 @@ type ToolServer struct {
 }
 
 // procKey is the kept Claude process for req: one per folder, plus one for
-// each read-only agent there (by Slot).
+// each read-only agent there (by Slot). A fork never shares one.
 func procKey(req Request) string {
+	key := req.Dir
 	if req.ReadOnly {
-		return req.Dir + "\x00read-only" + req.Slot
+		key += "\x00read-only" + req.Slot
 	}
-	return req.Dir
+	if req.Fork {
+		key += "\x00fork"
+	}
+	return key
 }
 
 // EventKind classifies an Event.
@@ -237,13 +247,16 @@ type Runner struct {
 	// Idle is how long a Claude process with nothing to do is kept.
 	Idle time.Duration
 
+	// Replay limits the history a Codex turn sends; zero means DefaultReplay.
+	Replay Replay
+
 	mu     sync.Mutex
 	procs  map[string]*claudeProc   // by Request.Dir
 	totals map[string]*usage.Tokens // each Claude session's SessionTotal by session id; nil once unknown
 }
 
 func NewRunner() *Runner {
-	return &Runner{Idle: 10 * time.Minute, procs: map[string]*claudeProc{}, totals: map[string]*usage.Tokens{}}
+	return &Runner{Idle: 10 * time.Minute, Replay: DefaultReplay, procs: map[string]*claudeProc{}, totals: map[string]*usage.Tokens{}}
 }
 
 // sessionBase is what req's session had used before this turn: nothing for
@@ -281,7 +294,11 @@ func (r *Runner) noteTotal(req Request, ev Event) {
 		r.totals[ev.Session] = &t
 		return
 	}
-	for _, s := range []string{req.Session, ev.Session} {
+	parent := req.Session
+	if req.Fork {
+		parent = "" // a fork's turn adds nothing to the session it came from
+	}
+	for _, s := range []string{parent, ev.Session} {
 		if s != "" {
 			r.totals[s] = nil
 		}
@@ -311,11 +328,16 @@ func (r *Runner) Run(ctx context.Context, req Request, emit func(Event)) {
 			return
 		}
 		ev := p.turn(ctx, req, r.sessionBase(req), emit)
-		r.release(procKey(req), p)
+		if req.Fork {
+			// The next fork starts from wherever its session is by then.
+			r.drop(procKey(req), p)
+		} else {
+			r.release(procKey(req), p)
+		}
 		r.noteTotal(req, ev)
 		emit(ev)
 	case Codex:
-		args, input := codexArgs(req)
+		args, input := codexArgs(req, r.Replay)
 		runOnce(ctx, bin, req.Dir, req.Env, args, input, &codexParser{}, emit)
 	default:
 		emit(Event{Kind: EvDone, Err: fmt.Errorf("unknown agent %q", req.Kind)})
@@ -400,6 +422,17 @@ func (r *Runner) release(dir string, p *claudeProc) {
 		return
 	}
 	r.idleLater(dir, p)
+}
+
+// drop ends p, a process used for one turn only.
+func (r *Runner) drop(key string, p *claudeProc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p.busy = false
+	if r.procs[key] == p {
+		delete(r.procs, key)
+	}
+	p.end()
 }
 
 // idleLater ends p once it has had nothing to do for r.Idle. Callers hold
