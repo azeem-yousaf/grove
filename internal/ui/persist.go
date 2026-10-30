@@ -225,9 +225,33 @@ func restore(v savedSession, checkpointOK, turnOK bool) *session {
 	return s
 }
 
+// usageLeftFile keeps m.usageLeft, the usage of removed agents that isn't
+// in the ledger yet, whose session files are gone.
+const usageLeftFile = "usage-left.json"
+
+// savedLeft is one removed agent's usage in usageLeftFile.
+type savedLeft struct {
+	UID     string             `json:"uid"`
+	Turns   []usage.Turn       `json:"turns,omitempty"`
+	Assigns []usage.Assignment `json:"assigns,omitempty"`
+}
+
+// savedUsageLeft is what usageLeftFile should hold.
+func (m *Model) savedUsageLeft() []savedLeft {
+	out := []savedLeft{}
+	for _, s := range m.usageLeft {
+		if len(s.unrecorded)+len(s.unassigned) > 0 {
+			out = append(out, savedLeft{UID: s.uid, Turns: s.unrecorded, Assigns: s.unassigned})
+		}
+	}
+	return out
+}
+
 type (
 	sessionsLoadedMsg struct {
 		sessions []*session
+		left     []savedLeft // removed agents' usage not yet in the ledger
+		leftJSON []byte      // usageLeftFile as read
 		err      error
 	}
 	persistMsg struct {
@@ -261,6 +285,11 @@ func (m *Model) loadSessions() tea.Cmd {
 		if err != nil {
 			errs = append(errs, err)
 		}
+		left := []savedLeft{}
+		if lerr := st.Load(usageLeftFile, &left); lerr != nil && !errors.Is(lerr, os.ErrNotExist) {
+			errs = append(errs, lerr)
+		}
+		leftJSON, _ := json.Marshal(left) // as on disk, before the removed folders' sessions join it
 		for _, n := range names {
 			var v savedSession
 			if err := st.Load(n, &v); err != nil {
@@ -268,6 +297,11 @@ func (m *Model) loadSessions() tea.Cmd {
 				continue
 			}
 			if _, err := os.Stat(v.Path); errors.Is(err, os.ErrNotExist) && !v.Planner {
+				// Its folder went while grove was closed; usage it hadn't
+				// written yet is kept until the ledger has it.
+				if len(v.Unrecorded)+len(v.Unassigned) > 0 {
+					left = append(left, savedLeft{UID: v.UID, Turns: v.Unrecorded, Assigns: v.Unassigned})
+				}
 				_ = st.Remove(n)
 				_ = git.DropCheckpoint(ctx, common, v.Path)
 				continue
@@ -276,11 +310,20 @@ func (m *Model) loadSessions() tea.Cmd {
 			turnOK := v.TurnTree != "" && git.HasObject(ctx, common, v.TurnTree)
 			out = append(out, restore(v, ok, turnOK))
 		}
-		return sessionsLoadedMsg{out, errors.Join(errs...)}
+		return sessionsLoadedMsg{sessions: out, left: left, leftJSON: leftJSON, err: errors.Join(errs...)}
 	}
 }
 
 func (m *Model) onSessionsLoaded(msg sessionsLoadedMsg) tea.Cmd {
+	// The clock's retryUsage writes them.
+	for _, v := range msg.left {
+		if v.UID != "" && m.sessionByUID(v.UID) == nil {
+			m.usageLeft = append(m.usageLeft, &session{uid: v.UID, unrecorded: v.Turns, unassigned: v.Assigns})
+		}
+	}
+	if msg.leftJSON != nil {
+		m.savedJSON[usageLeftFile] = msg.leftJSON // written again once it differs
+	}
 	for _, s := range msg.sessions {
 		// A turn cut short is saved again without it, so it is recorded once.
 		cut := m.recordCutShort(s)
@@ -344,6 +387,9 @@ func (m *Model) changedSessions() map[string][]byte {
 	}
 	if v, ok := m.savedOrchState(); ok {
 		add(orchFile, v)
+	}
+	if m.sessionsLoaded {
+		add(usageLeftFile, m.savedUsageLeft())
 	}
 	return out
 }

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/azeem-yousaf/grove/internal/git"
 	"github.com/azeem-yousaf/grove/internal/group"
 	"github.com/azeem-yousaf/grove/internal/plan"
+	"github.com/azeem-yousaf/grove/internal/usage"
 )
 
 // restart opens m's repository again with a fake agent, loading the saved
@@ -109,5 +111,57 @@ func TestSettledPlanIsMergedAfterRestart(t *testing.T) {
 	}
 	if strings.Contains(asked, "says it is done") {
 		t.Errorf("checked work shouldn't be checked again:\n%s", asked)
+	}
+}
+
+// News saved nowhere else (how a merge went, review comments, a check a
+// planner asked for) reaches the planner after a restart, whether it was
+// still queued or in the planner's turn when grove closed.
+func TestMergeNewsSurvivesRestart(t *testing.T) {
+	m, p, _ := groupedPlan(t)
+	p.Orchestrated = true
+	m.plansLoaded = true // as if read at start, so orchFile is written
+	m.queueMerge(p, "MERGE-NEWS: the plan merged cleanly.")
+	m.orch.queue = append(m.orch.queue, orchItem{kind: orchReview, plan: p.ID, lines: []string{"REVIEW-NEWS: rename the flag"}, urgent: true})
+	m.orch.sent = []orchItem{{kind: orchCheck, plan: p.ID, branch: "feature/a", lines: []string{"CHECK-NEWS: it passed"}, urgent: true}}
+
+	_, fake := restart(t, m, false)
+	asked := askedAll(fake)
+	for _, want := range []string{"MERGE-NEWS", "REVIEW-NEWS", "CHECK-NEWS"} {
+		if !strings.Contains(asked, want) {
+			t.Errorf("the planner wasn't told %s after the restart:\n%s", want, asked)
+		}
+	}
+}
+
+// Usage a removed agent hadn't written to the ledger survives grove
+// closing: kept in usageLeftFile, and for an agent whose folder went while
+// grove was closed, taken from its session file before that is deleted.
+func TestRemovedAgentsUsageSurvivesRestart(t *testing.T) {
+	m, _, _ := groupedPlan(t)
+	m.sessionsLoaded = true // as if read at start, so usageLeftFile is written
+	m.usageLeft = append(m.usageLeft, &session{uid: "removed", unrecorded: []usage.Turn{
+		{ID: "removed/1", Agent: "removed", Tokens: usage.Tokens{Input: 5}, Status: usage.Exact}}})
+	gone := m.newSession(filepath.Join(t.TempDir(), "gone"), "feature/gone", agent.Claude)
+	gone.unrecorded = []usage.Turn{{ID: gone.uid + "/1", Agent: gone.uid, Tokens: usage.Tokens{Input: 7}, Status: usage.Exact}}
+	m.sessions[gone.path] = gone
+	m.persistNow()
+	delete(m.sessions, gone.path) // its folder never existed, as if removed while grove was closed
+
+	m2, _ := restart(t, m, true)
+	writeUsage(t, m2)
+	if sum := m2.usage.Agent("removed"); sum.Turns != 1 || sum.Tokens.Total() != 5 {
+		t.Errorf("removed agent's usage = %+v", sum)
+	}
+	if sum := m2.usage.Agent(gone.uid); sum.Turns != 1 || sum.Tokens.Total() != 7 {
+		t.Errorf("vanished agent's usage = %+v", sum)
+	}
+	if len(m2.usageLeft) != 0 {
+		t.Errorf("usage left after it was written: %v", m2.usageLeft)
+	}
+	m2.persistNow()
+	var left []savedLeft
+	if err := m2.store.Load(usageLeftFile, &left); err != nil || len(left) != 0 {
+		t.Errorf("%s = %+v, %v; want it empty", usageLeftFile, left, err)
 	}
 }

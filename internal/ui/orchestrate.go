@@ -96,6 +96,10 @@ type orchestrator struct {
 	seen   map[string]int  // group chat messages already queued, by folder
 	told   map[string]int  // ... and sent to a planner (or history), saved in orchFile
 	orders map[string]bool // control orders already carried out, by ID
+
+	// News was saved in orchFile this run or the last, so the file is kept
+	// up to date even once none waits.
+	savedPending bool
 }
 
 // askWatcher runs then once it is known who watches the next plan: from the

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"maps"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -16,14 +17,50 @@ import (
 // to merge. Chat messages are found again through the planners' read
 // positions (orchestrator.told), which are saved in orchFile and move only
 // when a planner is sent them, so messages posted while grove was closed,
-// or queued but not sent, still reach the planner.
+// or queued but not sent, still reach the planner. News nothing else
+// records (how a merge or its tests went, review comments, a check a
+// planner asked for) is saved in orchFile itself while it waits or is in a
+// planner's turn (savedItems), and queued again when the plans load.
 
-// orchFile holds the planners' read positions in the chats.
+// orchFile holds the planners' read positions in the chats, and the news
+// they haven't had yet.
 const orchFile = "planner/orch.json"
 
 // savedOrch is orchFile's content.
 type savedOrch struct {
-	Told map[string]int `json:"told,omitempty"` // by chat folder
+	Told    map[string]int `json:"told,omitempty"`    // by chat folder
+	Pending []savedItem    `json:"pending,omitempty"` // news no planner had when grove closed
+}
+
+// savedItem is a queued item whose news is saved nowhere else.
+type savedItem struct {
+	Kind   string   `json:"kind"` // merge, review or check
+	Plan   string   `json:"plan"`
+	Branch string   `json:"branch,omitempty"`
+	Group  string   `json:"group,omitempty"`
+	Lines  []string `json:"lines"`
+}
+
+// savedKinds are the items savedItems keeps, by their names in orchFile.
+var savedKinds = map[orchKind]string{orchMerge: "merge", orchReview: "review", orchCheck: "check"}
+
+// savedItems is the news to keep for after a restart: queued, or sent to a
+// planner whose turn hasn't ended, which a restart cuts short.
+func (m *Model) savedItems() []savedItem {
+	items := slices.Clone(m.orch.queue)
+	items = append(items, m.orch.sent...)
+	for _, s := range m.allSessions() {
+		if s.planner && (s.crewGroup != "" || s.side) {
+			items = append(items, s.crew.sent...)
+		}
+	}
+	var out []savedItem
+	for _, it := range items {
+		if kind, ok := savedKinds[it.kind]; ok {
+			out = append(out, savedItem{Kind: kind, Plan: it.plan, Branch: it.branch, Group: it.group, Lines: it.lines})
+		}
+	}
+	return out
 }
 
 // restoreOrch takes the saved read positions, unless the chat was read
@@ -40,12 +77,23 @@ func (m *Model) restoreOrch(v savedOrch) {
 			m.orch.seen[dir], m.orch.told[dir] = n, n
 		}
 	}
+	for _, it := range v.Pending {
+		for kind, name := range savedKinds {
+			if name == it.Kind {
+				m.orch.queue = append(m.orch.queue, orchItem{kind: kind, plan: it.Plan, branch: it.Branch, group: it.Group, lines: it.Lines, urgent: true})
+			}
+		}
+	}
+	m.orch.savedPending = len(v.Pending) > 0
 }
 
 // savedOrchState is what orchFile should hold, and whether to write it:
 // only once the saved file was read, so it is never overwritten with less.
+// Once news was saved, the file is kept up to date until it is empty.
 func (m *Model) savedOrchState() (savedOrch, bool) {
-	return savedOrch{Told: maps.Clone(m.orch.told)}, m.plansLoaded && len(m.orch.told) > 0
+	v := savedOrch{Told: maps.Clone(m.orch.told), Pending: m.savedItems()}
+	m.orch.savedPending = m.orch.savedPending || len(v.Pending) > 0
+	return v, m.plansLoaded && (len(v.Told) > 0 || m.orch.savedPending)
 }
 
 // markSent notes that a planner was asked about items: chats' read
