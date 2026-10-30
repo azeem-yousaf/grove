@@ -207,6 +207,10 @@ type Model struct {
 	prHooks   prHooks
 
 	auto gitAuto // agents' git autonomy (gitauto.go)
+
+	// Saved state read at start (orchrestore.go): once both are in, the
+	// planners' queue is rebuilt.
+	sessionsLoaded, plansLoaded, rebuilt bool
 }
 
 type toastKind uint8
@@ -540,10 +544,14 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		return m.onAgent(msg)
 
 	case sessionsLoadedMsg:
-		return m.onSessionsLoaded(msg)
+		cmd := m.onSessionsLoaded(msg)
+		m.sessionsLoaded = true
+		return tea.Batch(cmd, m.afterLoad())
 
 	case plansLoadedMsg:
-		return m.onPlansLoaded(msg)
+		cmd := m.onPlansLoaded(msg)
+		m.plansLoaded = true
+		return tea.Batch(cmd, m.afterLoad())
 
 	case branchNamesMsg:
 		m.branchNames = msg.names

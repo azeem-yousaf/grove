@@ -75,6 +75,15 @@ type orchItem struct {
 
 	// When orchestrate first saw it, for waiting until items settle.
 	at time.Time
+
+	// Group messages: the chat's folder and how many of its messages the
+	// item covers, so the planner's read position (orchestrator.told)
+	// moves once it is sent.
+	dir  string
+	upto int
+	// A finished task's HEAD, which becomes its session's finishedHead once
+	// the planner is asked to check it.
+	head string
 }
 
 // orchestrator is grove's state for the planners watching plans: what
@@ -83,7 +92,8 @@ type orchItem struct {
 type orchestrator struct {
 	plannerState
 	queue  []orchItem
-	seen   map[string]int  // group chat messages already passed on, by folder
+	seen   map[string]int  // group chat messages already queued, by folder
+	told   map[string]int  // ... and sent to a planner (or history), saved in orchFile
 	orders map[string]bool // control orders already carried out, by ID
 }
 
@@ -299,8 +309,15 @@ func (m *Model) onFinishedHead(msg finishedHeadMsg) tea.Cmd {
 	if msg.again && msg.head != "" && msg.head == s.finishedHead {
 		return nil
 	}
-	s.finishedHead = msg.head
-	m.orch.queue = append(m.orch.queue, orchItem{kind: orchFinished, plan: msg.plan, branch: msg.branch, lines: []string{msg.reply}, urgent: true})
+	// finishedHead is set once the planner is asked (markSent), so news
+	// still queued when grove closes is found again after a restart.
+	it := orchItem{kind: orchFinished, plan: msg.plan, branch: msg.branch, lines: []string{msg.reply}, urgent: true, head: msg.head}
+	if i := slices.IndexFunc(m.orch.queue, func(q orchItem) bool { return q.kind == orchFinished && q.branch == msg.branch }); i >= 0 {
+		it.at = m.orch.queue[i].at
+		m.orch.queue[i] = it
+	} else {
+		m.orch.queue = append(m.orch.queue, it)
+	}
 	return m.orchestrate()
 }
 
@@ -326,6 +343,9 @@ func (m *Model) queueGroups() {
 	if m.orch.seen == nil {
 		m.orch.seen = map[string]int{}
 	}
+	if m.orch.told == nil {
+		m.orch.told = map[string]int{}
+	}
 	for _, p := range m.plans {
 		if !watched(p) {
 			continue
@@ -338,10 +358,14 @@ func (m *Model) queueGroups() {
 			}
 			seen, known := m.orch.seen[log.Dir]
 			m.orch.seen[log.Dir] = len(g.msgs)
+			if !known {
+				// A chat never read before: its history counts as told.
+				m.orch.told[log.Dir] = len(g.msgs)
+			}
 			if !known || len(g.msgs) <= seen {
 				continue
 			}
-			it := orchItem{kind: orchGroup, plan: p.ID, group: grp.ID}
+			it := orchItem{kind: orchGroup, plan: p.ID, group: grp.ID, dir: log.Dir, upto: len(g.msgs)}
 			owner := group.PlannerOf(chatOwner(grp.ID))
 			for _, msg := range g.msgs[seen:] {
 				// The owner doesn't hear its own posts, and the lead hears
@@ -503,6 +527,7 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	s.nextKind = usage.KindDecide
 	st.reports = nil
 	st.sent = slices.Clone(items) // back in the queue if the turn fails
+	m.markSent(items)
 	rules, _ := m.rulesFor(s)
 	cmd := m.send(s, text)
 	s.rulesSent = rulesKey(rules)

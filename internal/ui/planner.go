@@ -27,6 +27,7 @@ import (
 type (
 	plansLoadedMsg struct {
 		plans []*plan.Plan
+		orch  savedOrch // the planners' read positions in the chats
 		err   error
 	}
 	branchNamesMsg struct{ names []string }
@@ -277,12 +278,17 @@ func (m *Model) loadPlans() tea.Cmd {
 	st := m.store
 	return func() tea.Msg {
 		plans, err := plan.List(st)
-		return plansLoadedMsg{plans, err}
+		var orch savedOrch
+		if oerr := st.Load(orchFile, &orch); oerr != nil && !errors.Is(oerr, os.ErrNotExist) {
+			err = errors.Join(err, oerr)
+		}
+		return plansLoadedMsg{plans: plans, orch: orch, err: err}
 	}
 }
 
 func (m *Model) onPlansLoaded(msg plansLoadedMsg) tea.Cmd {
 	m.plans = append(m.plans, msg.plans...)
+	m.restoreOrch(msg.orch)
 	for _, p := range msg.plans {
 		if b, err := json.Marshal(p); err == nil {
 			m.savedJSON[planFile(p.ID)] = b

@@ -312,6 +312,9 @@ func (m *Model) changedSessions() map[string][]byte {
 	for _, p := range m.plans {
 		add(planFile(p.ID), p)
 	}
+	if v, ok := m.savedOrchState(); ok {
+		add(orchFile, v)
+	}
 	return out
 }
 
