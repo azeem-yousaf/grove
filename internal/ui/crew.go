@@ -170,21 +170,11 @@ func (m *Model) inCrew(s *session, branch string) bool {
 // scopeDecisions keeps a group planner's decisions to its own group: other
 // tasks are out of reach, its posts go to its group chat unless it names
 // the plan chat, and merging and closing are the lead's.
-// A side turn can't merge or close either: that waits for its owner.
 func (m *Model) scopeDecisions(s *session, d decisions) (decisions, []outcome) {
-	var outs []outcome
-	if s != nil && s.side {
-		for _, mg := range d.Merge {
-			outs = append(outs, outcome{what: "merge " + mg.Plan, result: control.Failed, detail: "a side turn only answers approvals and questions; merge in your main turn"})
-		}
-		for _, c := range d.Close {
-			outs = append(outs, outcome{what: "close " + c.Plan, result: control.Failed, detail: "a side turn only answers approvals and questions; close in your main turn"})
-		}
-		d.Merge, d.Close = nil, nil
-	}
 	if s == nil || s.crewGroup == "" {
-		return d, outs
+		return d, nil
 	}
+	var outs []outcome
 	out := func(what string) {
 		outs = append(outs, outcome{what: what, result: control.NotFound, detail: "not a task of your group"})
 	}

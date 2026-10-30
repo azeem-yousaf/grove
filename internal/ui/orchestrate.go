@@ -634,7 +634,9 @@ func (m *Model) applyDecisions(s *session, reply string) tea.Cmd {
 		st.reports = append(st.reports, "your last grove-orchestrate block wasn't valid JSON, so none of it applied: "+err.Error())
 		return nil
 	}
+	d, kept := scopeSide(s, d)
 	d, refused := m.scopeDecisions(s, d)
+	refused = append(kept, refused...)
 	var told []string
 	if s.side {
 		told = m.sideAccount(d) // before decide takes the approvals away

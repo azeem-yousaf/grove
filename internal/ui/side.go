@@ -99,6 +99,23 @@ func (m *Model) onSideDone(s *session, ev agent.Event, reply string, recorded te
 	return tea.Batch(recorded, m.applyDecisions(s, reply), m.leaveUndecided(s), m.orchestrate())
 }
 
+// scopeSide keeps merging and closing from a side turn: they wait for its
+// owner's main turn. Other sessions' decisions pass unchanged.
+func scopeSide(s *session, d decisions) (decisions, []outcome) {
+	if s == nil || !s.side {
+		return d, nil
+	}
+	var outs []outcome
+	for _, mg := range d.Merge {
+		outs = append(outs, outcome{what: "merge " + mg.Plan, result: control.Failed, detail: "a side turn only answers approvals and questions; merge in your main turn"})
+	}
+	for _, c := range d.Close {
+		outs = append(outs, outcome{what: "close " + c.Plan, result: control.Failed, detail: "a side turn only answers approvals and questions; close in your main turn"})
+	}
+	d.Merge, d.Close = nil, nil
+	return d, outs
+}
+
 // sideAccount describes a side turn's decisions for its owner, in the order
 // decide reports their outcomes.
 func (m *Model) sideAccount(d decisions) []string {
