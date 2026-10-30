@@ -137,7 +137,7 @@ type Model struct {
 	testingPlan    map[string]bool        // plans whose merge grove is testing, by ID
 	checks         map[string]*taskCheck  // commands grove runs in tasks' worktrees for planners, by git.PathKey
 	checkSeq       int                    // numbers the checks, so a cancelled one's result is dropped
-	branchNames   []string               // existing branches, for the planner's briefing
+	branchNames    []string               // existing branches, for the planner's briefing
 	planBranches   git.Branches           // branches when the last plan started, for creating its worktrees
 	groveBin       string                 // this program, which agents start for group tools
 	groups         map[string]*groupState // group chats by folder
@@ -286,7 +286,7 @@ func New(ctx context.Context, o Options) *Model {
 		mergingPlan:  map[string]bool{},
 		testingPlan:  map[string]bool{},
 		checks:       map[string]*taskCheck{},
-		groups:      map[string]*groupState{},
+		groups:       map[string]*groupState{},
 		groveBin:     groveExecutable(),
 		predictor:    git.NewPredictor(),
 		chatInput:    newChatInput(),
@@ -477,7 +477,7 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 	case clockMsg:
 		m.now = time.Time(msg)
 		m.pruneChecks()
-		cmds :=[]tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick(), m.retryUsage(), m.gitAutoTick(), m.pollReviews()}
+		cmds := []tea.Cmd{clockTick(), m.persistSessions(), m.pollGroupsEvery(m.now), m.usageTick(), m.retryUsage(), m.gitAutoTick(), m.pollReviews()}
 		if m.termFocused {
 			cmds = append(cmds, m.pollPRs(false))
 		}

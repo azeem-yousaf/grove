@@ -86,8 +86,8 @@ type Order struct {
 	ID     string    `json:"id"` // grove records the outcome under it in results.jsonl
 	Time   time.Time `json:"time"`
 	Action string    `json:"action"`
-	By     Caller    `json:"by,omitzero"`   // the planner that queued it
-	Task  string    `json:"task,omitempty"` // its branch
+	By     Caller    `json:"by,omitzero"`    // the planner that queued it
+	Task   string    `json:"task,omitempty"` // its branch
 	Plan   string    `json:"plan,omitempty"` // its ID, for orders about a whole plan
 	Item   string    `json:"item,omitempty"` // the approval's ID, for Approve and Deny
 	Group  string    `json:"group,omitempty"`
