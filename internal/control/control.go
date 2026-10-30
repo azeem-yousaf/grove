@@ -59,6 +59,9 @@ type Approval struct {
 	Reason  string `json:"reason,omitempty"` // why only the user may answer it, or what it does
 	Planner bool   `json:"planner"`          // the planner may answer it; otherwise only the user
 	Stale   bool   `json:"stale,omitempty"`  // the worktree changed since it was asked
+	// Run marks a command the agent asked grove to run for it (a command
+	// card): approving runs it in the task's worktree, denying dismisses it.
+	Run bool `json:"run,omitempty"`
 }
 
 // Order actions.

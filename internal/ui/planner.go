@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ import (
 type (
 	plansLoadedMsg struct {
 		plans []*plan.Plan
+		orch  savedOrch // the planners' read positions in the chats
 		err   error
 	}
 	branchNamesMsg struct{ names []string }
@@ -277,12 +279,17 @@ func (m *Model) loadPlans() tea.Cmd {
 	st := m.store
 	return func() tea.Msg {
 		plans, err := plan.List(st)
-		return plansLoadedMsg{plans, err}
+		var orch savedOrch
+		if oerr := st.Load(orchFile, &orch); oerr != nil && !errors.Is(oerr, os.ErrNotExist) {
+			err = errors.Join(err, oerr)
+		}
+		return plansLoadedMsg{plans: plans, orch: orch, err: err}
 	}
 }
 
 func (m *Model) onPlansLoaded(msg plansLoadedMsg) tea.Cmd {
 	m.plans = append(m.plans, msg.plans...)
+	m.restoreOrch(msg.orch)
 	for _, p := range msg.plans {
 		if b, err := json.Marshal(p); err == nil {
 			m.savedJSON[planFile(p.ID)] = b
@@ -497,7 +504,7 @@ func (m *Model) taskFor(path string) (*plan.Plan, *plan.Task) {
 }
 
 // onTaskTurn updates a task when its agent's turn ends, and starts queued
-// tasks if a slot came free. A reply that ends with a question keeps the
+// tasks if a slot came free. A reply that asks something (looksLikeQuestion) keeps the
 // task working until the user answers.
 func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 	p, t := m.taskFor(s.path)
@@ -511,7 +518,7 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 		switch {
 		case ev.Err != nil:
 			t.Status, t.Error = plan.Failed, ev.Err.Error()
-		case !endsWithQuestion(s.lastReply.String()):
+		case !looksLikeQuestion(s.lastReply.String()):
 			t.Status, t.Error = plan.Finished, ""
 		}
 	}
@@ -526,8 +533,27 @@ func (m *Model) onTaskTurn(s *session, ev agent.Event) tea.Cmd {
 	return tea.Batch(queued, m.finishIfSettled(p), m.savePlan(p), m.schedule(), m.orchestrate())
 }
 
-func endsWithQuestion(reply string) bool {
-	return strings.HasSuffix(strings.TrimRight(reply, " \n\t*_`"), "?")
+var paraBreak = regexp.MustCompile(`\n\s*\n`)
+
+// askPhrases ask for an answer without a question mark.
+var askPhrases = regexp.MustCompile(`(?i)\b(let me know|which (one )?would you prefer|which do you prefer|should i|shall i|do you want|please confirm|waiting for your|could you|would you like)\b`)
+
+// signOffs are polite endings of finished work ("Let me know if you need
+// anything else"), which ask nothing.
+var signOffs = regexp.MustCompile(`(?i)\b(let me know|do you want|would you like)\b[^.!?\n]*\b(anything else|any (other |more |further )?(changes|adjustments|tweaks|questions|help)|anything more|further changes|if you have (any )?questions)\b[^.!?\n]*[.!]?`)
+
+// looksLikeQuestion reports whether a reply ends asking for an answer: its
+// last paragraph ends with a question mark, or asks in words ("let me know
+// which", "should I", "please confirm"). Sign-offs such as "let me know if
+// you need anything else" don't count.
+func looksLikeQuestion(reply string) bool {
+	reply = strings.TrimRight(reply, " \r\n\t*_`")
+	if strings.HasSuffix(reply, "?") {
+		return true
+	}
+	paras := paraBreak.Split(reply, -1)
+	last := paras[len(paras)-1]
+	return askPhrases.MatchString(signOffs.ReplaceAllString(last, ""))
 }
 
 // finishIfSettled marks a plan done once every task has finished or failed,
@@ -587,6 +613,10 @@ func (m *Model) taskContext(s *session) string {
 	if m.groveBin != "" {
 		b.WriteString("\nThe plan also has a plan chat for the user, the planner and every task's agent, through the plan tools (`members`, `post`, `read`). " +
 			"The user gives feedback on the whole plan there. Read it when you are woken for a message in it; post there only for what the user or the whole plan needs to know.\n")
+		if watched(p) {
+			b.WriteString("The planner is in charge of this plan for the user. To ask it for a decision, post with `to` \"planner\"; " +
+				"in your group chat that reaches your group's planner, in the plan chat the lead planner.\n")
+		}
 	}
 	b.WriteString("\nWhen the task is done, say so plainly and list what you changed. If you need a decision from the user, end your reply with the question.\n")
 	return b.String()

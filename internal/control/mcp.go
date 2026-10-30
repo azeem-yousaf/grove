@@ -177,6 +177,9 @@ func (c caller) tasks() (string, bool) {
 				if a.Stale {
 					stale = " (worktree changed since it was asked)"
 				}
+				if a.Run {
+					stale += " (asks grove to run it: approving runs it in its worktree)"
+				}
 				fmt.Fprintf(&b, "  Waiting for approval, id %s (%s, %s): %s%s\n", a.ID, a.Tool, who, a.Command, stale)
 			}
 			if t.LastReply != "" {

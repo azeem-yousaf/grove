@@ -29,9 +29,15 @@ func (r Result) OK() bool { return r.Err == nil && r.ExitCode == 0 }
 // stdin is empty and CI=true is set, so test runners don't wait for input
 // or start watching files.
 func Run(ctx context.Context, dir, line string, limit int) Result {
+	return RunEnv(ctx, dir, line, limit, nil)
+}
+
+// RunEnv is Run with env added to the environment, after grove's own (for
+// example the git guard's settings).
+func RunEnv(ctx context.Context, dir, line string, limit int, env []string) Result {
 	cmd := command(ctx, line)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "CI=true")
+	cmd.Env = append(append(os.Environ(), "CI=true"), env...)
 	out := &tailBuffer{limit: limit}
 	cmd.Stdout, cmd.Stderr = out, out
 	// Pipes held open by a grandchild must not keep Wait waiting.

@@ -141,9 +141,10 @@ func (m *Model) staleSuffix(s *session, id string) string {
 	return ""
 }
 
-// awaitsPlanner reports whether the planner is still to answer a.
+// awaitsPlanner reports whether the planner is still to answer a: an
+// approval, or a command card (cards.go).
 func (m *Model) awaitsPlanner(s *session, a pendingAction) bool {
-	return a.kind == pendingApproval && !a.policy.userOnly && !a.left && m.watchedBy(s.path)
+	return (a.kind == pendingApproval || a.kind == pendingCommand) && !a.policy.userOnly && !a.left && m.watchedBy(s.path)
 }
 
 // answer approves or denies s.pending[i] on behalf of by.
@@ -269,11 +270,11 @@ func (m *Model) resume(s *session) tea.Cmd {
 	}
 	var waiting []string
 	for _, a := range s.pending {
-		if a.kind != pendingApproval {
-			continue
-		}
 		if m.awaitsPlanner(s, a) {
 			return nil
+		}
+		if a.kind != pendingApproval {
+			continue
 		}
 		waiting = append(waiting, a.text)
 	}
@@ -283,7 +284,7 @@ func (m *Model) resume(s *session) tea.Cmd {
 	approved, denied, planner := s.approved, s.denied, s.byPlanner
 	s.approved, s.denied, s.byPlanner = nil, nil, false
 	if !planner && len(denied) == 0 && len(waiting) == 0 {
-		return m.sendAs(s, usage.KindResume, "I approved `"+strings.Join(approved, "`, `")+"`. Run it now and carry on.")
+		return m.sendAs(s, usage.KindResume, s.withQueued("I approved `"+strings.Join(approved, "`, `")+"`. Run it now and carry on."))
 	}
 	var parts []string
 	if len(approved) > 0 {
@@ -295,7 +296,7 @@ func (m *Model) resume(s *session) tea.Cmd {
 	if len(waiting) > 0 {
 		parts = append(parts, "Still waiting for the user: `"+strings.Join(waiting, "`, `")+"`. Don't run it until you hear; get on with what you can.")
 	}
-	return m.sendAs(s, usage.KindResume, strings.Join(parts, " ")+" Then carry on with your task.")
+	return m.sendAs(s, usage.KindResume, s.withQueued(strings.Join(parts, " ")+" Then carry on with your task."))
 }
 
 // findApproval finds the approval an answer names: by ID among every
@@ -360,7 +361,7 @@ func (m *Model) leaveUndecided(planner *session) tea.Cmd {
 		changed := false
 		for i := 0; i < len(s.pending); i++ {
 			a := &s.pending[i]
-			if a.kind != pendingApproval || !slices.Contains(asked, a.id) || a.left {
+			if a.kind != pendingApproval && a.kind != pendingCommand || !slices.Contains(asked, a.id) || a.left {
 				continue
 			}
 			if m.awaitsPlanner(s, *a) {

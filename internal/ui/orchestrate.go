@@ -75,6 +75,15 @@ type orchItem struct {
 
 	// When orchestrate first saw it, for waiting until items settle.
 	at time.Time
+
+	// Group messages: the chat's folder and how many of its messages the
+	// item covers, so the planner's read position (orchestrator.told)
+	// moves once it is sent.
+	dir  string
+	upto int
+	// A finished task's HEAD, which becomes its session's finishedHead once
+	// the planner is asked to check it.
+	head string
 }
 
 // orchestrator is grove's state for the planners watching plans: what
@@ -83,7 +92,8 @@ type orchItem struct {
 type orchestrator struct {
 	plannerState
 	queue  []orchItem
-	seen   map[string]int  // group chat messages already passed on, by folder
+	seen   map[string]int  // group chat messages already queued, by folder
+	told   map[string]int  // ... and sent to a planner (or history), saved in orchFile
 	orders map[string]bool // control orders already carried out, by ID
 }
 
@@ -242,19 +252,23 @@ func (m *Model) queueTurn(s *session, again bool) tea.Cmd {
 		return nil
 	}
 	var cmds, ids []string
-	for _, a := range s.pending {
-		if m.awaitsPlanner(s, a) {
+	for i := range s.pending {
+		a := &s.pending[i]
+		if a.id == "" {
+			a.id = s.nextApprovalID() // a command card saved by an older grove
+		}
+		if m.awaitsPlanner(s, *a) {
 			cmds, ids = append(cmds, a.text), append(ids, a.id)
 		}
 	}
 	reply := strings.TrimSpace(s.lastReply.String())
 	switch {
 	case len(cmds) > 0:
-		userToo := slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval && a.policy.userOnly })
+		userToo := slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.policy.userOnly })
 		m.orch.queue = append(m.orch.queue, orchItem{kind: orchApproval, plan: p.ID, branch: t.Branch, lines: cmds, ids: ids, urgent: true, now: userToo})
 	case slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval }):
 		// Only the user can answer what it waits on.
-	case t.Status == plan.Working && !s.failed && endsWithQuestion(reply):
+	case t.Status == plan.Working && !s.failed && looksLikeQuestion(reply):
 		if r := []rune(reply); len(r) > 2000 {
 			reply = "…" + string(r[len(r)-2000:])
 		}
@@ -300,8 +314,15 @@ func (m *Model) onFinishedHead(msg finishedHeadMsg) tea.Cmd {
 	if msg.again && msg.head != "" && msg.head == s.finishedHead {
 		return nil
 	}
-	s.finishedHead = msg.head
-	m.orch.queue = append(m.orch.queue, orchItem{kind: orchFinished, plan: msg.plan, branch: msg.branch, lines: []string{msg.reply}, urgent: true})
+	// finishedHead is set once the planner is asked (markSent), so news
+	// still queued when grove closes is found again after a restart.
+	it := orchItem{kind: orchFinished, plan: msg.plan, branch: msg.branch, lines: []string{msg.reply}, urgent: true, head: msg.head}
+	if i := slices.IndexFunc(m.orch.queue, func(q orchItem) bool { return q.kind == orchFinished && q.branch == msg.branch }); i >= 0 {
+		it.at = m.orch.queue[i].at
+		m.orch.queue[i] = it
+	} else {
+		m.orch.queue = append(m.orch.queue, it)
+	}
 	return m.orchestrate()
 }
 
@@ -327,6 +348,9 @@ func (m *Model) queueGroups() {
 	if m.orch.seen == nil {
 		m.orch.seen = map[string]int{}
 	}
+	if m.orch.told == nil {
+		m.orch.told = map[string]int{}
+	}
 	for _, p := range m.plans {
 		if !watched(p) {
 			continue
@@ -339,13 +363,19 @@ func (m *Model) queueGroups() {
 			}
 			seen, known := m.orch.seen[log.Dir]
 			m.orch.seen[log.Dir] = len(g.msgs)
+			if !known {
+				// A chat never read before: its history counts as told.
+				m.orch.told[log.Dir] = len(g.msgs)
+			}
 			if !known || len(g.msgs) <= seen {
 				continue
 			}
-			it := orchItem{kind: orchGroup, plan: p.ID, group: grp.ID}
+			it := orchItem{kind: orchGroup, plan: p.ID, group: grp.ID, dir: log.Dir, upto: len(g.msgs)}
+			owner := group.PlannerOf(chatOwner(grp.ID))
 			for _, msg := range g.msgs[seen:] {
-				// The planner hears about merges and tests directly.
-				if msg.From == group.Planner || grp.ID == plan.ChatID && msg.From == group.Grove {
+				// The owner doesn't hear its own posts, and the lead hears
+				// about merges and tests directly.
+				if msg.From == owner || grp.ID == plan.ChatID && msg.From == group.Grove {
 					continue
 				}
 				to := ""
@@ -358,8 +388,12 @@ func (m *Model) queueGroups() {
 					// The user talks to the planner in charge of that chat,
 					// and waits for its answer.
 					it.urgent, it.now = true, true
+				case group.IsPlanner(msg.From), group.IsPlanner(msg.To), msg.To == group.User:
+					// Another planner, or an agent asking for a decision: the
+					// planner in charge answers for the user.
+					it.urgent = true
 				default:
-					it.urgent = it.urgent || msg.To == "" && msg.From != group.User
+					it.urgent = it.urgent || msg.To == ""
 				}
 			}
 			if len(it.lines) > 0 {
@@ -440,7 +474,11 @@ func (m *Model) orchestrate() tea.Cmd {
 		items := byOwner[k]
 		cmd, sent := m.orchestrateOne(items)
 		if !sent {
+			// Approvals and questions needn't wait for a busy owner (lane.go).
+			var lane tea.Cmd
+			lane, items = m.orchestrateLane(items)
 			rest = append(rest, items...)
+			cmds = append(cmds, lane)
 		}
 		cmds = append(cmds, cmd)
 	}
@@ -468,6 +506,9 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	if groupID != "" && cur == nil {
 		st = &plannerState{}
 	}
+	if m.now.Before(st.retryAt) {
+		return nil, false // its last turn failed: the clock tries again later
+	}
 	who := "The planner"
 	if groupID != "" {
 		who = "The planner of " + groupTitleOf(m.planByID(planID), groupID)
@@ -494,6 +535,8 @@ func (m *Model) orchestrateOne(items []orchItem) (tea.Cmd, bool) {
 	s.nextPlan = planIDs(items)[0]
 	s.nextKind = usage.KindDecide
 	st.reports = nil
+	st.sent = slices.Clone(items) // back in the queue if the turn fails
+	m.markSent(items)
 	rules, _ := m.rulesFor(s)
 	cmd := m.send(s, text)
 	s.rulesSent = rulesKey(rules)
@@ -560,7 +603,7 @@ func (m *Model) orchPrompt(s *session, items []orchItem) (string, string) {
 				_, t, ts := m.watchedTask(it.branch)
 				fmt.Fprintf(&b, "\n%s (task %q) wants to run commands it isn't allowed to:\n", it.branch, t.Title)
 				for i, c := range it.lines {
-					fmt.Fprintf(&b, "- id %s: `%s`%s\n", it.ids[i], c, m.staleSuffix(ts, it.ids[i]))
+					fmt.Fprintf(&b, "- id %s: `%s`%s\n", it.ids[i], c, m.staleSuffix(ts, it.ids[i])+cardSuffix(ts, it.ids[i]))
 				}
 				what = append(what, fmt.Sprintf("%s wants to run %s", it.branch, plural(len(it.lines), "command")))
 			case orchQuestion:
@@ -678,11 +721,14 @@ func (m *Model) orchRules(s *session) string {
 		"If one is marked as the worktree changed since it was asked, check the worktree before approving it: it may no longer do what the agent meant. " +
 		"Deny anything destructive and anything that reaches outside the plan's worktrees, saying what to do instead. " +
 		"Commands grove's policy keeps for the user (deleting branches or worktrees, force pushes, discarding work, protected branches) aren't listed and can't be approved by you. " +
+		"Some are commands an agent asked grove to run for it (marked so): approving one runs it in the agent's worktree and gives the agent the output; denying dismisses it. " +
 		"grove reports every decision that doesn't apply. " +
 		"Answer every question and every approval you are given; anything you leave out is asked again, and an approval you keep leaving is denied. " +
 		"When an agent is struggling (errors, failing builds or tests, missing tools or dependencies, going round in circles), take it on: look at its worktree, " +
 		"run the commands it needs there yourself, and tell it exactly what to do next. Don't edit files yourself; the agents do. " +
 		"Post in a group chat to settle anything the agents are stuck on or disagree about. " +
+		"The lead planner posts as \"planner\" and each group's planner as \"planner:<group id>\"; planners hear each other's posts, " +
+		"so a group's planner reaches the lead in the plan chat and the lead reaches a group's planner in that group's chat. " +
 		"Answer the user in the plan chat (group \"plan\"), not in your reply: they read the plan chat. Keep messages short.\n")
 	return b.String()
 }
@@ -811,6 +857,16 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 			name = "`" + a.Command + "`"
 		}
 		o := outcome{order: a.order, what: fmt.Sprintf("%s %s for %s", verb, name, a.Branch), result: control.Applied}
+		if cs, ci := m.findCard(a.Branch, a.ID, a.Command); cs != nil {
+			// A command the agent asked grove to run (cards.go).
+			cmd, o2, resume := m.decideCard(cs, ci, approve, a.Reason, o)
+			cmds, o = append(cmds, cmd), o2
+			if resume {
+				answered = append(answered, applied{len(outs), cs, cs.running})
+			}
+			outs = append(outs, o)
+			return
+		}
 		s, i, rec := m.findApproval(a.Branch, a.ID, a.Command)
 		switch {
 		case s == nil:
@@ -905,7 +961,7 @@ func (m *Model) decide(by *session, d decisions) (tea.Cmd, []outcome) {
 	}
 	for _, p := range d.Post {
 		o := outcome{order: p.order, what: "post in " + cmp.Or(p.Group, plan.ChatID), result: control.Applied}
-		if cmd := m.plannerPost(p.Plan, p.Group, p.To, p.Message); cmd != nil {
+		if cmd := m.plannerPost(plannerName(by), p.Plan, p.Group, p.To, p.Message); cmd != nil {
 			cmds = append(cmds, cmd)
 		} else {
 			o.result, o.detail = control.NotFound, "no watched plan has that chat, or the message is empty"
@@ -969,10 +1025,10 @@ func replyKind(p *plan.Plan) usage.Kind {
 	return usage.KindWork
 }
 
-// plannerPost posts the planner's message in a watched plan's chat. Every
-// plan has a plan chat, so without planID it goes to the newest one still
-// going.
-func (m *Model) plannerPost(planID, groupID, to, text string) tea.Cmd {
+// plannerPost posts a planner's message in a watched plan's chat, from
+// group.Planner (the lead) or "planner:<group>" (plannerName). Every plan
+// has a plan chat, so without planID it goes to the newest one still going.
+func (m *Model) plannerPost(from, planID, groupID, to, text string) tea.Cmd {
 	text = strings.TrimSpace(text)
 	if groupID == "" {
 		groupID = plan.ChatID
@@ -992,13 +1048,13 @@ func (m *Model) plannerPost(planID, groupID, to, text string) tea.Cmd {
 		if !ok {
 			return nil
 		}
-		if !slices.ContainsFunc(p.ChatMembers(groupID), func(t *plan.Task) bool { return t.Branch == to }) {
+		if to != group.User && !group.IsPlanner(to) && !slices.ContainsFunc(p.ChatMembers(groupID), func(t *plan.Task) bool { return t.Branch == to }) {
 			to = ""
 		}
 		if g := m.groups[log.Dir]; g != nil {
 			g.wakeups, g.paused = 0, false
 		}
-		msg := group.Message{From: group.Planner, To: to, Text: text}
+		msg := group.Message{From: from, To: to, Text: text}
 		return func() tea.Msg {
 			if err := log.Post(msg); err != nil {
 				return actionMsg{err: fmt.Errorf("couldn't post the planner's message: %w", err)}

@@ -3,7 +3,6 @@
 package fslock
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -40,7 +39,7 @@ func Lock(path string) (func(), error) {
 			return func() { release(path, token) }, nil
 		}
 		// Windows answers "access denied" while another writer's lock is
-		// being deleted or renamed, so that is a busy lock too until the
+		// being deleted, so that is a busy lock too until the
 		// deadline.
 		denied := runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission)
 		if !errors.Is(err, os.ErrExist) && !denied {
@@ -65,46 +64,65 @@ func newToken() string {
 	return hex.EncodeToString(b)
 }
 
-// release removes the lock file if it is still this hold's.
+// release removes the lock file if it is still this hold's. It does so
+// under the break lock, so a waiter breaking the lock as stale can't remove
+// a lock created between its check and its removal.
 func release(path, token string) {
+	if unbreak := breakLock(path, time.Second); unbreak != nil {
+		defer unbreak()
+	}
 	if b, err := os.ReadFile(path); err == nil && string(b) == token {
 		os.Remove(path)
 	}
 }
 
-// takeOver moves a stale lock out of the way, reporting whether it did.
-// Renaming is atomic, so of several waiters that saw the same stale lock
-// only one moves it. One that moved a lock created after its check (another
-// waiter took the stale one over first) puts that lock back.
+// takeOver removes a stale lock, reporting whether it did. Removing a lock
+// file, here or in release, only happens under the break lock, and a new
+// lock can only be created once the file is gone, so the lock checked as
+// stale is the one removed. Of several waiters that saw the same stale lock
+// the first removes it and the others find it fresh, or gone.
 func takeOver(path string) bool {
+	if fi, err := os.Stat(path); err != nil || time.Since(fi.ModTime()) <= Stale {
+		return false
+	}
+	unbreak := breakLock(path, 0)
+	if unbreak == nil {
+		return false // another waiter is breaking it
+	}
+	defer unbreak()
 	fi, err := os.Stat(path)
 	if err != nil || time.Since(fi.ModTime()) <= Stale {
 		return false
 	}
-	old, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	aside := path + ".stale-" + newToken()
-	if os.Rename(path, aside) != nil {
-		return false // gone already, or another waiter is moving it
-	}
-	moved, rerr := os.ReadFile(aside)
-	mfi, serr := os.Stat(aside)
-	if rerr == nil && serr == nil && bytes.Equal(moved, old) && time.Since(mfi.ModTime()) > Stale {
-		os.Remove(aside)
-		return true
-	}
-	// A live lock: back where it was, unless someone holds a newer one by
-	// now. Link never replaces a file; rename is the fallback where links
-	// aren't supported.
-	if err := os.Link(aside, path); err != nil && !errors.Is(err, os.ErrExist) {
-		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-			if os.Rename(aside, path) == nil {
-				return false
-			}
+	return os.Remove(path) == nil
+}
+
+// breakStale is how old a break lock is before it counts as left by a
+// process that died while holding it; it is only ever held for a moment.
+const breakStale = 2 * time.Second
+
+// breakLock takes the short-lived lock that guards removing path's lock
+// file, waiting up to wait for it. It returns nil if it couldn't.
+func breakLock(path string, wait time.Duration) func() {
+	bpath := path + ".break"
+	deadline := time.Now().Add(wait)
+	for {
+		f, err := os.OpenFile(bpath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			f.Close()
+			return func() { os.Remove(bpath) }
 		}
+		denied := runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission)
+		if !errors.Is(err, os.ErrExist) && !denied {
+			return nil
+		}
+		if fi, err := os.Stat(bpath); err == nil && time.Since(fi.ModTime()) > breakStale {
+			os.Remove(bpath)
+			continue
+		}
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	os.Remove(aside)
-	return false
 }

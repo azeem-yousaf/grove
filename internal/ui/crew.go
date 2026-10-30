@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
@@ -31,6 +32,13 @@ type plannerState struct {
 	paused  bool     // stopped at the limit until the user says something
 	asked   []string // approvals in its current turn, by ID
 	reports []string // its decisions that didn't apply, for its next request
+
+	// A failed turn puts what it was sent back in the queue (orchfail.go)
+	// and holds the next one off until retryAt.
+	sent        []orchItem // the items its current turn was asked about
+	fails       int        // failed turns in a row
+	retryAt     time.Time
+	failAlerted bool // the user was told it keeps failing
 }
 
 // crewKey identifies a group's planner; "" for the lead.
@@ -45,7 +53,7 @@ func (s *session) crewKey() string { return crewKey(s.crewPlan, s.crewGroup) }
 
 // stateOf is s's state as an orchestrator.
 func (m *Model) stateOf(s *session) *plannerState {
-	if s != nil && s.crewGroup != "" {
+	if s != nil && (s.crewGroup != "" || s.lane) {
 		return &s.crew
 	}
 	return &m.orch.plannerState
@@ -217,6 +225,20 @@ func (m *Model) dropCrews(planID string) tea.Cmd {
 			}
 			return persistMsg{err: st.Remove(file)}
 		})
+	}
+	// Their approval lanes go too; the lead's stays for its other plans.
+	for key, s := range m.lanes {
+		if s.crewPlan != planID || s.crewGroup == "" {
+			continue
+		}
+		cmds = append(cmds, m.abandonTurn(s), m.flushUsage(s))
+		m.keepUsage(s)
+		if s.running && s.cancel != nil {
+			s.cancel()
+		}
+		delete(m.lanes, key)
+		stop, proc := m.stopAgent, agent.ReadOnlyKey(s.path, s.slot())
+		cmds = append(cmds, func() tea.Msg { stop(proc); return nil })
 	}
 	if len(cmds) > 0 {
 		cmds = append(cmds, m.writePolicy())

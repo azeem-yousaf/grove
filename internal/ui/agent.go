@@ -57,10 +57,13 @@ type session struct {
 	byPlanner  bool            // the planner answered some of the current batch
 	answered   []answerRec     // recent answers, so a repeated one changes nothing
 	notes      []string        // news from grove for the agent's next turn
+	queued     []string        // the user's messages typed while it worked, for when it is free
 	cost       string
 	failed     bool
+	stopping   bool // the user stopped the running turn
 	seen       bool // the user has looked since it last finished
 	planner    bool // the planner: reads the repository, never edits it
+	lane       bool // a planner's approval lane (lane.go), in m.lanes, never saved
 
 	// A group's planner (crew.go) is a planner in charge of one group of a
 	// plan the planner watches; the lead planner has neither.
@@ -160,6 +163,7 @@ type (
 		path       string
 		planner    bool   // for the planner rather than path's worktree agent
 		crew       string // for that group's planner (crewKey), with planner
+		lane       bool   // for that planner's approval lane (lane.go)
 		ev         agent.Event
 		checkpoint string
 		turnTree   string // taken before a later turn, for "since the last turn"
@@ -289,7 +293,8 @@ func (m *Model) sessionFor(path string) *session {
 	return nil
 }
 
-// allSessions is every agent: the worktree agents and the planner.
+// allSessions is every agent: the worktree agents, the planners and their
+// approval lanes.
 func (m *Model) allSessions() []*session {
 	out := make([]*session, 0, len(m.sessions)+1)
 	for _, s := range m.sessions {
@@ -299,6 +304,9 @@ func (m *Model) allSessions() []*session {
 		out = append(out, m.planner)
 	}
 	for _, s := range m.crews {
+		out = append(out, s)
+	}
+	for _, s := range m.lanes {
 		out = append(out, s)
 	}
 	return out
@@ -404,9 +412,15 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "ctrl+x":
 		if s.running && s.cancel != nil {
+			s.stopping = true
 			s.cancel()
 		}
 		return nil
+	case "ctrl+u":
+		if len(s.queued) > 0 && m.chatInput.Value() == "" {
+			s.queued = nil
+			return m.notify("Dropped the queued message", toastInfo)
+		}
 	case "ctrl+z":
 		return m.askUndo(s)
 	case "ctrl+y":
@@ -463,11 +477,17 @@ func (m *Model) onChatKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.chatInput.SetValue("")
 			return m.modelCommand(s, strings.TrimSpace(arg))
 		}
-		if text == "" || s.running {
+		if text == "" {
 			return nil
 		}
 		m.chatInput.SetValue("")
 		m.userActed()
+		if s.running {
+			// It goes when the turn ends (sendQueued).
+			s.queued = append(s.queued, text)
+			m.chatFollow = true
+			return nil
+		}
 		return m.send(s, text)
 	}
 	var cmd tea.Cmd
@@ -590,17 +610,17 @@ func (m *Model) onPendingKey(s *session, key string) tea.Cmd {
 	m.userActed()
 	next := func() tea.Cmd {
 		s.pending = s.pending[1:]
-		return m.resume(s)
+		return m.carryOn(s)
 	}
 	switch key {
 	case "esc", "n":
 		if a.kind == pendingApproval {
-			return tea.Batch(m.answer(s, 0, false, byUser, ""), m.resume(s))
+			return tea.Batch(m.answer(s, 0, false, byUser, ""), m.carryOn(s))
 		}
 		return next()
 	case "enter", "y":
 		if a.kind == pendingApproval {
-			return tea.Batch(m.answer(s, 0, true, byUser, ""), m.resume(s))
+			return tea.Batch(m.answer(s, 0, true, byUser, ""), m.carryOn(s))
 		}
 		cmd := m.runSuggested(s, a.text)
 		return tea.Batch(next(), cmd)
@@ -643,6 +663,38 @@ func (m *Model) snapIndex(path string) int {
 	return m.snap.IndexOf(path)
 }
 
+// carryOn resumes s with the answers to its cards, else sends the user's
+// queued messages once nothing waits.
+func (m *Model) carryOn(s *session) tea.Cmd {
+	if cmd := m.resume(s); cmd != nil {
+		return cmd
+	}
+	return m.sendQueued(s)
+}
+
+// sendQueued sends the messages the user typed while s worked, as one
+// message, once it is free and no card waits; with cards waiting they go
+// with the answers instead (resume, withQueued).
+func (m *Model) sendQueued(s *session) tea.Cmd {
+	if s.running || len(s.queued) == 0 || len(s.pending) > 0 {
+		return nil
+	}
+	text := strings.Join(s.queued, "\n\n")
+	s.queued = nil
+	return m.send(s, text)
+}
+
+// withQueued adds the user's queued messages to text, a message grove
+// sends for them.
+func (s *session) withQueued(text string) string {
+	if len(s.queued) == 0 {
+		return text
+	}
+	text += "\n\nThe user also said:\n\n" + strings.Join(s.queued, "\n\n")
+	s.queued = nil
+	return text
+}
+
 // send starts one turn of the agent.
 func (m *Model) send(s *session, text string) tea.Cmd {
 	s.entries = append(s.entries, chatEntry{roleUser, text})
@@ -676,14 +728,14 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 	}
 	req.Context, req.Message = s.takeNotes(req.Context, req.Message)
 	// The planner changes nothing, so there's nothing to undo.
-	path, planner, crew, needCheckpoint := s.path, s.planner, s.crewKey(), s.checkpoint == "" && !s.planner
+	path, planner, crew, lane, needCheckpoint := s.path, s.planner, s.crewKey(), s.lane, s.checkpoint == "" && !s.planner
 	run := m.runAgent
 	go func() {
 		defer close(ch)
 		if checkGuard != nil {
 			if g, ok := checkGuard().(guardVerifiedMsg); ok {
 				ack := make(chan struct{})
-				ch <- agentMsg{path: path, planner: planner, crew: crew, guard: &g, ack: ack}
+				ch <- agentMsg{path: path, planner: planner, crew: crew, lane: lane, guard: &g, ack: ack}
 				select {
 				case <-ack:
 				case <-time.After(10 * time.Second):
@@ -699,7 +751,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				// still works this session if pinning fails.
 				_ = git.KeepCheckpoint(ctx, path, path, tree)
 			}
-			ch <- agentMsg{path: path, planner: planner, crew: crew, checkpoint: tree, err: err}
+			ch <- agentMsg{path: path, planner: planner, crew: crew, lane: lane, checkpoint: tree, err: err}
 		case !planner:
 			// Cheap: it starts from the real index, so only what changed
 			// is hashed. Without it, v can only show all the changes.
@@ -707,7 +759,7 @@ func (m *Model) send(s *session, text string) tea.Cmd {
 				ch <- agentMsg{path: path, turnTree: tree}
 			}
 		}
-		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, crew: crew, ev: ev} })
+		run(ctx, req, func(ev agent.Event) { ch <- agentMsg{path: path, planner: planner, crew: crew, lane: lane, ev: ev} })
 	}()
 	return tea.Batch(listen(ch), m.startAnimating(), registered, policyErr)
 }
@@ -726,7 +778,7 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Model:    s.model,
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,
-		Slot:     s.crewKey(),
+		Slot:     s.slot(),
 		Commands: s.planner && m.orchestrating(),
 		Tools:    append(m.groupTools(s), m.controlTools(s)...),
 		ReadDirs: m.groupmateDirs(s),
@@ -767,6 +819,9 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 		s = m.planner
 		if msg.crew != "" {
 			s = m.crews[msg.crew]
+		}
+		if msg.lane {
+			s = m.lanes[msg.crew]
 		}
 	}
 	if s == nil {
@@ -823,6 +878,8 @@ func (m *Model) onAgent(msg agentMsg) tea.Cmd {
 
 func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	s.running, s.cancel, s.stream = false, nil, ""
+	stopped := s.stopping // the user stopped it
+	s.stopping = false
 	if ev.Session != "" {
 		s.setSessionID(ev.Session)
 	}
@@ -862,22 +919,51 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 		}
 		s.entries = append(s.entries, chatEntry{roleNote, fmt.Sprintf("Blocked %s %s: %s", d.Tool, what, why)})
 	}
-	// grove runs the routine git lines itself; the rest wait for the user.
+	// grove runs the routine git lines itself; the rest wait for the user,
+	// or on a watched plan for the planner (cards.go).
+	before := len(s.pending)
 	gitCmd := m.suggestedLines(s, suggestedCommands(reply))
+	for i := before; i < len(s.pending); i++ {
+		a := &s.pending[i]
+		if a.kind != pendingCommand {
+			continue
+		}
+		if a.id == "" {
+			a.id = s.nextApprovalID()
+		}
+		if !m.watchedBy(s.path) {
+			continue
+		}
+		// The planner may run it for the agent, unless grove's policy keeps
+		// the whole line for the user.
+		if pol := m.classify(s, "Bash", a.text); pol.userOnly && !a.policy.userOnly {
+			a.policy = pol
+		}
+		if a.policy.userOnly {
+			needsYou = append(needsYou, *a)
+		}
+	}
 
 	viewing := m.focus == focusChat && m.chatSession() == s
 	s.seen = viewing
 	cmds := []tea.Cmd{m.startScan(), recordErr, gitCmd, m.checkWatches(s)}
 	switch {
+	case s.lane:
+		// Its owner's chat gets a line about it; it has no chat of its own.
+		cmds = append(cmds, m.applyDecisions(s, reply), m.laneDone(s, ev.Err == nil), m.plannerTurnEnded(s, ev, stopped), m.orchestrate())
+		if ev.Err == nil {
+			return tea.Batch(cmds...)
+		}
 	case s.crewGroup != "":
-		cmds = append(cmds, m.applyDecisions(s, reply), m.leaveUndecided(s), m.orchestrate())
+		// What the user typed meanwhile goes before grove's next request.
+		cmds = append(cmds, m.applyDecisions(s, reply), m.plannerTurnEnded(s, ev, stopped), m.sendQueued(s), m.orchestrate())
 	case s.planner:
-		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(s, reply), m.leaveUndecided(s), m.orchestrate())
+		cmds = append(cmds, m.onPlannerReply(s, reply), m.applyDecisions(s, reply), m.plannerTurnEnded(s, ev, stopped), m.sendQueued(s), m.orchestrate())
 	default:
 		// Answers given while it worked go to it now, which carries on its
-		// turn rather than ending it.
-		if resume := m.resume(s); resume != nil {
-			cmds = append(cmds, resume)
+		// turn rather than ending it; so does what the user typed meanwhile.
+		if next := m.carryOn(s); next != nil {
+			cmds = append(cmds, next)
 		} else {
 			cmds = append(cmds, m.onTaskTurn(s, ev))
 		}
@@ -1278,8 +1364,10 @@ func (m *Model) chatBottom(s *session, width int) []string {
 	if len(s.pending) > 0 {
 		a := s.pending[0]
 		head, keys := st.warn.Bold(true).Render(" "+s.kind.Label()+" wants to run"), [][2]string{{"enter", "allow"}, {"esc", "deny"}}
+		if a.kind == pendingCommand {
+			head, keys = st.accent.Bold(true).Render(" Suggested command"), [][2]string{{"enter", "run"}, {"e", "edit"}, {"esc", "skip"}}
+		}
 		switch {
-		case a.kind != pendingApproval:
 		case a.policy.userOnly:
 			why := "needs you"
 			if a.policy.reason != "" {
@@ -1290,9 +1378,6 @@ func (m *Model) chatBottom(s *session, width int) []string {
 			head += st.faint.Render("  · the planner will decide unless you do")
 		case a.left:
 			head += st.faint.Render("  · the planner left it for you")
-		}
-		if a.kind == pendingCommand {
-			head, keys = st.accent.Bold(true).Render(" Suggested command"), [][2]string{{"enter", "run"}, {"e", "edit"}, {"esc", "skip"}}
 		}
 		more := ""
 		if n := len(s.pending) - 1; n > 0 {
@@ -1309,13 +1394,21 @@ func (m *Model) chatBottom(s *session, width int) []string {
 	hint := [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"tab", "list"}, {"ctrl+z", "undo all"}, {"/model", "model"}}
 	switch {
 	case s.running:
-		hint = [][2]string{{"ctrl+x", "stop"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"/model", "model"}}
+		hint = [][2]string{{"enter", "queue"}, {"ctrl+x", "stop"}, {"ctrl+y", "copy reply"}, {"tab", "list"}, {"/model", "model"}}
 	case s.crewGroup != "":
 		hint = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+g", "group chat"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"tab", "list"}, {"/model", "model"}}
 	case s.planner:
 		hint = [][2]string{{"enter", "send"}, {"shift+enter", "new line"}, {"ctrl+o", "review plan"}, {"ctrl+y", "copy reply"}, {"ctrl+v", "paste"}, {"tab", "list"}, {"/model", "model"}}
 	}
 	out := []string{rule}
+	if n := len(s.queued); n > 0 {
+		label := "queued: "
+		if n > 1 {
+			label = fmt.Sprintf("queued (%d): ", n)
+		}
+		out = append(out, " "+st.faint.Render(ansi.Truncate(label+strings.Join(strings.Fields(s.queued[n-1]), " "), width-2, "…")))
+		hint = append([][2]string{{"ctrl+u", "drop queued"}}, hint...)
+	}
 	for i, l := range strings.Split(m.chatInput.View(), "\n") {
 		mark := "  "
 		if i == 0 {

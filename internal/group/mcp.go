@@ -37,10 +37,11 @@ func server(log Log, me, version string) mcp.Server {
 			tool("members", "List the members of your group chat: each agent's task, branch name and worktree folder (which you may read but not change).",
 				mcp.Object(map[string]any{})),
 			tool("post", "Send a message to your group chat, or to one member with `to`. Use it to tell groupmates about anything they depend on "+
-				"(APIs, types, file names, decisions) or to ask them something. Keep it short and specific. The user reads the group chat too.",
+				"(APIs, types, file names, decisions) or to ask them something. Keep it short and specific. The user reads the group chat too. "+
+				"Set `to` to \"you\" to address the user, or to \"planner\" for a decision from the planner when one watches the plan (see members).",
 				mcp.Object(map[string]any{
 					"text": map[string]any{"type": "string", "description": "The message."},
-					"to":   map[string]any{"type": "string", "description": "A member's name (their branch) to address only them. Leave out to address everyone."},
+					"to":   map[string]any{"type": "string", "description": "A member's name (their branch) to address only them, \"you\" for the user, or \"planner\" for the planner. Leave out to address everyone."},
 				}, "text")),
 			tool("read", "Get the messages sent to you since you last read. With wait_seconds, waits up to that long (at most 300) "+
 				"for a message when there is none yet, for example after asking a groupmate something.",
@@ -77,6 +78,10 @@ func call(log Log, me, name string, args json.RawMessage) (string, bool) {
 			}
 			b.WriteString("\n")
 		}
+		if info.Planner != "" {
+			fmt.Fprintf(&b, "\nThe planner watches this plan for the user and posts as %s; post with to %q when you need a decision from it.\n", info.Planner, Planner)
+		}
+		fmt.Fprintf(&b, "The user posts as %q; post with to %q to address them.\n", User, User)
 		return b.String(), false
 	case "post":
 		var a struct{ Text, To string }
@@ -111,7 +116,7 @@ func call(log Log, me, name string, args json.RawMessage) (string, bool) {
 }
 
 func hasMember(info Info, name string) bool {
-	if name == User {
+	if name == User || IsPlanner(name) && info.Planner != "" {
 		return true
 	}
 	for _, m := range info.Members {

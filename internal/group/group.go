@@ -27,8 +27,24 @@ const User = "you"
 // a member's worktree now conflicts with another.
 const Grove = "grove"
 
-// Planner is the From of messages the planner posts while it watches a plan.
+// Planner is the From of messages the lead planner posts while it watches
+// a plan; a group's planner posts as PlannerOf(group). Agents address
+// whichever planner owns their chat as Planner.
 const Planner = "planner"
+
+// PlannerOf is the name the planner of groupID posts as: Planner for the
+// lead (""), else "planner:<group>".
+func PlannerOf(groupID string) string {
+	if groupID == "" {
+		return Planner
+	}
+	return Planner + ":" + groupID
+}
+
+// IsPlanner reports whether name is one of the planners.
+func IsPlanner(name string) bool {
+	return name == Planner || strings.HasPrefix(name, Planner+":")
+}
 
 // Message is one post to a group.
 type Message struct {
@@ -58,6 +74,9 @@ type Info struct {
 	Plan    string   `json:"plan"`
 	Name    string   `json:"name"`
 	Members []Member `json:"members"`
+	// Planner is who posts for the planner watching the plan in this chat
+	// (PlannerOf), "" when the user watches it.
+	Planner string `json:"planner,omitempty"`
 }
 
 // Log is one group's folder.

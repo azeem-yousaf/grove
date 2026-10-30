@@ -145,8 +145,8 @@ func TestPlannerHearsAboutIdleTasks(t *testing.T) {
 	p.Orchestrated = true
 	m.now = time.Now()
 	s := m.sessionFor(m.taskPath(p, "feature/a"))
-	// A suggested command waits, so the task stays working.
-	s.pending = []pendingAction{{kind: pendingCommand, text: "make deploy"}}
+	// A suggested command only the user may run waits, so the task stays working.
+	s.pending = []pendingAction{{kind: pendingCommand, text: "make deploy", policy: approvalPolicy{userOnly: true}}}
 	s.lastReply.WriteString("Run make deploy for me.")
 	s.running = true
 	pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone}))
@@ -296,10 +296,10 @@ func TestPlannerFollowsGroupChat(t *testing.T) {
 		t.Fatalf("planner requests: %+v", r)
 	}
 	msgs, _ := log.All()
-	if last := msgs[len(msgs)-1]; last.From != group.Planner || last.To != "feature/b" || last.Text != "Use v2 of the API." {
+	if last := msgs[len(msgs)-1]; last.From != group.PlannerOf("g") || last.To != "feature/b" || last.Text != "Use v2 of the API." {
 		t.Errorf("last message = %+v", last)
 	}
-	if ctx := m.agentContext(m.sessionFor(m.taskPath(p, "feature/a"))); !strings.Contains(ctx, "The planner is watching this plan") {
+	if ctx := m.agentContext(m.sessionFor(m.taskPath(p, "feature/a"))); !strings.Contains(ctx, "Your group's planner is in charge of it") {
 		t.Error("grouped agents should know the planner reads their chat")
 	}
 }

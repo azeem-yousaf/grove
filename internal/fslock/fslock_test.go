@@ -38,7 +38,7 @@ func TestStolenLockReleaseKeepsNewHolder(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("lock left after release: %v", err)
 	}
-	if left, _ := filepath.Glob(path + ".stale-*"); len(left) > 0 {
+	if left, _ := filepath.Glob(path + ".*"); len(left) > 0 {
 		t.Errorf("leftovers: %v", left)
 	}
 }
@@ -78,7 +78,7 @@ func TestStaleTakeoverExclusive(t *testing.T) {
 	}
 }
 
-// Moving a lock that turned out to be live puts it back.
+// A fresh lock is never taken over.
 func TestTakeOverLeavesLiveLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lock")
 	unlock, err := Lock(path)
@@ -91,5 +91,26 @@ func TestTakeOverLeavesLiveLock(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A break lock left by a process that died while breaking a lock doesn't
+// block anyone for long.
+func TestStaleBreakLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	if err := os.WriteFile(path+".break", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * breakStale)
+	if err := os.Chtimes(path+".break", old, old); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := Lock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("lock left after release: %v", err)
 	}
 }

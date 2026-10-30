@@ -69,7 +69,7 @@ func pump(t *testing.T, m *Model, cmd tea.Cmd) {
 				for _, c := range msg {
 					start(c)
 				}
-			case agentMsg, undoReadyMsg, undoDoneMsg, agentSavedMsg, usageWrittenMsg, finishedHeadMsg:
+			case agentMsg, undoReadyMsg, undoDoneMsg, agentSavedMsg, usageWrittenMsg, finishedHeadMsg, cardRanMsg:
 				_, next := m.Update(msg)
 				start(next)
 				idle.Reset(3 * time.Second)
