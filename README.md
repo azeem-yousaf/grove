@@ -207,6 +207,10 @@ use; tick *Remember my choice* (off by default) to stop it asking
   `enter` sends, `shift+enter` (or `ctrl+j`) starts a new line. `ctrl+y`
   copies the agent's last reply as it wrote it, and dragging over the
   conversation (here or in a group chat) copies those lines as plain text.
+- **Typing while it works.** `enter` while the agent is working queues the
+  message (shown as *queued* above the box) and sends it when the turn ends,
+  together with your answers if it waits on cards. `ctrl+u` with an empty
+  box drops what is queued.
 - **Replies are formatted.** Markdown in replies shows as styled text
   without its marks: bold, italics, code, links, headings, quotes, bullets
   and task boxes. Tables are laid out in columns that fit the pane; when
@@ -248,18 +252,30 @@ Before you plan, grove asks who will watch the plan's agents while it runs:
     instead. Only destructive git (deleting branches or worktrees, force
     pushes, discarding work), changes to protected branches and commands
     that could get around grove's git checks are kept for you; it can't
-    approve those. One it doesn't answer is asked about again, then denied
-    so the agent carries on.
+    approve those. The same goes for commands an agent suggests: the planner
+    runs them in the background and gives the agent the output. One it
+    doesn't answer is asked about again, then denied so the agent carries
+    on.
   - **Questions and stuck agents.** It answers agents' questions from the
     plan and the code. When an agent struggles (errors, failing builds or
     tests, missing tools) it looks at its worktree, runs what it needs
     there and tells it exactly what to do next. It never edits files
     itself. A failed task is diagnosed and started again; it is only marked
-    failed if it can't be done at all.
-  - **Finished work.** When a task's agent says it is done, the planner
-    checks the work and sends back what is missing.
+    failed if it can't be done at all. Agents can also ask it directly in
+    their group chat or the plan chat.
+  - **Finished work.** When a task's agent says it is done, grove first runs
+    the plan's test command in its worktree, in the background, and the
+    planner gets the result with the news. It checks the work and sends back
+    what is missing.
   - **Group chats.** It follows them and settles what agents are stuck on
     or disagree about, also when they keep waking each other.
+  - **Never a bottleneck.** While a planner is busy with a long turn, urgent
+    approvals and questions for it go to a side turn: a copy of its
+    conversation that answers them without waiting for the planner's turn
+    to end, and tells the planner what it decided. A planner turn that
+    fails is tried again with the same work after a pause (10 s, doubling
+    up to 5 minutes); after three failures in a row grove tells you. When
+    grove restarts, whatever waited for a planner is picked up again.
 
   You can still answer anything first: an approval card says the planner
   will decide unless you do. Its decisions show in its chat and in each
@@ -273,16 +289,21 @@ Before you plan, grove asks who will watch the plan's agents while it runs:
   chat go to it, and it can only act on its own group. The main planner
   keeps the isolated tasks and the plan chat, and merges the plan. Press `P`
   on a group in the list, or `ctrl+p` in its group chat, to see a group's
-  planner and talk to it; `ctrl+g` in its chat opens the group chat.
+  planner and talk to it; `ctrl+g` in its chat opens the group chat. The
+  planners can post in each other's chats, so a group's planner can ask the
+  main planner something in the plan chat.
 
   While a plan it watches is running, the planner may run any shell command
   without asking (to read a task's diff, run its tests or install what an
-  agent needs), and the main planner gets grove's control tools through a
+  agent needs), and each planner gets grove's control tools through a
   small MCP server built into grove (`grove mcp-plan`): `tasks` (each
   task's status, the end of its agent's last reply and the commands it
-  waits on), `message`, `approve`, `deny`, `mark`, `post`, `merge` and
-  `close`. It can act with these during a turn as well as with its
-  decisions block at the end.
+  waits on), `message`, `approve`, `deny`, `mark`, `test` (runs the plan's
+  test command, or another long command, in a task's worktree in the
+  background and reports back when it ends), `post`, `merge` and `close`.
+  A group's planner sees and acts on its own group only; merging and
+  closing are the main planner's. A planner can act with these during a
+  turn as well as with its decisions block at the end.
 
   Once every task is finished or failed, the planner merges the plan for
   you. grove commits each finished task's worktree and merges the branches,
@@ -328,7 +349,9 @@ is created until you start it:
   starts each task's agent with its brief, at most `[planner] max_agents`
   (default 3) at a time; the rest wait for a free slot.
 - A task is finished when its agent ends a turn without needing you. A
-  reply that ends with a question, or an approval card, keeps it working.
+  reply that asks something (ending with a question mark, or asking in
+  words such as "should I…" or "please confirm"), or an approval card,
+  keeps it working.
   Once every task has finished, the planner says so; review the worktrees
   and merge them with `c`. (A plan the planner watches is merged for you;
   see above.)
@@ -337,7 +360,8 @@ is created until you start it:
 isolated tasks don't get it at all. grove gives each grouped agent three
 tools, through a small MCP server built into grove itself (`grove
 mcp-group`, started by Claude Code or Codex): `members` (who is in the
-group, their task and worktree), `post` (to everyone, or one member) and
+group, their task and worktree), `post` (to everyone, one member, you, or
+the planner when it is in charge) and
 `read` (new messages, optionally waiting for an answer). Agents are told to
 read their messages when they start and before they finish, and to post
 whatever their groupmates depend on. They may also read (never change)
@@ -392,7 +416,9 @@ isolated task's worktree or the plan's merged worktree to open it,
 planner's chat.
 
 Plans, the planners' conversations and group chats are saved with the
-agents' conversations and survive restarts.
+agents' conversations and survive restarts, as does what was waiting for a
+planner: commands to approve, questions, finished work, chat messages and
+news about merges, tests and the pull request.
 
 ### Overview of every worktree
 
@@ -589,7 +615,7 @@ max_wakeups = 6      # wake-ups in a row in a group chat before waiting for you
 max_decisions = 20   # turns in a row a planner takes without the plan moving forward
 settle = "15s"       # quiet time in a chat before agents are woken (planner: at most 5s); "0s" = at once
 watcher = ""         # who watches a plan's agents: "you" or "planner" (in charge); "" = ask before each plan
-test = ""            # run in a merged plan's worktree, e.g. "go test ./..."; "" = the planner's suggestion
+test = ""            # run in a merged plan's worktree and each finished task's, e.g. "go test ./..."; "" = the planner's suggestion
 test_minutes = 20    # how long that may run before it is stopped
 pull_requests = true # push a merged plan's branch and open a pull request with gh
 model = ""           # the planner's model; "" = [ai]'s
