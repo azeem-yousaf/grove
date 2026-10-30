@@ -73,10 +73,11 @@ func (m *Model) startTurn(s *session) tea.Cmd {
 	s.live, s.liveSeen = usage.Tokens{}, false
 	planID := ""
 	if s.planner {
+		// A group planner works for its plan; the lead only for the plan
+		// grove asked it about (orchestrateOne). Anything else, such as
+		// the user's message in its chat, is planning: drafting turns that
+		// go to the draft they lead to, even while it watches a plan.
 		planID = cmp.Or(s.crewPlan, s.nextPlan)
-		if planID == "" {
-			planID = m.watchingPlan()
-		}
 		s.nextPlan = ""
 	}
 	s.turnAttr = m.attrFor(s, planID)
@@ -102,17 +103,6 @@ func turnKind(s *session) usage.Kind {
 func (m *Model) sendAs(s *session, k usage.Kind, text string) tea.Cmd {
 	s.nextKind = k
 	return m.send(s, text)
-}
-
-// watchingPlan is the plan the planner is watching or merging, if any: the
-// newest.
-func (m *Model) watchingPlan() string {
-	for _, p := range m.plans {
-		if orchestrated(p) {
-			return p.ID
-		}
-	}
-	return ""
 }
 
 // attrFor is what s's turn works for right now. The planner's plan is

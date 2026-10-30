@@ -323,6 +323,37 @@ func TestUsagePlannerDraftingTurnsGoToThePlan(t *testing.T) {
 	}
 }
 
+// The user planning the next plan in the planner's chat while it watches
+// another: those turns go to the new draft, not the watched plan.
+func TestUsagePlanningWhileWatchingGoesToTheDraft(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	withLedger(t, m)
+	p := usagePlan(m)
+	reply := "Here it is.\n\n```grove-plan\n{\"title\": \"Next\", \"tasks\": [{\"id\": \"a\", \"title\": \"A\", \"branch\": \"feature/x\", \"brief\": \"b\"}]}\n```"
+	fake := &fakeAgent{turns: [][]agent.Event{
+		{{Kind: agent.EvText, Text: "Checked."}, done(5, 1, usage.Exact)},
+		{{Kind: agent.EvText, Text: "What next?"}, done(10, 1, usage.Exact)},
+		{{Kind: agent.EvText, Text: reply}, done(20, 2, usage.Exact)},
+	}}
+	m.runAgent = fake.run
+	m.planner = m.newPlanner(filepath.FromSlash("/src/shop"), agent.Claude)
+	// An orchestration turn is the watched plan's.
+	m.planner.nextPlan, m.planner.nextKind = p.ID, usage.KindDecide
+	pump(t, m, m.send(m.planner, "news"))
+	pump(t, m, m.send(m.planner, "let's plan docs"))
+	pump(t, m, m.send(m.planner, "go"))
+	d := m.draft()
+	if d == nil {
+		t.Fatal("no draft plan")
+	}
+	if sum := m.usage.Plan(d.ID); sum.Turns != 2 || sum.Tokens.Total() != 33 {
+		t.Errorf("draft's usage = %+v, want both planning turns", sum)
+	}
+	if sum := m.usage.PlannerIn(p.ID); sum.Turns != 1 || sum.Tokens.Total() != 6 {
+		t.Errorf("watched plan's planner usage = %+v, want only the orchestration turn", sum)
+	}
+}
+
 // usagePlan gives m a running plan watched by the planner: a group with the
 // auth and cart worktrees, and an isolated task not started yet.
 func usagePlan(m *Model) *plan.Plan {
@@ -355,6 +386,8 @@ func TestUsageGroupAndPlanTotals(t *testing.T) {
 	m.planner = m.newPlanner(filepath.FromSlash("/src/shop"), agent.Claude)
 	pump(t, m, m.send(auth, "go"))
 	pump(t, m, m.send(cart, "go"))
+	// grove asks the watching planner about the plan (orchestrateOne).
+	m.planner.nextPlan, m.planner.nextKind = p.ID, usage.KindDecide
 	pump(t, m, m.send(m.planner, "how is it going?"))
 
 	a, c, pl := m.usage.Agent(auth.uid), m.usage.Agent(cart.uid), m.usage.Agent(m.planner.uid)
