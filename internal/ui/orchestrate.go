@@ -253,7 +253,7 @@ func (m *Model) queueTurn(s *session, again bool) tea.Cmd {
 		m.orch.queue = append(m.orch.queue, orchItem{kind: orchApproval, plan: p.ID, branch: t.Branch, lines: cmds, ids: ids, urgent: true, now: userToo})
 	case slices.ContainsFunc(s.pending, func(a pendingAction) bool { return a.kind == pendingApproval }):
 		// Only the user can answer what it waits on.
-	case t.Status == plan.Working && !s.failed && endsWithQuestion(reply):
+	case t.Status == plan.Working && !s.failed && looksLikeQuestion(reply):
 		if r := []rune(reply); len(r) > 2000 {
 			reply = "…" + string(r[len(r)-2000:])
 		}
