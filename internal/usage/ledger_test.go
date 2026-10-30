@@ -375,3 +375,71 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+func TestKinds(t *testing.T) {
+	dir := t.TempDir()
+	l := open(t, dir)
+	work := exact("a/1", "a", 100, 10)
+	work.Kind = KindWork
+	decide := exact("p/1", "p", 50, 5)
+	decide.Kind = KindDecide
+	wake := exact("a/2", "a", 20, 2)
+	wake.Kind = KindWake
+	for _, turn := range []Turn{work, decide, wake} {
+		add(t, l, turn)
+	}
+	// A line from before kinds, and one from a newer grove.
+	appendRaw(t, dir, `{"v":1,"turn":{"id":"old/1","agent":"old","tokens":{"input":7,"output":0},"status":"exact"}}`+"\n")
+	appendRaw(t, dir, `{"v":1,"turn":{"id":"new/1","agent":"new","tokens":{"input":3,"output":0},"status":"exact","kind":"later"}}`+"\n")
+
+	b, err := os.ReadFile(filepath.Join(dir, "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"kind":"work"`) {
+		t.Errorf("kind not written:\n%s", b)
+	}
+	// Left out when empty.
+	add(t, l, exact("x/1", "x", 1, 0))
+	b, err = os.ReadFile(filepath.Join(dir, "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if last := lines[len(lines)-1]; strings.Contains(last, "kind") {
+		t.Errorf("empty kind written: %s", last)
+	}
+
+	// Read back by a fresh ledger: old lines count as unknown, kinds from a
+	// newer grove come after the known ones.
+	var names []string
+	for _, k := range open(t, dir).ByKind() {
+		names = append(names, string(k.Kind)+"="+Compact(k.Sum.Tokens.Total()))
+	}
+	want := "work=110 wake=22 decide=55 unknown=8 later=3"
+	if got := strings.Join(names, " "); got != want {
+		t.Errorf("ByKind = %s, want %s", got, want)
+	}
+	if l.Skipped() != 0 {
+		t.Errorf("skipped %d lines", l.Skipped())
+	}
+}
+
+func TestShare(t *testing.T) {
+	whole := Sum{Tokens: Tokens{Input: 1000}, Turns: 2, Exact: 2}
+	part := Sum{Tokens: Tokens{Input: 333}, Turns: 1, Exact: 1}
+	if got := Share(part, whole); got != "33%" {
+		t.Errorf("Share = %q", got)
+	}
+	cut := whole
+	cut.Exact, cut.Partial = 1, 1
+	if got := Share(part, cut); got != "≈33%" {
+		t.Errorf("Share of an incomplete sum = %q", got)
+	}
+	if got := Share(Sum{Turns: 1, Unknown: 1}, whole); got != "?" {
+		t.Errorf("Share of nothing reported = %q", got)
+	}
+	if got := Share(part, Sum{}); got != "?" {
+		t.Errorf("Share of no tokens = %q", got)
+	}
+}

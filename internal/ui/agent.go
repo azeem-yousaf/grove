@@ -67,6 +67,11 @@ type session struct {
 	crewPlan, crewGroup string
 	crew                plannerState // its state as an orchestrator
 
+	// rulesKey of the orchestrating rules its conversation (id) last got.
+	rulesSent string
+	// A task's HEAD when the planner was last told it finished.
+	finishedHead string
+
 	// Token usage (usage.go).
 	uid      string       // grove's id for this agent in the usage ledger
 	created  time.Time    // when it was created
@@ -74,6 +79,7 @@ type session struct {
 	turnID   string       // the running turn, until it is recorded
 	turnAttr turnAttr     // what the running turn is for
 	nextPlan string       // the plan the planner's next turn is about, when grove asks it
+	nextKind usage.Kind   // why the next turn happens, when not the default (turnKind)
 	live     usage.Tokens // the running turn's usage so far; shown, not stored
 	liveSeen bool         // the agent has reported usage this turn
 	cutShort *runningTurn // the turn grove was closed during, until it is recorded
@@ -137,6 +143,14 @@ type pendingAction struct {
 	policy approvalPolicy // for approvals: whether only the user may answer, and why
 	left   bool           // the planner was asked and left it for the user
 	asked  int            // planner turns that were asked about it and didn't answer
+
+	// The worktree when an approval was asked (worktreeMark): HEAD and a
+	// fingerprint of its changed files. The first scan started after the
+	// card was made (seq > after) takes them again, since the snapshot
+	// can lag the agent's last edits; rebase says it hasn't yet.
+	head, files string
+	after       int
+	rebase      bool
 }
 
 type (
@@ -318,8 +332,14 @@ func (m *Model) openChat() tea.Cmd {
 	})
 }
 
+// newSession makes the agent for the worktree at path, on the model
+// [planner] task_model names when the worktree is a plan task's.
 func (m *Model) newSession(path, name string, k agent.Kind) *session {
-	s := &session{kind: k, path: path, name: name, model: m.cfg.AI.ModelFor(string(k)), touched: map[string]bool{}, seen: true, uid: newUID(), created: time.Now()}
+	model := m.cfg.AI.ModelFor(string(k))
+	if _, t := m.taskFor(path); t != nil {
+		model = m.roleModel(config.RoleTask, k)
+	}
+	s := &session{kind: k, path: path, name: name, model: model, touched: map[string]bool{}, seen: true, uid: newUID(), created: time.Now()}
 	m.sessions[path] = s
 	return s
 }
@@ -537,7 +557,8 @@ func (m *Model) onModelMenuKey(s *session, key string) tea.Cmd {
 }
 
 // setModel switches s to model from its next message, and remembers it for
-// new chats with the same agent, the way /model does in Claude Code.
+// new chats with the same agent, the way /model does in Claude Code. A
+// planner's has its own setting under [planner], so only that chat changes.
 func (m *Model) setModel(s *session, model string) tea.Cmd {
 	s.menu = nil
 	s.model = model
@@ -550,6 +571,9 @@ func (m *Model) setModel(s *session, model string) tea.Cmd {
 	}
 	s.entries = append(s.entries, chatEntry{roleNote, note + "."})
 	m.chatFollow = true
+	if s.planner {
+		return m.warm(s)
+	}
 	switch s.kind {
 	case agent.Claude:
 		m.cfg.AI.ClaudeModel = model
@@ -698,7 +722,7 @@ func (m *Model) agentRequest(s *session) agent.Request {
 		Kind:     s.kind,
 		Dir:      s.path,
 		Session:  s.id,
-		Allow:    append([]string(nil), s.allow...),
+		Allow:    m.allowFor(s),
 		Model:    s.model,
 		History:  append([]agent.Turn(nil), s.history...),
 		ReadOnly: s.planner,
@@ -807,6 +831,7 @@ func (m *Model) onAgentDone(s *session, ev agent.Event) tea.Cmd {
 	}
 	if ev.Err != nil {
 		s.failed = true
+		s.rulesSent = "" // the conversation may not have taken them in
 		s.entries = append(s.entries, chatEntry{roleError, ev.Err.Error()})
 	}
 	recordErr := m.endTurn(s, ev)

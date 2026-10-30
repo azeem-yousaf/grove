@@ -105,6 +105,12 @@ type Planner struct {
 	// plans it watches before it waits for the user to say something. 0 or
 	// less means the default, 20.
 	MaxDecisions int `toml:"max_decisions"`
+	// Settle is how long a chat must be quiet before grove wakes an agent
+	// for its messages, so a burst of messages costs one turn. The planner
+	// waits at most 5 s after the newest item it is sent. Nobody waits more
+	// than SettleMax for the oldest message. Unset means 15 s; 0 wakes at
+	// once.
+	Settle *Duration `toml:"settle"`
 	// Watcher is who watches a running plan's agents and answers them:
 	// "you", or "planner" for the planner to approve their commands, answer
 	// their questions and follow their group chats. Empty means ask before
@@ -121,6 +127,63 @@ type Planner struct {
 	// PullRequests has grove push a merged plan's branch and open a pull
 	// request into the plan's base once its tests pass. Unset means on.
 	PullRequests *bool `toml:"pull_requests"`
+	// Model, CrewModel and TaskModel are the models for the lead planner,
+	// the group planners of a plan it watches, and the task agents a plan
+	// starts. A name only applies to the agent it belongs to (see
+	// ModelAgent); empty, or a name for the other agent, uses [ai].
+	Model     string `toml:"model"`
+	CrewModel string `toml:"crew_model"`
+	TaskModel string `toml:"task_model"`
+}
+
+// Roles a plan's agents have, for Planner.ModelFor.
+const (
+	RoleLead = "lead"
+	RoleCrew = "crew"
+	RoleTask = "task"
+)
+
+// ModelFor is the model for role (RoleLead, RoleCrew or RoleTask) when it
+// runs agent ("claude" or "codex"), falling back to ai's.
+func (p Planner) ModelFor(role, agent string, ai AI) string {
+	v := map[string]string{RoleLead: p.Model, RoleCrew: p.CrewModel, RoleTask: p.TaskModel}[role]
+	if name, ok := modelFor(v, agent); ok {
+		return name
+	}
+	return ai.ModelFor(agent)
+}
+
+// modelFor is the model name in v for agent, and whether v names one for
+// it: an explicit "claude:" or "codex:" prefix, else ModelAgent.
+func modelFor(v, agent string) (string, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", false
+	}
+	if a, name, ok := strings.Cut(v, ":"); ok && (a == "claude" || a == "codex") {
+		name = strings.TrimSpace(name)
+		return name, a == agent && name != ""
+	}
+	a := ModelAgent(v)
+	return v, a == "" || a == agent
+}
+
+// ModelAgent is the agent a model name belongs to, "claude" or "codex", or
+// "" when the name doesn't tell.
+func ModelAgent(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "opus", "sonnet", "haiku", "fable", "opusplan", "default":
+		return "claude"
+	}
+	switch {
+	case strings.HasPrefix(n, "claude"), strings.HasPrefix(n, "opus["), strings.HasPrefix(n, "sonnet["):
+		return "claude"
+	case strings.HasPrefix(n, "gpt"), strings.HasPrefix(n, "codex"),
+		strings.HasPrefix(n, "o1"), strings.HasPrefix(n, "o3"), strings.HasPrefix(n, "o4"):
+		return "codex"
+	}
+	return ""
 }
 
 // OpenPRs is PullRequests with the default applied.
@@ -146,6 +209,24 @@ func (p Planner) Decisions() int {
 		return 20
 	}
 	return p.MaxDecisions
+}
+
+// SettleMax is the longest grove holds back a wake-up or a planner turn
+// while messages or items keep arriving.
+const SettleMax = 60 * time.Second
+
+// SettleDelay is Settle with the default applied.
+func (p Planner) SettleDelay() time.Duration {
+	if p.Settle == nil {
+		return 15 * time.Second
+	}
+	return max(p.Settle.Duration, 0)
+}
+
+// PlannerSettle is how long the planner's turn waits after the newest
+// queued item: SettleDelay, at most 5 s.
+func (p Planner) PlannerSettle() time.Duration {
+	return min(p.SettleDelay(), 5*time.Second)
 }
 
 // TestTimeout is TestMinutes with the default applied.
@@ -402,6 +483,11 @@ max_wakeups = 6
 # How many turns in a row a planner may take for a plan it watches without
 # the plan moving forward before it waits for you to say something.
 max_decisions = 20
+# How long a chat must be quiet before grove wakes an agent for its
+# messages, so a burst of messages costs one turn (the planner waits at
+# most 5s after the newest thing it is sent). Nobody waits more than a
+# minute. "0s" = wake at once.
+settle = "15s"
 # Who watches a running plan's agents and answers them: "you", or "planner"
 # to put the planner (and a planner per group) in charge: it approves their
 # commands (all but destructive git), answers their questions, helps the
@@ -420,6 +506,15 @@ test_minutes = 20
 # planner is in charge, it follows the pull request's reviews, and the plan
 # closes once the pull request is merged.
 pull_requests = true
+# Models for the planner, the planner of each group of a plan it watches,
+# and the task agents a plan starts. A Claude name or alias ("opus",
+# "sonnet", "haiku", claude-...) only applies when the agent is Claude, a
+# Codex one (gpt-..., o3, codex-...) only for Codex; "claude:" or "codex:"
+# in front makes that explicit. Empty = the model set for that agent under
+# ai above. /model in one of their chats changes only that chat.
+# model = "opus"
+# crew_model = "sonnet"
+# task_model = ""
 
 # What agents may do with git on their own. Routine git on their own
 # feature branch (commit, branch, merge, rebase of unpushed work, push of

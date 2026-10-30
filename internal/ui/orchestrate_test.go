@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/azeem-yousaf/grove/internal/agent"
@@ -84,6 +85,138 @@ func TestPlannerAnswersQuestionsAndIsAskedAgain(t *testing.T) {
 	}
 	if len(a.pending) != 0 {
 		t.Errorf("nothing should be left for the user: %+v", a.pending)
+	}
+}
+
+func TestPlannerBatchesItemsThatArriveTogether(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	p.Orchestrated = true
+	m.cfg.Planner.Settle = nil // the planner waits 5 s
+	m.classify = func(*session, string, string) approvalPolicy { return approvalPolicy{} }
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	deny := func(branch, cmd string, d time.Duration) {
+		m.now = t0.Add(d)
+		s := m.sessionFor(m.taskPath(p, branch))
+		s.running = true
+		pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone, Denied: []agent.Denial{{Tool: "Bash", Detail: cmd}}}))
+	}
+	deny("feature/a", "npm test", 0)
+	deny("feature/b", "npm run lint", 2*time.Second)
+	m.now = t0.Add(6 * time.Second)
+	pump(t, m, m.orchestrate())
+	if len(fake.reqs) != 0 {
+		t.Fatalf("the planner should wait 5 s after the newest item: %d requests", len(fake.reqs))
+	}
+	fake.turns = [][]agent.Event{plannerSays(`{"approve": [{"branch": "feature/a", "command": "npm test"}, {"branch": "feature/b", "command": "npm run lint"}]}`)}
+	m.now = t0.Add(7 * time.Second)
+	pump(t, m, m.orchestrate())
+	if len(fake.reqs) == 0 || !fake.reqs[0].ReadOnly || !strings.Contains(fake.reqs[0].Message, "`npm test`") || !strings.Contains(fake.reqs[0].Message, "`npm run lint`") {
+		t.Fatalf("one planner turn should cover both: %+v", fake.reqs)
+	}
+	if n := len(slices.DeleteFunc(slices.Clone(fake.reqs), func(r agent.Request) bool { return !r.ReadOnly })); n != 1 {
+		t.Errorf("%d planner turns, want 1", n)
+	}
+}
+
+func TestUserPostReachesThePlannerAtOnce(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	p.Orchestrated = true
+	m.cfg.Planner.Settle = nil
+	m.now = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	log, _ := m.groupLog(p, plan.ChatID)
+	read := func() {
+		m.pollingGroups = false
+		_, cmd := m.Update(m.pollGroups()())
+		pump(t, m, cmd)
+	}
+	read() // the first read is history
+	fake.turns = [][]agent.Event{plannerSays(`{}`)}
+	log.Post(group.Message{From: group.User, Text: "Please keep the old API too."})
+	read()
+	if len(fake.reqs) != 1 || !fake.reqs[0].ReadOnly || !strings.Contains(fake.reqs[0].Message, "Please keep the old API too.") {
+		t.Fatalf("the user's post should reach the planner without waiting: %+v", fake.reqs)
+	}
+}
+
+// A task whose turn ends without finishing or asking goes to the planner
+// with its next turn, or on its own after idleWait.
+func TestPlannerHearsAboutIdleTasks(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	p.Orchestrated = true
+	m.now = time.Now()
+	s := m.sessionFor(m.taskPath(p, "feature/a"))
+	// A suggested command waits, so the task stays working.
+	s.pending = []pendingAction{{kind: pendingCommand, text: "make deploy"}}
+	s.lastReply.WriteString("Run make deploy for me.")
+	s.running = true
+	pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone}))
+	if len(fake.reqs) != 0 || len(m.orch.queue) != 1 || m.orch.queue[0].kind != orchIdle || m.orch.queue[0].urgent {
+		t.Fatalf("want one waiting idle item and no planner turn, got %d requests, queue %+v", len(fake.reqs), m.orch.queue)
+	}
+	// A second idle turn doesn't add another.
+	s.running = true
+	pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone}))
+	if len(m.orch.queue) != 1 {
+		t.Fatalf("queue %+v", m.orch.queue)
+	}
+
+	m.now = m.now.Add(idleWait - time.Second)
+	pump(t, m, m.idleTick())
+	if len(fake.reqs) != 0 {
+		t.Fatal("it should wait idleWait")
+	}
+	m.now = m.now.Add(time.Second)
+	pump(t, m, m.idleTick())
+	if len(fake.reqs) != 1 || !strings.Contains(fake.reqs[0].Message, "feature/a (task \"Work on feature/a\") ended its turn without finishing") ||
+		!strings.Contains(fake.reqs[0].Message, "> Run make deploy for me.") {
+		t.Fatalf("planner requests: %+v", fake.reqs)
+	}
+	if len(m.orch.queue) != 0 {
+		t.Errorf("queue left %+v", m.orch.queue)
+	}
+}
+
+// A finished task that finishes again without a new commit isn't checked
+// again; once its HEAD moves, it is.
+func TestFinishedAgainNeedsANewCommit(t *testing.T) {
+	m, p, fake := groupedPlan(t)
+	p.Orchestrated = true
+	s := m.sessionFor(m.taskPath(p, "feature/a"))
+	finish := func() {
+		t.Helper()
+		s.running = true
+		s.lastReply.Reset()
+		s.lastReply.WriteString("Done.")
+		pump(t, m, m.onAgentDone(s, agent.Event{Kind: agent.EvDone}))
+	}
+	checks := func() int {
+		n := 0
+		for _, r := range fake.reqs {
+			if strings.Contains(r.Message, "feature/a (task \"Work on feature/a\") says it is done") {
+				n++
+			}
+		}
+		return n
+	}
+	finish()
+	if _, task := m.taskFor(s.path); task.Status != plan.Finished || checks() != 1 || s.finishedHead == "" {
+		t.Fatalf("status %v, checks %d, head %q", task.Status, checks(), s.finishedHead)
+	}
+	if r := restore(s.saved(), true, true); r.finishedHead != s.finishedHead {
+		t.Errorf("restored head %q, want %q", r.finishedHead, s.finishedHead)
+	}
+
+	// Woken again (a group message), it says it's done with nothing new.
+	finish()
+	if checks() != 1 {
+		t.Fatalf("checked %d times without a new commit", checks())
+	}
+
+	// A new commit is news.
+	gitOut(t, s.path, "commit", "--allow-empty", "-qm", "more")
+	finish()
+	if checks() != 2 {
+		t.Fatalf("checked %d times after a new commit", checks())
 	}
 }
 
