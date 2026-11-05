@@ -159,6 +159,7 @@ func (m *Model) plannerContext() string {
 		}
 		b.WriteString("\n## Existing branches\n\n" + strings.Join(names, ", ") + "\n")
 	}
+	b.WriteString(m.plansInCharge())
 	b.WriteString("\n## Writing the plan\n\nWhen you are ready, write the whole plan as one fenced code block whose language is grove-plan, containing JSON:\n\n")
 	b.WriteString("```grove-plan\n" + `{
   "title": "Guest checkout",
@@ -174,6 +175,43 @@ func (m *Model) plannerContext() string {
 		"as the repository's own scripts or CI run it; leave it out if you can't tell. ")
 	b.WriteString("Leave \"group\" out for isolated tasks. A group's \"icon\" is optional: one emoji shown next to its name. Outside the block, say in a sentence or two how you split the work. " +
 		"The user reviews and edits the plan in grove before anything is created; if they ask for changes, write the whole plan again.\n")
+	return b.String()
+}
+
+// plansInCharge describes the plans the planner watches, for a conversation
+// that starts while it runs them (the first, or one after /clear), which
+// otherwise knows nothing about them. "" when it watches none.
+func (m *Model) plansInCharge() string {
+	var b strings.Builder
+	for _, p := range m.plans {
+		if !orchestrated(p) {
+			continue
+		}
+		if b.Len() == 0 {
+			b.WriteString("\n## Plans you are in charge of\n\n" +
+				"The user put you in charge of these plans' agents and only reviews the pull request at the end. " +
+				"Each group has its own planner for its tasks and chat; you run the rest, merge the plan and close it. " +
+				"grove will ask you when something needs deciding; the tasks tool has each task's latest state.\n")
+		}
+		fmt.Fprintf(&b, "\n### %q (id %s), %s\n\n", p.Title, p.ID, p.Status)
+		if p.Merge != nil {
+			fmt.Fprintf(&b, "Merged into branch %s", p.Merge.Branch)
+			if p.Merge.Path != "" {
+				fmt.Fprintf(&b, " at %s", p.Merge.Path)
+			}
+			if p.Merge.PR != "" {
+				fmt.Fprintf(&b, ", pull request %s", p.Merge.PR)
+			}
+			b.WriteString(".\n\n")
+		}
+		for _, t := range p.Tasks {
+			group := ""
+			if g, ok := p.Group(t.Group); ok {
+				group = ", group " + g.Name
+			}
+			fmt.Fprintf(&b, "- %s: branch %s, %s%s\n", t.Title, t.Branch, t.Status, group)
+		}
+	}
 	return b.String()
 }
 

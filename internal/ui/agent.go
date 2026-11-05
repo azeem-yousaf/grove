@@ -509,12 +509,10 @@ func (m *Model) clearRefusal(s *session) string {
 	switch {
 	case s.side:
 		return "A side turn's chat can't be cleared"
-	case s.crewGroup != "":
-		return "Clearing a group's planner would make it forget the plan it is running"
-	case s.planner && m.orchestrating():
-		return "Clearing the planner would make it forget the plan it is running"
 	case s.running:
 		return "Stop the agent first (ctrl+x)"
+	case s.planner && m.sides[sideKey(s.crewKey())] != nil && m.sides[sideKey(s.crewKey())].running:
+		return "Wait for the planner's side turn to finish"
 	}
 	return ""
 }
@@ -523,8 +521,10 @@ func (m *Model) clearRefusal(s *session) string {
 // conversation, the way switching agents does: no provider session, history,
 // cards, queue, notes or approvals carry over. A worktree agent keeps its
 // checkpoint, so undo still reaches back to before its first turn, and its
-// task, which the next turn's briefing gives it again. Its usage stays in
-// the ledger under the old conversation; the new one gets a new uid.
+// task, which the next turn's briefing gives it again. A planner keeps its
+// place in the plans it runs (its group, its plannerState), and its next
+// briefing describes them, so only the conversation is forgotten. Its usage
+// stays in the ledger under the old conversation; the new one gets a new uid.
 func (m *Model) clearChat(s *session) tea.Cmd {
 	if why := m.clearRefusal(s); why != "" {
 		return m.notify(why, toastInfo)
@@ -535,9 +535,14 @@ func (m *Model) clearChat(s *session) tea.Cmd {
 	proc := s.path
 	if s.planner {
 		ns = m.newPlanner(s.path, s.kind)
-		// Drafting turns not yet given to a plan go to the next one.
-		ns.drafting, s.drafting = s.drafting, nil
-		m.planner = ns
+		ns.name, ns.crewPlan, ns.crewGroup, ns.crew = s.name, s.crewPlan, s.crewGroup, s.crew
+		if s.crewGroup != "" {
+			m.crews[ns.crewKey()] = ns
+		} else {
+			// Drafting turns not yet given to a plan go to the next one.
+			ns.drafting, s.drafting = s.drafting, nil
+			m.planner = ns
+		}
 		proc = agent.ReadOnlyKey(s.path, s.slot())
 	} else {
 		ns = m.newSession(s.path, s.name, s.kind)
@@ -545,6 +550,9 @@ func (m *Model) clearChat(s *session) tea.Cmd {
 	}
 	ns.model = s.model
 	ns.entries = []chatEntry{{roleNote, "Chat cleared. The agent starts a new conversation."}}
+	if s.crewGroup != "" || s.planner && m.orchestrating() {
+		ns.entries[0].text = "Chat cleared. The planner starts a new conversation, briefed again on the plan it runs."
+	}
 	delete(m.savedJSON, s.file()) // rewritten without the old conversation
 	m.chatSel = chatSelection{}
 	m.chatFollow = true

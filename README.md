@@ -202,6 +202,11 @@ use; tick *Remember my choice* (off by default) to stop it asking
   Code uses whatever `/model` is set to in Claude Code itself. Your choice
   applies from the next message and is remembered for new chats
   (`[ai] claude_model` / `codex_model` in the config).
+- **Starting over.** `/clear` empties the chat and makes the agent forget
+  it: your next message starts a new conversation. Undo and token usage
+  stay; approved commands don't. Stop a working agent (`ctrl+x`) first. It works in
+  a planner's chat too, even while it runs a plan: the planner forgets the
+  conversation but not the plan, and is briefed on it again.
 - **Typing and copying.** The message box grows as you type or paste
   (`ctrl+v`, or your terminal's own paste) and keeps pasted line breaks;
   `enter` sends, `shift+enter` (or `ctrl+j`) starts a new line. `ctrl+y`

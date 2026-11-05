@@ -156,15 +156,6 @@ func TestClearPlannerChat(t *testing.T) {
 	m.planner = old
 	pump(t, m, m.showChat(old))
 
-	// Not while it watches a plan.
-	m.plans = []*plan.Plan{{ID: "p1", Title: "Shop", Status: plan.Running, Orchestrated: true}}
-	enterChat(t, m, "/clear")
-	if m.planner != old || !strings.Contains(m.toast.text, "forget the plan") {
-		t.Errorf("watching planner cleared, toast %q", m.toast.text)
-	}
-
-	// A plan it doesn't watch doesn't stop it.
-	m.plans[0].Orchestrated = false
 	enterChat(t, m, "/clear")
 	s := m.planner
 	if s == old || !s.planner || s.id != "" || s.uid == old.uid || s.model != "haiku" || m.chatSession() != s {
@@ -176,15 +167,70 @@ func TestClearPlannerChat(t *testing.T) {
 	if strings.Contains(plain(m), "Here's a plan.") {
 		t.Error("the old chat should be gone")
 	}
+}
 
-	// A group's planner never.
-	p := &plan.Plan{ID: "p2", Title: "Cart", Status: plan.Running, Orchestrated: true, Agent: "claude", Groups: []plan.Group{{ID: "g", Name: "Checkout"}}}
-	m.plans = append(m.plans, p)
-	crew := m.plannerFor("p2", "g")
-	pump(t, m, m.showChat(crew))
+// A planner running a plan forgets its conversation, not the plan: it keeps
+// its place, and its next turn is briefed on the plan again.
+func TestClearWatchingPlanner(t *testing.T) {
+	m := fakeModel(t, 140, 36)
+	fa := &fakeAgent{}
+	m.runAgent = fa.run
+	m.stopAgent = func(string) {}
+	shop := filepath.FromSlash("/src/shop")
+	p := &plan.Plan{ID: "p1", Title: "Cart", Status: plan.Running, Orchestrated: true, Agent: "claude",
+		Groups: []plan.Group{{ID: "g", Name: "Checkout"}},
+		Tasks: []plan.Task{
+			{Title: "Cart API", Branch: "feature/cart-api", Group: "g", Status: plan.Working},
+			{Title: "Docs", Branch: "docs/cart", Status: plan.Finished},
+		}}
+	m.plans = []*plan.Plan{p}
+
+	old := m.newPlanner(shop, agent.Claude)
+	old.id = "s1"
+	old.entries = []chatEntry{{roleAgent, "Approved go test."}}
+	m.planner = old
+	m.orch.turns = 3
+	pump(t, m, m.showChat(old))
 	enterChat(t, m, "/clear")
-	if m.crews[crew.crewKey()] != crew || !strings.Contains(m.toast.text, "forget the plan") {
-		t.Errorf("group planner cleared, toast %q", m.toast.text)
+	s := m.planner
+	if s == old || s.id != "" || m.orch.turns != 3 || !strings.Contains(s.entries[0].text, "briefed again on the plan") {
+		t.Fatalf("lead after /clear: id=%q turns=%d entries=%+v", s.id, m.orch.turns, s.entries)
+	}
+	enterChat(t, m, "where are we?")
+	ctx := fa.reqs[len(fa.reqs)-1].Context
+	for _, want := range []string{"Plans you are in charge of", `"Cart" (id p1), running`, "Cart API: branch feature/cart-api, working, group Checkout", "Docs: branch docs/cart, finished"} {
+		if !strings.Contains(ctx, want) {
+			t.Errorf("lead's briefing lacks %q:\n%s", want, ctx)
+		}
+	}
+
+	// A group's planner too, keeping its group and its state.
+	crew := m.plannerFor("p1", "g")
+	crew.id, crew.crew.turns = "s2", 2
+	crew.entries = []chatEntry{{roleAgent, "Told the API agent."}}
+	pump(t, m, m.showChat(crew))
+
+	// Not while its side turn still works in a fork of the conversation.
+	side := &session{side: true, planner: true, running: true}
+	m.sides[sideKey(crew.crewKey())] = side
+	enterChat(t, m, "/clear")
+	if m.crews[crew.crewKey()] != crew || !strings.Contains(m.toast.text, "side turn") {
+		t.Fatalf("cleared during a side turn, toast %q", m.toast.text)
+	}
+	side.running = false
+
+	enterChat(t, m, "/clear")
+	ns := m.crews[crew.crewKey()]
+	if ns == crew || ns.id != "" || ns.crewPlan != "p1" || ns.crewGroup != "g" || ns.crew.turns != 2 || ns.name != crew.name || m.chatSession() != ns {
+		t.Fatalf("group planner after /clear: %+v", ns)
+	}
+	if strings.Contains(plain(m), "Told the API agent.") {
+		t.Error("the old chat should be gone")
+	}
+	enterChat(t, m, "status?")
+	ctx = fa.reqs[len(fa.reqs)-1].Context
+	if !strings.Contains(ctx, `planner in charge of the group "Checkout"`) || !strings.Contains(ctx, "Cart API: branch feature/cart-api, working") {
+		t.Errorf("group planner's briefing:\n%s", ctx)
 	}
 }
 

@@ -157,7 +157,7 @@ func (m *Model) crewContext(s *session) string {
 		if t.Group != s.crewGroup {
 			continue
 		}
-		fmt.Fprintf(&b, "- %s: branch %s, worktree %s\n  Brief: %s\n", t.Title, t.Branch, cmp.Or(t.Path, "not created yet"), quoteText(t.Brief))
+		fmt.Fprintf(&b, "- %s: branch %s, %s, worktree %s\n  Brief: %s\n", t.Title, t.Branch, t.Status, cmp.Or(t.Path, "not created yet"), quoteText(t.Brief))
 	}
 	b.WriteString("\nRules:\n")
 	fmt.Fprintf(&b, "- You read the repository in %s and the group's worktrees, and you may run shell commands there for the agents, but you never edit files yourself; the agents do.\n", s.path)
